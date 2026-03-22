@@ -8,23 +8,32 @@ export function Overview() {
   const [recentSessions, setRecentSessions] = useState([]);
   const [recentEvents, setRecentEvents] = useState([]);
 
+  const [dataReady, setDataReady] = useState(false);
+
   useEffect(() => {
-    fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {});
-    fetch('/api/health').then(r => r.json()).then(h => {
-      // Also check DB-stored providers (added via dashboard).
-      fetch('/api/providers').then(r => r.json()).then(dbProviders => {
+    // Load all data in parallel, mark ready only when all complete.
+    // This prevents the setup wizard from flashing during partial load.
+    Promise.all([
+      fetch('/api/status').then(r => r.json()).catch(() => null),
+      fetch('/api/health').then(r => r.json()).catch(() => null),
+      fetch('/api/providers').then(r => r.json()).catch(() => []),
+      rpc('sessions.list', { limit: 5 }).catch(() => []),
+    ]).then(([statusData, healthData, dbProviders, sessions]) => {
+      if (statusData) setStatus(statusData);
+      if (healthData) {
+        // Merge DB providers into health map.
         if (Array.isArray(dbProviders) && dbProviders.length > 0) {
-          // Merge DB providers into health map.
-          const merged = { ...h.providers };
+          const merged = { ...healthData.providers };
           dbProviders.forEach(p => {
             if (p.status === 'active') merged[p.type] = 'connected';
           });
-          h.providers = merged;
+          healthData.providers = merged;
         }
-        setHealth(h);
-      }).catch(() => setHealth(h));
-    }).catch(() => {});
-    rpc('sessions.list', { limit: 5 }).then(data => setRecentSessions(data || [])).catch(() => {});
+        setHealth(healthData);
+      }
+      setRecentSessions(sessions || []);
+      setDataReady(true);
+    });
 
     const unsub = subscribeEvents(event => {
       setRecentEvents(prev => [event, ...prev.slice(0, 9)]);
@@ -75,8 +84,8 @@ export function Overview() {
         )}
       </div>
 
-      {/* Setup wizard */}
-      {!setupComplete && status && (
+      {/* Setup wizard — only show after all data loaded to prevent flash */}
+      {dataReady && !setupComplete && status && (
         <div class="card" style="padding:20px;margin-bottom:24px;border-color:var(--primary);border-width:2px">
           <h2 style="font-size:16px;margin-bottom:4px">Getting Started</h2>
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
@@ -165,9 +174,12 @@ export function Overview() {
             recentSessions.map(s => (
               <a key={s.id} href={`/sessions/${s.id}`} style="text-decoration:none">
                 <div class="card clickable" style="padding:10px 14px">
-                  <div style="display:flex;justify-content:space-between">
-                    <span style="font-family:var(--mono);font-size:12px;color:var(--text)">{s.id?.slice(0, 8)}</span>
-                    <span class="badge badge-gray">{s.channel}</span>
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span style="font-size:13px;color:var(--text);font-weight:500">{s.label || s.id?.slice(0, 8)}</span>
+                    <div style="display:flex;gap:6px;align-items:center">
+                      <span class="badge badge-gray">{s.channel}</span>
+                      {s.message_count > 0 && <span style="font-size:11px;color:var(--text-muted)">{s.message_count} msgs</span>}
+                    </div>
                   </div>
                   <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
                     {s.agent_id} · {s.updated_at?.slice(11, 19)}

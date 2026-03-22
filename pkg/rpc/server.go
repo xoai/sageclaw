@@ -436,14 +436,141 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		return s.memoryList(ctx, req.Params)
 	case "chat.send":
 		return s.chatSend(ctx, req.Params)
+	case "session.continue":
+		return s.sessionContinue(ctx, req.Params)
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
 }
 
+// sessionContinue creates a new web session with context from a source session.
+// This is the "Continue here" handoff — user sees a Telegram session in the
+// dashboard and wants to continue that conversation in the web UI.
+func (s *Server) sessionContinue(ctx context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		SourceSessionID string `json:"source_session_id"`
+		AgentID         string `json:"agent_id"`
+	}
+	json.Unmarshal(params, &p)
+	if p.SourceSessionID == "" {
+		return nil, fmt.Errorf("source_session_id required")
+	}
+
+	// Load source session.
+	source, err := s.store.GetSession(ctx, p.SourceSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("source session not found: %w", err)
+	}
+	if p.AgentID == "" {
+		p.AgentID = source.AgentID
+	}
+
+	// Load source messages (last 50).
+	allMsgs, err := s.store.GetMessages(ctx, p.SourceSessionID, 50)
+	if err != nil {
+		return nil, fmt.Errorf("loading messages: %w", err)
+	}
+
+	// Walk backwards collecting complete turns (user + assistant + tool pairs).
+	// Stop at 10 turns or 20 messages.
+	var contextMsgs []canonical.Message
+	turnCount := 0
+	for i := len(allMsgs) - 1; i >= 0 && turnCount < 10 && len(contextMsgs) < 20; i-- {
+		contextMsgs = append([]canonical.Message{allMsgs[i]}, contextMsgs...)
+		if allMsgs[i].Role == "user" {
+			turnCount++
+		}
+	}
+
+	// Ensure we don't break tool_use/tool_result pairs.
+	// Walk forward from the start of contextMsgs — if first message is a
+	// tool_result without a preceding tool_use, remove it.
+	for len(contextMsgs) > 0 {
+		hasOrphanResult := false
+		for _, c := range contextMsgs[0].Content {
+			if c.ToolResult != nil {
+				hasOrphanResult = true
+				break
+			}
+		}
+		if hasOrphanResult {
+			contextMsgs = contextMsgs[1:]
+		} else {
+			break
+		}
+	}
+
+	// Create new web session with timestamp suffix.
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	chatID := "owner:" + ts
+
+	newSession, err := s.store.CreateSessionWithKind(ctx, "web", chatID, p.AgentID, "direct")
+	if err != nil {
+		return nil, fmt.Errorf("creating web session: %w", err)
+	}
+
+	// Update label to indicate it's a continuation.
+	s.store.DB().ExecContext(ctx,
+		`UPDATE sessions SET label = ?, spawned_by = ? WHERE id = ?`,
+		fmt.Sprintf("Continued from %s", source.Channel), p.SourceSessionID, newSession.ID)
+
+	// Copy context messages into the new session.
+	if len(contextMsgs) > 0 {
+		// Add a context summary message first.
+		summaryMsg := canonical.Message{
+			Role: "assistant",
+			Content: []canonical.Content{{
+				Type: "text",
+				Text: fmt.Sprintf("[Context from %s session — %d messages copied]\n\nContinuing the conversation here.",
+					source.Channel, len(contextMsgs)),
+			}},
+		}
+		allCopy := append([]canonical.Message{summaryMsg}, contextMsgs...)
+		s.store.AppendMessages(ctx, newSession.ID, allCopy)
+	}
+
+	return map[string]any{
+		"session_id": newSession.ID,
+		"agent_id":   p.AgentID,
+		"messages":   len(contextMsgs),
+		"source":     source.Channel,
+	}, nil
+}
+
 func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any, error) {
-	rows, err := s.store.DB().QueryContext(ctx,
-		`SELECT id, channel, chat_id, agent_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 20`)
+	var p struct {
+		AgentID string `json:"agent_id"`
+		Channel string `json:"channel"`
+		Status  string `json:"status"`
+		Limit   int    `json:"limit"`
+	}
+	json.Unmarshal(params, &p)
+	if p.Limit <= 0 {
+		p.Limit = 50
+	}
+
+	query := `SELECT id, COALESCE(key,''), channel, chat_id, agent_id, kind, COALESCE(label,''),
+		status, COALESCE(model,''), COALESCE(provider,''), input_tokens, output_tokens,
+		compaction_count, message_count, created_at, updated_at
+	 FROM sessions WHERE 1=1`
+	var args []any
+
+	if p.AgentID != "" {
+		query += ` AND agent_id = ?`
+		args = append(args, p.AgentID)
+	}
+	if p.Channel != "" {
+		query += ` AND channel = ?`
+		args = append(args, p.Channel)
+	}
+	if p.Status != "" {
+		query += ` AND status = ?`
+		args = append(args, p.Status)
+	}
+	query += ` ORDER BY updated_at DESC LIMIT ?`
+	args = append(args, p.Limit)
+
+	rows, err := s.store.DB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -451,12 +578,23 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 
 	var sessions []map[string]any
 	for rows.Next() {
-		var id, channel, chatID, agentID, createdAt, updatedAt string
-		rows.Scan(&id, &channel, &chatID, &agentID, &createdAt, &updatedAt)
+		var id, key, channel, chatID, agentID, kind, label, status, model, provider, createdAt, updatedAt string
+		var inputTokens, outputTokens int64
+		var compactionCount, messageCount int
+		rows.Scan(&id, &key, &channel, &chatID, &agentID, &kind, &label,
+			&status, &model, &provider, &inputTokens, &outputTokens,
+			&compactionCount, &messageCount, &createdAt, &updatedAt)
 		sessions = append(sessions, map[string]any{
-			"id": id, "channel": channel, "chat_id": chatID,
-			"agent_id": agentID, "created_at": createdAt, "updated_at": updatedAt,
+			"id": id, "key": key, "channel": channel, "chat_id": chatID,
+			"agent_id": agentID, "kind": kind, "label": label, "status": status,
+			"model": model, "provider": provider,
+			"input_tokens": inputTokens, "output_tokens": outputTokens,
+			"compaction_count": compactionCount, "message_count": messageCount,
+			"created_at": createdAt, "updated_at": updatedAt,
 		})
+	}
+	if sessions == nil {
+		sessions = []map[string]any{}
 	}
 	return sessions, nil
 }

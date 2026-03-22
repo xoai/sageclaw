@@ -8,13 +8,29 @@ import (
 
 // Session represents a conversation session.
 type Session struct {
-	ID        string
-	Channel   string
-	ChatID    string
-	AgentID   string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Metadata  map[string]string
+	ID              string
+	Key             string // Composite: {agentID}:{channel}:{kind}:{chatID}
+	Channel         string
+	ChatID          string
+	AgentID         string
+	Kind            string // direct, subagent, cron
+	Label           string
+	Status          string // active, archived, compacted
+	Model           string
+	Provider        string
+	SpawnedBy       string // Parent session ID (for subagents)
+	InputTokens     int64
+	OutputTokens    int64
+	CompactionCount int
+	MessageCount    int
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	Metadata        map[string]string
+}
+
+// SessionKey builds a composite session key.
+func SessionKey(agentID, channel, kind, chatID string) string {
+	return agentID + ":" + channel + ":" + kind + ":" + chatID
 }
 
 // Memory represents a stored memory entry.

@@ -11,8 +11,11 @@ import (
 // SessionStore manages conversation sessions and messages.
 type SessionStore interface {
 	CreateSession(ctx context.Context, channel, chatID, agentID string) (*Session, error)
+	CreateSessionWithKind(ctx context.Context, channel, chatID, agentID, kind string) (*Session, error)
 	GetSession(ctx context.Context, id string) (*Session, error)
 	FindSession(ctx context.Context, channel, chatID string) (*Session, error)
+	FindSessionByKey(ctx context.Context, key string) (*Session, error)
+	UpdateSessionTokens(ctx context.Context, sessionID string, inputTokens, outputTokens int64, model, provider string) error
 	AppendMessages(ctx context.Context, sessionID string, msgs []canonical.Message) error
 	GetMessages(ctx context.Context, sessionID string, limit int) ([]canonical.Message, error)
 }

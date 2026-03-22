@@ -16,13 +16,11 @@ Build AI agents that remember what they learned, work together when the job is t
 
 Most agent frameworks treat every conversation as a blank slate. SageClaw doesn't.
 
-**Agents that learn and remember.** Persistent memory with full-text search, BM25 ranking, and a knowledge graph. When you correct your agent, the lesson becomes a prevention rule — injected automatically in every future session. Your agent doesn't just execute. It compounds experience.
+**Learn.** Persistent memory with full-text search, BM25 ranking, and a knowledge graph. When you correct your agent, the lesson becomes a prevention rule — injected automatically in every future session. Your agent doesn't just execute. It compounds experience across every conversation, every channel, every session.
 
-**Quality through orchestration.** A coordinator breaks down complex problems, delegates to specialists, monitors a shared task board, and synthesizes the best result. Four patterns — delegation, teams, handoff, and evaluate loops — ensure work isn't just distributed, it's validated.
+**Orchestrate.** One agent handles simple tasks. For complex work, a coordinator breaks down the problem, delegates to specialists, monitors a shared task board, and synthesizes the best result. Four patterns — delegation, teams, handoff, and evaluate loops — ensure work isn't just distributed, it's validated. Quality isn't optional, it's architectural.
 
-**Secure and private by design.** Your data stays on your machine — encrypted at rest, sandboxed at runtime. Channel pairing verifies who can talk to your agent. Five-layer prompt injection protection guards against external manipulation. No cloud accounts. No telemetry. No exceptions.
-
-**Fast, light, and yours to own.** 14MB binary. Sub-second startup. 7 direct dependencies. Every package in `pkg/`, nothing hidden. You can read the entire agent loop in one sitting, trace any request from channel to response, and extend any layer without forking.
+**Own.** Your data stays on your machine — encrypted at rest, sandboxed at runtime, private by default. Channel pairing verifies who can talk to your agent. Five-layer prompt injection protection guards against external manipulation. 14MB binary. Sub-second startup. 10 dependencies. Every package in `pkg/`, nothing hidden. No cloud accounts. No telemetry. No exceptions. You own the code, the data, and the experience.
 
 ## Quick Start
 

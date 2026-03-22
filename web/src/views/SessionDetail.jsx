@@ -1,12 +1,21 @@
 import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
+import { route } from 'preact-router';
 import { rpc } from '../api';
+
+const formatTokens = (n) => {
+  if (!n || n === 0) return '-';
+  if (n > 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n > 1000) return (n / 1000).toFixed(1) + 'K';
+  return n.toString();
+};
 
 export function SessionDetail({ id }) {
   const [messages, setMessages] = useState([]);
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showToolDetails, setShowToolDetails] = useState({});
+  const [continuing, setContinuing] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -25,11 +34,27 @@ export function SessionDetail({ id }) {
     setShowToolDetails(prev => ({ ...prev, [idx]: !prev[idx] }));
   };
 
+  const continueHere = async () => {
+    setContinuing(true);
+    try {
+      const result = await rpc('session.continue', {
+        source_session_id: id,
+        agent_id: session?.agent_id || '',
+      });
+      if (result?.session_id) {
+        route(`/chat?session=${result.session_id}`);
+      }
+    } catch (err) {
+      alert('Failed to continue: ' + err.message);
+    }
+    setContinuing(false);
+  };
+
   if (loading) return <div class="empty">Loading...</div>;
 
   const formatTime = (ts) => {
     if (!ts) return '';
-    return ts.slice(11, 19); // HH:MM:SS
+    return ts.slice(11, 19);
   };
 
   return (
@@ -38,19 +63,37 @@ export function SessionDetail({ id }) {
         <a href="/sessions" style="font-size:13px;color:var(--text-muted)">← Sessions</a>
       </div>
 
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <h1 style="margin-bottom:0">
-          Session {id?.slice(0, 8)}
-          {session && (
-            <span style="font-size:13px;color:var(--text-muted);margin-left:12px">
-              {session.channel} · {session.agent_id}
-            </span>
-          )}
+          {session?.label || `Session ${id?.slice(0, 8)}`}
+          <span style="font-size:13px;color:var(--text-muted);margin-left:12px">
+            {session?.channel} · {session?.agent_id}
+          </span>
         </h1>
-        <div style="font-size:12px;color:var(--text-muted)">
-          {messages.length} messages
+        <div style="display:flex;gap:8px;align-items:center">
+          {session?.channel !== 'web' && (
+            <button class="btn-primary" onClick={continueHere} disabled={continuing}>
+              {continuing ? 'Creating...' : 'Continue here'}
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Session metadata bar */}
+      {session && (
+        <div style="display:flex;gap:16px;margin-bottom:20px;font-size:12px;color:var(--text-muted);flex-wrap:wrap">
+          <span>{messages.length} messages</span>
+          {session.model && <span>Model: {session.model}</span>}
+          {(session.input_tokens > 0 || session.output_tokens > 0) && (
+            <span>Tokens: {formatTokens(session.input_tokens)} in / {formatTokens(session.output_tokens)} out</span>
+          )}
+          {session.compaction_count > 0 && (
+            <span style="color:var(--warning)">Compacted {session.compaction_count}x</span>
+          )}
+          <span>Status: {session.status || 'active'}</span>
+          {session.spawned_by && <span>Continued from: {session.spawned_by.slice(0, 8)}</span>}
+        </div>
+      )}
 
       {messages.length === 0 ? (
         <div class="empty">No messages in this session.</div>
@@ -58,7 +101,6 @@ export function SessionDetail({ id }) {
         <div class="chat-messages" style="max-height:none;padding-bottom:24px">
           {messages.map((msg, i) => {
             const isUser = msg.role === 'user';
-            const isAssistant = msg.role === 'assistant';
             const contents = msg.content || [];
             const textParts = contents.filter(c => c.type === 'text' && c.text);
             const toolCalls = contents.filter(c => c.type === 'tool_call' || c.type === 'tool_use');
@@ -66,7 +108,6 @@ export function SessionDetail({ id }) {
 
             return (
               <div key={i}>
-                {/* Text content */}
                 {textParts.length > 0 && (
                   <div class={`message ${msg.role}`}>
                     <div class="message-role">{msg.role}</div>
@@ -81,7 +122,6 @@ export function SessionDetail({ id }) {
                   </div>
                 )}
 
-                {/* Tool calls */}
                 {toolCalls.length > 0 && (
                   <div style="margin:0 0 16px 0;max-width:80%">
                     {toolCalls.map((tc, j) => {
@@ -106,7 +146,6 @@ export function SessionDetail({ id }) {
                   </div>
                 )}
 
-                {/* Tool results */}
                 {toolResults.length > 0 && (
                   <div style="margin:0 0 16px 0;max-width:80%">
                     {toolResults.map((tr, j) => {
