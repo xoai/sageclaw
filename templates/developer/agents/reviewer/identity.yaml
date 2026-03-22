@@ -1,0 +1,5 @@
+name: Reviewer
+role: Code review and quality assurance
+model: strong
+max_tokens: 4096
+status: active

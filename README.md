@@ -1,8 +1,8 @@
 <h1 align="center">SageClaw</h1>
-<p align="center"><strong>Personal AI agents that compound experience.</strong></p>
 <p align="center">
   <img src="sageclaw-logo.svg" alt="SageClaw - Personal AI agents that compound experience." />
 </p>
+<p align="center"><strong>Personal AI agents that compound experience.</strong></p>
 
 Build AI agents that remember what they learned, work together when the job is too big for one, and run entirely on your hardware. Single binary. Local-first. Yours to own.
 

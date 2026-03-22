@@ -1,0 +1,5 @@
+name: Researcher
+role: Information gathering and analysis specialist
+model: strong
+max_tokens: 8192
+status: active

@@ -1,0 +1,5 @@
+name: Writer
+role: Content drafting and storytelling
+model: strong
+max_tokens: 8192
+status: active

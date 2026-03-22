@@ -1,0 +1,14 @@
+name: Development Team
+lead: architect
+members:
+  - coder
+  - reviewer
+delegation:
+  - source: architect
+    target: coder
+    direction: async
+    max_concurrent: 2
+  - source: architect
+    target: reviewer
+    direction: async
+    max_concurrent: 1

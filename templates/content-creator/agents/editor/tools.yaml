@@ -1,0 +1,10 @@
+enabled:
+  - read_file
+  - write_file
+  - delegate
+  - delegation_status
+  - team_create_task
+  - team_assign_task
+  - team_list_tasks
+  - memory_search
+  - memory_store

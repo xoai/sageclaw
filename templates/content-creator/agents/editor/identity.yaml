@@ -1,0 +1,5 @@
+name: Editor
+role: Content review, refinement, and team lead
+model: strong
+max_tokens: 4096
+status: active

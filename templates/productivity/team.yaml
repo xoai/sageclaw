@@ -1,0 +1,14 @@
+name: Productivity Team
+lead: coordinator
+members:
+  - researcher
+  - coder
+delegation:
+  - source: coordinator
+    target: researcher
+    direction: async
+    max_concurrent: 2
+  - source: coordinator
+    target: coder
+    direction: async
+    max_concurrent: 1

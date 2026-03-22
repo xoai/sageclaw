@@ -1,0 +1,9 @@
+name: Research Team
+lead: analyst
+members:
+  - explorer
+delegation:
+  - source: analyst
+    target: explorer
+    direction: async
+    max_concurrent: 3

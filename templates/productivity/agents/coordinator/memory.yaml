@@ -1,0 +1,4 @@
+scope: project
+auto_save: true
+search_on_start: true
+retention_days: 90

@@ -1,0 +1,5 @@
+name: Analyst
+role: Research synthesis and knowledge management
+model: strong
+max_tokens: 8192
+status: active

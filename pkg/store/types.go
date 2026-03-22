@@ -1,0 +1,91 @@
+package store
+
+import (
+	"time"
+
+	"github.com/xoai/sageclaw/pkg/canonical"
+)
+
+// Session represents a conversation session.
+type Session struct {
+	ID        string
+	Channel   string
+	ChatID    string
+	AgentID   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Metadata  map[string]string
+}
+
+// Memory represents a stored memory entry.
+type Memory struct {
+	ID          string
+	Title       string
+	Content     string
+	Tags        []string
+	ContentHash string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	AccessedAt  time.Time
+	AccessCount int
+}
+
+// CronJob represents a scheduled job.
+type CronJob struct {
+	ID       string
+	AgentID  string
+	Schedule string
+	Prompt   string
+	Enabled  bool
+}
+
+// DelegationLink defines a permitted delegation path.
+type DelegationLink struct {
+	ID            string
+	SourceID      string
+	TargetID      string
+	Direction     string // "sync" or "async"
+	MaxConcurrent int
+}
+
+// DelegationRecord captures a delegation execution.
+type DelegationRecord struct {
+	ID          string
+	LinkID      string
+	SourceID    string
+	TargetID    string
+	Prompt      string
+	Result      string
+	Status      string // "pending", "running", "completed", "failed"
+	StartedAt   time.Time
+	CompletedAt *time.Time
+}
+
+// TeamTask represents a task on the team board.
+type TeamTask struct {
+	ID          string
+	TeamID      string
+	Title       string
+	Description string
+	Status      string // "open", "claimed", "completed", "blocked"
+	AssignedTo  string
+	CreatedBy   string
+	Result      string
+	BlockedBy   string // Comma-separated task IDs this task depends on.
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// TeamMessage represents a mailbox message.
+type TeamMessage struct {
+	ID        string
+	TeamID    string
+	FromAgent string
+	ToAgent   string // Empty = broadcast.
+	Content   string
+	Read      bool
+	CreatedAt time.Time
+}
+
+// Message re-export for convenience.
+type Message = canonical.Message

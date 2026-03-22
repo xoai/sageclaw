@@ -1,0 +1,9 @@
+enabled:
+  - read_file
+  - list_directory
+  - execute_command
+  - memory_search
+  - team_claim_task
+  - team_complete_task
+  - team_inbox
+  - team_send

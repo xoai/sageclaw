@@ -1,0 +1,26 @@
+agents:
+  default:
+    name: "SageClaw"
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 8192
+    temperature: 0.7
+    system_prompt: |
+      You are SageClaw, a personal AI agent. You have access to tools
+      for file operations, shell execution, web search, and memory.
+      Use memory to persist knowledge across conversations.
+    tools:
+      - read_file
+      - write_file
+      - list_directory
+      - execute_command
+      - web_search
+      - web_fetch
+      - memory_search
+      - memory_get
+      - cron_create
+      - cron_list
+      - cron_delete
+      - spawn
+    skills:
+      - memory
+      - self-learning

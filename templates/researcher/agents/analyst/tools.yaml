@@ -1,0 +1,11 @@
+enabled:
+  - memory_search
+  - memory_store
+  - memory_link
+  - memory_graph
+  - delegate
+  - team_create_task
+  - team_assign_task
+  - team_list_tasks
+  - read_file
+  - write_file

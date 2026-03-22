@@ -1,0 +1,9 @@
+enabled:
+  - web_search
+  - web_fetch
+  - memory_search
+  - memory_store
+  - team_claim_task
+  - team_complete_task
+  - team_inbox
+  - team_send

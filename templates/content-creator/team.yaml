@@ -1,0 +1,14 @@
+name: Content Team
+lead: editor
+members:
+  - writer
+  - seo
+delegation:
+  - source: editor
+    target: writer
+    direction: async
+    max_concurrent: 2
+  - source: editor
+    target: seo
+    direction: async
+    max_concurrent: 1

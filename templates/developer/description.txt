@@ -1,0 +1,1 @@
+Software development team: Architect designs, Coder implements, Reviewer ensures quality.

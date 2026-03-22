@@ -1,0 +1,5 @@
+name: Coordinator
+role: Team lead and task orchestrator
+model: fast
+max_tokens: 4096
+status: active
