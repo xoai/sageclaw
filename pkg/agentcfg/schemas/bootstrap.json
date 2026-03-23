@@ -1,0 +1,25 @@
+{
+  "type": "bootstrap",
+  "title": "Bootstrap",
+  "subtitle": "First-run introduction",
+  "icon": "bootstrap",
+  "position": "feet",
+  "sections": [
+    {
+      "title": "First Meeting",
+      "description": "What happens the first time someone talks to this agent. The bootstrap message is sent once, then auto-deleted.",
+      "fields": [
+        { "key": "enabled", "label": "Enable Bootstrap", "type": "toggle", "default": true, "help": "If enabled, the agent introduces itself on first contact" },
+        { "key": "greeting", "label": "Greeting Message", "type": "textarea", "placeholder": "How should the agent introduce itself?\ne.g., Hi! I'm Atlas, your research assistant. I specialize in finding information, analyzing data, and building knowledge graphs.\n\nTell me about what you're working on, and I'll adapt to help you best.", "rows": 5, "help": "The first message the agent sends" }
+      ]
+    },
+    {
+      "title": "Discovery",
+      "description": "Questions the agent asks to learn about the user during the first conversation.",
+      "fields": [
+        { "key": "discovery_questions", "label": "Discovery Questions", "type": "repeating-text", "placeholder": "e.g., What's your name?", "default": ["What's your name?", "What are you working on?", "How would you like me to communicate — formal or casual?"], "help": "Questions asked during first conversation to personalize the experience" },
+        { "key": "auto_delete", "label": "Auto-delete After First Run", "type": "toggle", "default": true, "help": "Remove the bootstrap file after the first conversation completes" }
+      ]
+    }
+  ]
+}

@@ -21,6 +21,7 @@ const cloudAPIBase = "https://graph.facebook.com/v18.0"
 
 // Adapter implements channel.Channel for WhatsApp Business (Cloud API).
 type Adapter struct {
+	connID        string // Connection ID: "wa_abc123"
 	phoneNumberID string
 	accessToken   string
 	verifyToken   string
@@ -41,8 +42,9 @@ func WithListenAddr(addr string) Option {
 }
 
 // New creates a new WhatsApp adapter.
-func New(phoneNumberID, accessToken, verifyToken string, opts ...Option) *Adapter {
+func New(connID, phoneNumberID, accessToken, verifyToken string, opts ...Option) *Adapter {
 	a := &Adapter{
+		connID:        connID,
 		phoneNumberID: phoneNumberID,
 		accessToken:   accessToken,
 		verifyToken:   verifyToken,
@@ -55,15 +57,17 @@ func New(phoneNumberID, accessToken, verifyToken string, opts ...Option) *Adapte
 	return a
 }
 
-func (a *Adapter) Name() string { return "whatsapp" }
+func (a *Adapter) ID() string       { return a.connID }
+func (a *Adapter) Platform() string  { return "whatsapp" }
 
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	a.msgBus = msgBus
 	adapterCtx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 
+	// Subscribe to outbound — only process messages for this connection.
 	msgBus.SubscribeOutbound(adapterCtx, func(env bus.Envelope) {
-		if env.Channel == "whatsapp" {
+		if env.Channel == a.connID {
 			a.sendResponse(env)
 		}
 	})
@@ -75,7 +79,7 @@ func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	a.server = &http.Server{Addr: a.listenAddr, Handler: mux}
 
 	go func() {
-		log.Printf("whatsapp: webhook listening on %s/webhook/whatsapp", a.listenAddr)
+		log.Printf("whatsapp: webhook listening on %s/webhook/whatsapp (connection %s)", a.listenAddr, a.connID)
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("whatsapp: server error: %v", err)
 		}
@@ -114,7 +118,6 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify signature if app secret is configured.
 	if a.appSecret != "" {
 		sig := r.Header.Get("X-Hub-Signature-256")
 		if !a.verifySignature(body, sig) {
@@ -137,7 +140,7 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			for _, msg := range change.Value.Messages {
 				if msg.Type == "text" && msg.Text.Body != "" {
 					a.msgBus.PublishInbound(r.Context(), bus.Envelope{
-						Channel: "whatsapp",
+						Channel: a.connID,
 						ChatID:  msg.From,
 						Messages: []canonical.Message{
 							{Role: "user", Content: []canonical.Content{{Type: "text", Text: msg.Text.Body}}},

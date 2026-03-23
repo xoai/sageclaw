@@ -14,7 +14,7 @@ import (
 )
 
 func TestWhatsApp_Verification(t *testing.T) {
-	adapter := New("phone123", "token", "my-verify-token")
+	adapter := New("wa_test", "phone123", "token", "my-verify-token")
 
 	req := httptest.NewRequest("GET", "/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=my-verify-token&hub.challenge=challenge123", nil)
 	w := httptest.NewRecorder()
@@ -29,7 +29,7 @@ func TestWhatsApp_Verification(t *testing.T) {
 }
 
 func TestWhatsApp_VerificationFail(t *testing.T) {
-	adapter := New("phone123", "token", "my-verify-token")
+	adapter := New("wa_test", "phone123", "token", "my-verify-token")
 
 	req := httptest.NewRequest("GET", "/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=wrong", nil)
 	w := httptest.NewRecorder()
@@ -42,7 +42,7 @@ func TestWhatsApp_VerificationFail(t *testing.T) {
 
 func TestWhatsApp_ReceivesMessage(t *testing.T) {
 	msgBus := localbus.New()
-	adapter := New("phone123", "token", "verify")
+	adapter := New("wa_test", "phone123", "token", "verify")
 	adapter.msgBus = msgBus
 
 	var received []bus.Envelope
@@ -93,8 +93,8 @@ func TestWhatsApp_ReceivesMessage(t *testing.T) {
 	if len(received) == 0 {
 		t.Fatal("expected inbound message")
 	}
-	if received[0].Channel != "whatsapp" {
-		t.Fatalf("expected whatsapp channel, got %s", received[0].Channel)
+	if received[0].Channel != "wa_test" {
+		t.Fatalf("expected wa_test channel, got %s", received[0].Channel)
 	}
 	if received[0].ChatID != "1234567890" {
 		t.Fatalf("expected from number, got %s", received[0].ChatID)

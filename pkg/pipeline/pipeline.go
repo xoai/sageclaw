@@ -68,7 +68,7 @@ func New(
 // channelKey encodes channel, chatID, and optional agentID into a single key for the debouncer.
 func channelKey(channel, chatID, agentID string) string {
 	if channel == "" {
-		channel = "telegram"
+		channel = "_unknown"
 	}
 	if agentID == "" {
 		return channel + "|" + chatID
@@ -85,7 +85,7 @@ func parseChannelKey(key string) (channel, chatID, agentID string) {
 	case 2:
 		return parts[0], parts[1], ""
 	default:
-		return "telegram", key, ""
+		return "", key, ""
 	}
 }
 
@@ -151,13 +151,13 @@ func (p *Pipeline) onDebounced(compositeKey string, msgs []canonical.Message) {
 
 	switch intent.Type {
 	case IntentCommand:
-		p.handleCommand(ctx, chatID, intent.Command)
+		p.handleCommand(ctx, channel, chatID, intent.Command)
 	case IntentAgent:
 		p.routeToAgent(ctx, channel, chatID, agentID, msgs)
 	}
 }
 
-func (p *Pipeline) handleCommand(ctx context.Context, chatID string, command string) {
+func (p *Pipeline) handleCommand(ctx context.Context, channel, chatID string, command string) {
 	var response string
 	switch command {
 	case "start":
@@ -173,7 +173,8 @@ func (p *Pipeline) handleCommand(ctx context.Context, chatID string, command str
 	}
 
 	p.bus.PublishOutbound(ctx, bus.Envelope{
-		ChatID: chatID,
+		Channel: channel,
+		ChatID:  chatID,
 		Messages: []canonical.Message{
 			{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: response}}},
 		},
@@ -181,10 +182,24 @@ func (p *Pipeline) handleCommand(ctx context.Context, chatID string, command str
 }
 
 func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, requestAgentID string, msgs []canonical.Message) {
-	// Determine which agent to use: envelope override > pipeline default.
+	// Determine which agent to use: envelope override > connection binding > pipeline default.
 	agentID := p.agentID
 	if requestAgentID != "" {
 		agentID = requestAgentID
+	}
+
+	// Look up connection binding if no explicit agent requested.
+	if requestAgentID == "" {
+		conn, err := p.store.GetConnection(ctx, channel)
+		if err == nil && conn != nil {
+			if conn.AgentID != "" {
+				agentID = conn.AgentID
+			} else {
+				// Unbound connection — refuse to respond.
+				log.Printf("pipeline: connection %s has no agent bound, ignoring message", channel)
+				return
+			}
+		}
 	}
 
 	// If agentID is still "default" but no such agent exists, try to find the first available agent.
@@ -303,11 +318,14 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 			if result.Messages[i].Role == "assistant" {
 				sess, _ := p.store.GetSession(ctx, req.SessionID)
 				chatID := ""
+				channel := ""
 				if sess != nil {
 					chatID = sess.ChatID
+					channel = sess.Channel
 				}
 				p.bus.PublishOutbound(ctx, bus.Envelope{
 					SessionID: req.SessionID,
+					Channel:   channel,
 					ChatID:    chatID,
 					Messages:  []canonical.Message{result.Messages[i]},
 				})

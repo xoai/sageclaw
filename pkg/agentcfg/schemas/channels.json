@@ -1,0 +1,23 @@
+{
+  "type": "channels",
+  "title": "Channels",
+  "subtitle": "Where your agent communicates",
+  "icon": "channels",
+  "position": "right-leg",
+  "sections": [
+    {
+      "title": "Active Channels",
+      "description": "Select which channels this agent responds on.",
+      "fields": [
+        { "key": "serve", "label": "Channels", "type": "checklist", "options": ["cli", "web", "telegram", "discord", "zalo", "whatsapp", "mcp"], "default": ["cli", "web"], "help": "The agent will only respond on selected channels. Channels must be configured in Connectivity > Channels first." }
+      ]
+    },
+    {
+      "title": "Channel-Specific Settings",
+      "fields": [
+        { "key": "default_channel", "label": "Default Channel", "type": "dropdown", "options": ["cli", "web", "telegram", "discord"], "default": "web", "help": "Primary channel for this agent — used by the dashboard 'Chat' button" },
+        { "key": "platform_formatting", "label": "Adapt Formatting to Platform", "type": "toggle", "default": true, "help": "Automatically adjust message formatting for each platform (e.g., no markdown tables on Discord, no headers on WhatsApp)" }
+      ]
+    }
+  ]
+}

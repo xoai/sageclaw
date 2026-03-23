@@ -1,0 +1,39 @@
+{
+  "type": "soul",
+  "title": "Soul",
+  "subtitle": "Personality, voice & values",
+  "icon": "soul",
+  "position": "left-shoulder",
+  "sections": [
+    {
+      "title": "Communication Style",
+      "fields": [
+        { "key": "tone", "label": "Tone", "type": "dropdown", "options": ["Professional", "Casual", "Friendly", "Formal", "Witty", "Warm", "Direct", "Empathetic"], "default": "Friendly", "help": "How the agent sounds in conversation" },
+        { "key": "humor", "label": "Humor", "type": "dropdown", "options": ["None", "Subtle", "Natural", "Frequent"], "default": "Subtle", "help": "How often the agent uses humor" },
+        { "key": "emoji_usage", "label": "Emoji Usage", "type": "dropdown", "options": ["Never", "Sparingly", "Moderate", "Frequently"], "default": "Sparingly" },
+        { "key": "response_length", "label": "Response Length", "type": "dropdown", "options": ["Concise", "Moderate", "Detailed", "Comprehensive"], "default": "Moderate" },
+        { "key": "formality", "label": "Formality", "type": "dropdown", "options": ["Very Formal", "Professional", "Casual", "Very Casual"], "default": "Professional" },
+        { "key": "opinions", "label": "Express Opinions", "type": "toggle", "default": true, "help": "Whether the agent shares its own views and preferences" }
+      ]
+    },
+    {
+      "title": "Core Values",
+      "fields": [
+        { "key": "core_values", "label": "Values", "type": "checklist", "options": ["Accuracy", "Transparency", "Efficiency", "Creativity", "Empathy", "Privacy", "Thoroughness", "Resourcefulness", "Honesty", "Curiosity"], "default": ["Accuracy", "Transparency", "Resourcefulness"], "help": "What matters most to this agent" }
+      ]
+    },
+    {
+      "title": "Boundaries",
+      "fields": [
+        { "key": "boundaries", "label": "Boundaries", "type": "checklist", "options": ["Won't share user data", "Won't make purchases", "Won't send external messages without asking", "Won't modify system files", "Won't express strong political opinions", "Asks before external actions", "Careful in group chats"], "default": ["Won't share user data", "Asks before external actions"], "help": "What the agent refuses to do" }
+      ]
+    },
+    {
+      "title": "Expertise",
+      "fields": [
+        { "key": "expertise", "label": "Domain Expertise", "type": "textarea", "placeholder": "What does this agent specialize in?\ne.g., Web development with React and Node.js, API design, database optimization", "help": "Specific knowledge areas this agent excels at", "rows": 4 },
+        { "key": "core_truths", "label": "Core Truths", "type": "textarea", "placeholder": "Fundamental beliefs that shape this agent's identity.\ne.g., Be genuinely helpful, not performatively helpful.\nHave opinions — an assistant with no personality is just a search engine.", "help": "Deep personality traits — what makes this agent unique", "rows": 5 }
+      ]
+    }
+  ]
+}

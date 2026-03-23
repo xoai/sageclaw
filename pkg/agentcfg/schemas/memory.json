@@ -1,0 +1,36 @@
+{
+  "type": "memory",
+  "title": "Memory",
+  "subtitle": "How your agent remembers",
+  "icon": "memory",
+  "position": "chest",
+  "sections": [
+    {
+      "title": "Memory Settings",
+      "fields": [
+        { "key": "scope", "label": "Memory Scope", "type": "dropdown", "options": ["project", "global"], "default": "project", "help": "Project = memories scoped to this workspace. Global = shared across all workspaces." },
+        { "key": "auto_save", "label": "Auto-save Important Facts", "type": "toggle", "default": true, "help": "Agent automatically saves important information to memory during conversations" },
+        { "key": "search_on_start", "label": "Search Memory on Session Start", "type": "toggle", "default": true, "help": "Agent searches memory for relevant context at the start of each conversation" }
+      ]
+    },
+    {
+      "title": "Retention",
+      "fields": [
+        { "key": "retention_days", "label": "Retention Period", "type": "dropdown", "options": ["30", "60", "90", "180", "365", "0"], "default": "90", "help": "Days before old memories are cleaned up. 0 = keep forever." }
+      ]
+    },
+    {
+      "title": "Compaction",
+      "fields": [
+        { "key": "compaction_enabled", "label": "Auto-compact Long Conversations", "type": "toggle", "default": true, "help": "Automatically summarize and compact conversations that exceed the context window" },
+        { "key": "compaction_threshold", "label": "Compact After", "type": "dropdown", "options": ["30", "50", "75", "100"], "default": "50", "help": "Number of messages before triggering compaction" }
+      ]
+    },
+    {
+      "title": "Memory Instructions",
+      "fields": [
+        { "key": "memory_rules", "label": "What to Remember", "type": "textarea", "placeholder": "What should this agent prioritize saving to memory?\ne.g., Save key decisions and their reasoning. Save user preferences. Save project milestones. Don't save casual greetings.", "rows": 4, "help": "Guide what the agent considers worth remembering" }
+      ]
+    }
+  ]
+}

@@ -247,6 +247,20 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("DELETE /api/sessions/", srv.authGuard(srv.handleSessionDelete))
 	mux.HandleFunc("POST /api/sessions/", srv.authGuard(srv.handleSessionArchive))
 
+	// Agent form schemas + presets (authenticated).
+	mux.HandleFunc("GET /api/v2/agents/schemas", srv.authGuard(srv.handleSchemasList))
+	mux.HandleFunc("GET /api/v2/agents/schemas/", srv.authGuard(srv.handleSchemaGet))
+	mux.HandleFunc("GET /api/v2/agents/presets", srv.authGuard(srv.handlePresetsList))
+	mux.HandleFunc("POST /api/v2/agents/presets/", srv.authGuard(srv.handlePresetsApply))
+	mux.HandleFunc("POST /api/v2/agents/generate", srv.authGuard(srv.handleAgentGenerate))
+	mux.HandleFunc("POST /api/v2/agents/avatar", srv.authGuard(srv.handleAvatarGenerate))
+
+	// Connections v2 — multi-channel (authenticated).
+	mux.HandleFunc("GET /api/v2/connections", srv.authGuard(srv.handleConnectionsList))
+	mux.HandleFunc("POST /api/v2/connections", srv.authGuard(srv.handleConnectionCreate))
+	mux.HandleFunc("PUT /api/v2/connections/", srv.authGuard(srv.handleConnectionUpdate))
+	mux.HandleFunc("DELETE /api/v2/connections/", srv.authGuard(srv.handleConnectionDelete))
+
 	// Agent config v2 — file-based (authenticated).
 	mux.HandleFunc("GET /api/v2/agents", srv.authGuard(srv.handleAgentsListV2))
 	mux.HandleFunc("POST /api/v2/agents", srv.authGuard(srv.handleAgentCreateV2))

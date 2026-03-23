@@ -54,6 +54,15 @@ type DelegationStore interface {
 	GetDelegationHistory(ctx context.Context, agentID string, limit int) ([]DelegationRecord, error)
 }
 
+// ConnectionStore manages channel connections.
+type ConnectionStore interface {
+	CreateConnection(ctx context.Context, conn Connection) error
+	GetConnection(ctx context.Context, id string) (*Connection, error)
+	ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error)
+	UpdateConnection(ctx context.Context, id string, fields map[string]any) error
+	DeleteConnection(ctx context.Context, id string) error
+}
+
 // TeamStore manages team task boards and mailboxes (v0.3+).
 type TeamStore interface {
 	CreateTask(ctx context.Context, task TeamTask) (string, error)
@@ -74,6 +83,7 @@ type Store interface {
 	CredentialStore
 	DelegationStore
 	TeamStore
+	ConnectionStore
 	DB() *sql.DB
 	Close() error
 }

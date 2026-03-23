@@ -24,6 +24,7 @@ const (
 
 // Adapter implements the Channel interface for Telegram.
 type Adapter struct {
+	connID   string // Connection ID: "tg_abc123"
 	token    string
 	client   *http.Client
 	msgBus   bus.MessageBus
@@ -32,8 +33,9 @@ type Adapter struct {
 }
 
 // New creates a new Telegram adapter.
-func New(token string, opts ...Option) *Adapter {
+func New(connID, token string, opts ...Option) *Adapter {
 	a := &Adapter{
+		connID:  connID,
 		token:   token,
 		client:  &http.Client{Timeout: time.Duration(pollTimeout+10) * time.Second},
 		baseURL: telegramAPI + token,
@@ -52,7 +54,8 @@ func WithBaseURL(url string) Option {
 	return func(a *Adapter) { a.baseURL = url }
 }
 
-func (a *Adapter) Name() string { return "telegram" }
+func (a *Adapter) ID() string       { return a.connID }
+func (a *Adapter) Platform() string  { return "telegram" }
 
 // Start begins long polling for updates.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
@@ -60,10 +63,11 @@ func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	adapterCtx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 
-	// Subscribe to outbound messages for delivery.
-	// Uses adapterCtx so Stop() kills both polling AND the subscription.
+	// Subscribe to outbound messages — only process messages for this connection.
 	msgBus.SubscribeOutbound(adapterCtx, func(env bus.Envelope) {
-		a.sendResponse(env)
+		if env.Channel == a.connID {
+			a.sendResponse(env)
+		}
 	})
 
 	go a.pollLoop(adapterCtx)
@@ -75,6 +79,36 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		a.cancel()
 	}
 	return nil
+}
+
+// GetMe calls the Telegram getMe API to fetch bot info.
+func (a *Adapter) GetMe(ctx context.Context) (*TelegramUser, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", a.baseURL+"/getMe", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		OK     bool          `json:"ok"`
+		Result *TelegramUser `json:"result"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parsing getMe response: %w", err)
+	}
+	if !result.OK || result.Result == nil {
+		return nil, fmt.Errorf("getMe failed: %s", string(body))
+	}
+	return result.Result, nil
 }
 
 func (a *Adapter) pollLoop(ctx context.Context) {
@@ -144,7 +178,7 @@ func (a *Adapter) handleMessage(ctx context.Context, msg *TelegramMessage) {
 	canonicalMsg := normalizeMessage(msg)
 
 	a.msgBus.PublishInbound(ctx, bus.Envelope{
-		Channel:  "telegram",
+		Channel:  a.connID,
 		ChatID:   strconv.FormatInt(msg.Chat.ID, 10),
 		Messages: []canonical.Message{canonicalMsg},
 		Metadata: map[string]string{

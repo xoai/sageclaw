@@ -652,20 +652,36 @@ Key behaviors:
 		if token == "" {
 			return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN required")
 		}
-		return telegram.New(token), nil
+		connID := cfg["__conn_id"]
+		if connID == "" {
+			connID = "telegram"
+		}
+		return telegram.New(connID, token), nil
 	})
 	chanMgr.RegisterFactory("discord", func(cfg map[string]string) (channel.Channel, error) {
 		token := cfg["DISCORD_BOT_TOKEN"]
 		if token == "" {
 			return nil, fmt.Errorf("DISCORD_BOT_TOKEN required")
 		}
-		return discord.New(token), nil
+		connID := cfg["__conn_id"]
+		if connID == "" {
+			connID = "discord"
+		}
+		return discord.New(connID, token), nil
 	})
 	chanMgr.RegisterFactory("zalo", func(cfg map[string]string) (channel.Channel, error) {
-		return zalo.New(cfg["ZALO_OA_ID"], cfg["ZALO_SECRET_KEY"], cfg["ZALO_ACCESS_TOKEN"]), nil
+		connID := cfg["__conn_id"]
+		if connID == "" {
+			connID = "zalo"
+		}
+		return zalo.New(connID, cfg["ZALO_OA_ID"], cfg["ZALO_SECRET_KEY"], cfg["ZALO_ACCESS_TOKEN"]), nil
 	})
 	chanMgr.RegisterFactory("whatsapp", func(cfg map[string]string) (channel.Channel, error) {
-		return whatsapp.New(cfg["WHATSAPP_PHONE_NUMBER_ID"], cfg["WHATSAPP_ACCESS_TOKEN"], cfg["WHATSAPP_VERIFY_TOKEN"]), nil
+		connID := cfg["__conn_id"]
+		if connID == "" {
+			connID = "whatsapp"
+		}
+		return whatsapp.New(connID, cfg["WHATSAPP_PHONE_NUMBER_ID"], cfg["WHATSAPP_ACCESS_TOKEN"], cfg["WHATSAPP_VERIFY_TOKEN"]), nil
 	})
 
 	var p *pipeline.Pipeline
@@ -791,42 +807,75 @@ Key behaviors:
 	useCLI := f.forceCLI || (telegramToken == "" && discordToken == "")
 
 	if telegramToken != "" && !f.forceCLI {
-		tg := telegram.New(telegramToken)
+		tg := telegram.New("telegram", telegramToken)
 		if err := tg.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting telegram: %w", err)
 		}
-		log.Println("channel: telegram")
+		log.Println("channel: telegram (legacy)")
 		chanMgr.Register(tg)
 		defer tg.Stop(startCtx)
 	}
 
 	if discordToken != "" {
-		dc := discord.New(discordToken)
+		dc := discord.New("discord", discordToken)
 		if err := dc.Start(startCtx, msgBus); err != nil {
 			log.Printf("warning: discord start failed: %v", err)
 		} else {
-			log.Println("channel: discord")
+			log.Println("channel: discord (legacy)")
 			chanMgr.Register(dc)
 			defer dc.Stop(startCtx)
 		}
 	}
 
 	if zaloOAID != "" {
-		zc := zalo.New(zaloOAID, zaloSecret, zaloToken)
+		zc := zalo.New("zalo", zaloOAID, zaloSecret, zaloToken)
 		if err := zc.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting zalo: %w", err)
 		}
-		log.Println("channel: zalo OA")
+		log.Println("channel: zalo OA (legacy)")
 		defer zc.Stop(startCtx)
 	}
 
 	if waPhoneID != "" {
-		wa := whatsapp.New(waPhoneID, waAccessToken, waVerifyToken)
+		wa := whatsapp.New("whatsapp", waPhoneID, waAccessToken, waVerifyToken)
 		if err := wa.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting whatsapp: %w", err)
 		}
-		log.Println("channel: whatsapp")
+		log.Println("channel: whatsapp (legacy)")
 		defer wa.Stop(startCtx)
+	}
+
+	// --- Start connections from DB ---
+	dbConns, err := appStore.ListConnections(startCtx, store.ConnectionFilter{Status: "active"})
+	if err == nil && len(dbConns) > 0 {
+		for _, conn := range dbConns {
+			// Skip if already started via legacy env vars.
+			if chanMgr.IsRunning(conn.ID) {
+				continue
+			}
+			token, err := appStore.GetCredential(startCtx, conn.CredentialKey, encKey)
+			if err != nil || len(token) == 0 {
+				log.Printf("connection %s: credential not found, skipping", conn.ID)
+				continue
+			}
+			cfg := map[string]string{"__conn_id": conn.ID}
+			switch conn.Platform {
+			case "telegram":
+				cfg["TELEGRAM_BOT_TOKEN"] = string(token)
+			case "discord":
+				cfg["DISCORD_BOT_TOKEN"] = string(token)
+			case "zalo":
+				cfg["ZALO_OA_ID"] = string(token) // Simplified — full multi-field support later.
+			case "whatsapp":
+				cfg["WHATSAPP_PHONE_NUMBER_ID"] = string(token)
+			}
+			if err := chanMgr.StartConnection(conn.ID, conn.Platform, cfg); err != nil {
+				log.Printf("connection %s (%s): start failed: %v", conn.ID, conn.Platform, err)
+				appStore.UpdateConnection(startCtx, conn.ID, map[string]any{"status": "error"})
+			} else {
+				log.Printf("connection %s (%s): started from DB", conn.ID, conn.Platform)
+			}
+		}
 	}
 
 	if useCLI {

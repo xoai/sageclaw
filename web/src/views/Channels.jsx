@@ -1,67 +1,146 @@
 import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 
+const PLATFORMS = [
+  { id: 'telegram', label: 'Telegram', icon: '✈' },
+  { id: 'discord', label: 'Discord', icon: '🎮' },
+  { id: 'zalo', label: 'Zalo', icon: '💬' },
+  { id: 'whatsapp', label: 'WhatsApp', icon: '📱' },
+];
+
 export function Channels() {
-  const [channels, setChannels] = useState([]);
-  const [configuring, setConfiguring] = useState(null);
-  const [vars, setVars] = useState({});
+  const [connections, setConnections] = useState([]);
+  const [agents, setAgents] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState('');
+  const [msgType, setMsgType] = useState('success');
+
+  // Filters
+  const [filterPlatform, setFilterPlatform] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
+
+  // Add modal
+  const [showAdd, setShowAdd] = useState(false);
+  const [addPlatform, setAddPlatform] = useState('telegram');
+  const [addToken, setAddToken] = useState('');
+  const [addLoading, setAddLoading] = useState(false);
+  const [addPreview, setAddPreview] = useState(null);
+
+  // Bind modal
+  const [bindConn, setBindConn] = useState(null);
+  const [bindAgent, setBindAgent] = useState('');
+
+  // Pairing
   const [pairingCode, setPairingCode] = useState(null);
   const [pairingChannel, setPairingChannel] = useState(null);
   const [pairedDevices, setPairedDevices] = useState([]);
 
-  const load = () => fetch('/api/channels').then(r => r.json()).then(data => setChannels(data || [])).catch(() => {});
+  const flash = (text, type = 'success') => {
+    setMsg(text);
+    setMsgType(type);
+    setTimeout(() => setMsg(''), 6000);
+  };
+
+  const loadConnections = async () => {
+    try {
+      let url = '/api/v2/connections?';
+      if (filterPlatform) url += `platform=${filterPlatform}&`;
+      if (filterStatus) url += `status=${filterStatus}&`;
+      const res = await fetch(url);
+      if (res.ok) setConnections(await res.json());
+    } catch {}
+    setLoading(false);
+  };
+
+  const loadAgents = async () => {
+    try {
+      const res = await fetch('/api/v2/agents');
+      if (res.ok) setAgents(await res.json());
+    } catch {}
+  };
+
   const loadPaired = () => fetch('/api/pairing').then(r => r.json()).then(data => setPairedDevices(data || [])).catch(() => {});
-  useEffect(() => { load(); loadPaired(); }, []);
 
-  const statusDot = (status) => {
-    const color = status === 'active' ? 'var(--success)' :
-                  status === 'available' ? 'var(--warning)' : 'var(--text-muted)';
-    return <span style={`display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:8px`} />;
-  };
+  useEffect(() => { loadConnections(); loadAgents(); loadPaired(); }, [filterPlatform, filterStatus]);
 
-  const startConfigure = (ch) => {
-    setConfiguring(ch.name);
-    const v = {};
-    (ch.fields || []).forEach(f => { v[f.key] = ''; });
-    setVars(v);
-  };
-
-  const saveConfigure = async () => {
-    const res = await fetch('/api/channels/configure', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channel: configuring, vars }),
-    });
-    const data = await res.json();
-    setConfiguring(null);
-    if (data.started) {
-      setMsg(`${configuring} configured and started. Generate a pairing code to authorize users.`);
-    } else {
-      setMsg(`${configuring} configured — ${data.stored} credentials stored.`);
+  // --- Add Connection ---
+  const handleAdd = async () => {
+    if (!addToken.trim()) return;
+    setAddLoading(true);
+    try {
+      const res = await fetch('/api/v2/connections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform: addPlatform, token: addToken }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        flash(`Connection created: ${data.label || data.id}`);
+        setShowAdd(false);
+        setAddToken('');
+        setAddPreview(null);
+        loadConnections();
+      } else {
+        flash(data.error || 'Failed to create connection', 'error');
+      }
+    } catch (e) {
+      flash('Failed: ' + e.message, 'error');
     }
-    setTimeout(() => setMsg(''), 8000);
-    load();
+    setAddLoading(false);
   };
 
-  const generatePairingCode = async (channelName) => {
+  // --- Delete ---
+  const handleDelete = async (conn) => {
+    if (!confirm(`Delete connection "${conn.label || conn.id}"? The adapter will be stopped and the credential removed.`)) return;
+    try {
+      const res = await fetch(`/api/v2/connections/${conn.id}`, { method: 'DELETE' });
+      if (res.ok) {
+        flash('Connection deleted');
+        loadConnections();
+      }
+    } catch {}
+  };
+
+  // --- Stop / Start ---
+  const toggleStatus = async (conn) => {
+    const newStatus = conn.status === 'active' ? 'stopped' : 'active';
+    await fetch(`/api/v2/connections/${conn.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    });
+    loadConnections();
+  };
+
+  // --- Bind Agent ---
+  const handleBind = async () => {
+    await fetch(`/api/v2/connections/${bindConn.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: bindAgent || null }),
+    });
+    setBindConn(null);
+    setBindAgent('');
+    loadConnections();
+  };
+
+  // --- Pairing ---
+  const generatePairingCode = async (connId) => {
     try {
       const res = await fetch('/api/pairing/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel: channelName }),
+        body: JSON.stringify({ channel: connId }),
       });
       const data = await res.json();
       if (data.code) {
         setPairingCode(data.code);
-        setPairingChannel(channelName);
+        setPairingChannel(connId);
       } else {
-        setMsg(data.error || 'Failed to generate pairing code');
-        setTimeout(() => setMsg(''), 5000);
+        flash(data.error || 'Failed to generate pairing code', 'error');
       }
     } catch {
-      setMsg('Failed to generate pairing code');
-      setTimeout(() => setMsg(''), 5000);
+      flash('Failed to generate pairing code', 'error');
     }
   };
 
@@ -70,50 +149,107 @@ export function Channels() {
     loadPaired();
   };
 
+  const platformInfo = (id) => PLATFORMS.find(p => p.id === id) || { label: id, icon: '?' };
+
+  const parseMetadata = (conn) => {
+    try {
+      return typeof conn.metadata === 'string' ? JSON.parse(conn.metadata) : (conn.metadata || {});
+    } catch { return {}; }
+  };
+
   return (
     <div>
-      <h1>Channels</h1>
-      <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
-        Configure channels to connect SageClaw to messaging platforms.
-      </p>
-
-      {msg && <div class="card" style="padding:0.75rem;margin-bottom:1rem;color:var(--success)">{msg}</div>}
-
-      {channels.map(ch => (
-        <div key={ch.name} class="card" style="margin-bottom:12px">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <h3 style="font-size:14px;font-weight:600">{statusDot(ch.status)}{ch.name}</h3>
-              <p style="font-size:13px;color:var(--text-muted);margin-top:4px">{ch.description}</p>
-            </div>
-            <div style="display:flex;gap:0.5rem;align-items:center">
-              <span class={`badge ${ch.status === 'active' ? 'badge-green' : ch.status === 'available' ? 'badge-blue' : 'badge-gray'}`}>
-                {ch.status}
-              </span>
-              {ch.status === 'active' && ch.configurable && (
-                <button class="btn-small" onClick={() => generatePairingCode(ch.name)}>
-                  Pair
-                </button>
-              )}
-              {ch.configurable && (
-                <button class="btn-small" onClick={() => startConfigure(ch)}>
-                  {ch.status === 'active' ? 'Reconfigure' : 'Configure'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {ch.fields && (
-            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-              {ch.fields.map(f => (
-                <span key={f.key} class={`badge ${f.configured ? 'badge-green' : 'badge-gray'}`}>
-                  {f.label}: {f.configured ? 'Set' : 'Missing'}
-                </span>
-              ))}
-            </div>
-          )}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <h1>Channels</h1>
+          <p style="color:var(--text-muted);font-size:13px;margin-top:4px">
+            Manage bot connections across messaging platforms.
+          </p>
         </div>
-      ))}
+        <button class="btn-primary" onClick={() => setShowAdd(true)}>Add Connection</button>
+      </div>
+
+      {msg && (
+        <div class="card" style={`padding:0.75rem;margin-bottom:1rem;color:var(--${msgType === 'error' ? 'error' : 'success'})`}>
+          {msg}
+        </div>
+      )}
+
+      {/* Filters */}
+      <div style="display:flex;gap:8px;margin-bottom:16px">
+        <select value={filterPlatform} onChange={e => setFilterPlatform(e.target.value)}
+          style="min-width:120px">
+          <option value="">All Platforms</option>
+          {PLATFORMS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+          style="min-width:120px">
+          <option value="">All Status</option>
+          <option value="active">Active</option>
+          <option value="stopped">Stopped</option>
+          <option value="error">Error</option>
+        </select>
+      </div>
+
+      {/* Connections list */}
+      {loading ? (
+        <p style="color:var(--text-muted)">Loading...</p>
+      ) : connections.length === 0 ? (
+        <div class="card" style="padding:2rem;text-align:center;color:var(--text-muted)">
+          <p style="font-size:15px;margin-bottom:8px">No connections yet</p>
+          <p style="font-size:13px">Click "Add Connection" to connect a bot from Telegram, Discord, or other platforms.</p>
+        </div>
+      ) : (
+        <div style="display:flex;flex-direction:column;gap:8px">
+          {connections.map(conn => {
+            const plat = platformInfo(conn.platform);
+            const meta = parseMetadata(conn);
+            const isActive = conn.status === 'active';
+            const isRunning = conn.running;
+            const agentName = conn.agent_name || conn.agent_id;
+
+            return (
+              <div key={conn.id} class="card" style="padding:12px 16px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <div style="display:flex;align-items:center;gap:12px">
+                    <span style="font-size:20px" title={plat.label}>{plat.icon}</span>
+                    <div>
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <span style="font-weight:600;font-size:14px">{conn.label || conn.id}</span>
+                        <span class={`badge ${isActive ? (isRunning ? 'badge-green' : 'badge-blue') : conn.status === 'error' ? 'badge-red' : 'badge-gray'}`}>
+                          {isRunning ? 'running' : conn.status}
+                        </span>
+                        {!conn.agent_id && (
+                          <span class="badge badge-yellow" title="No agent assigned — messages will be ignored">
+                            unbound
+                          </span>
+                        )}
+                      </div>
+                      <div style="font-size:12px;color:var(--text-muted);margin-top:2px;display:flex;gap:12px">
+                        <span>{plat.label}</span>
+                        {meta.username && <span>@{meta.username}</span>}
+                        {agentName && <span>Agent: {agentName}</span>}
+                        <span style="font-family:var(--mono)">{conn.id}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style="display:flex;gap:6px;align-items:center">
+                    <button class="btn-small" onClick={() => generatePairingCode(conn.id)}>Pair</button>
+                    <button class="btn-small" onClick={() => { setBindConn(conn); setBindAgent(conn.agent_id || ''); }}>
+                      {conn.agent_id ? 'Rebind' : 'Bind'}
+                    </button>
+                    <button class="btn-small" onClick={() => toggleStatus(conn)}>
+                      {isActive ? 'Stop' : 'Start'}
+                    </button>
+                    <button class="btn-small btn-danger" onClick={() => handleDelete(conn)}>Delete</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Paired devices */}
       {pairedDevices.length > 0 && (
@@ -137,28 +273,68 @@ export function Channels() {
         </div>
       )}
 
-      {/* Configure modal */}
-      {configuring && (
-        <div class="modal-overlay" onClick={() => setConfiguring(null)}>
+      {/* Add Connection modal */}
+      {showAdd && (
+        <div class="modal-overlay" onClick={() => setShowAdd(false)}>
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>Configure {configuring}</h2>
+            <h2>Add Connection</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
-              Credentials are encrypted and stored in the database. The channel will start immediately after saving.
+              Connect a bot to SageClaw. The platform will be queried to fetch bot info.
             </p>
-            {Object.keys(vars).map(key => {
-              const ch = channels.find(c => c.name === configuring);
-              const field = ch?.fields?.find(f => f.key === key);
-              return (
-                <div class="form-group" key={key}>
-                  <label>{field?.label || key}</label>
-                  <input type="password" placeholder={key}
-                    value={vars[key]} onInput={e => setVars({ ...vars, [key]: e.target.value })} />
-                </div>
-              );
-            })}
+            <div class="form-group">
+              <label>Platform</label>
+              <select value={addPlatform} onChange={e => setAddPlatform(e.target.value)}>
+                {PLATFORMS.map(p => <option key={p.id} value={p.id}>{p.icon} {p.label}</option>)}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Bot Token</label>
+              <input type="password" placeholder="Paste your bot token here"
+                value={addToken} onInput={e => setAddToken(e.target.value)} />
+              <small style="color:var(--text-muted)">
+                {addPlatform === 'telegram' && 'Get from @BotFather on Telegram'}
+                {addPlatform === 'discord' && 'Get from Discord Developer Portal'}
+              </small>
+            </div>
+
+            {addPreview && (
+              <div class="card" style="padding:12px;margin-bottom:12px">
+                <p style="font-size:13px;color:var(--success)">Bot verified: {addPreview.label}</p>
+              </div>
+            )}
+
             <div style="display:flex;gap:0.5rem;margin-top:1rem">
-              <button class="btn-primary" onClick={saveConfigure}>Save</button>
-              <button class="btn-secondary" onClick={() => setConfiguring(null)}>Cancel</button>
+              <button class="btn-primary" onClick={handleAdd} disabled={addLoading || !addToken.trim()}>
+                {addLoading ? 'Connecting...' : 'Connect'}
+              </button>
+              <button class="btn-secondary" onClick={() => { setShowAdd(false); setAddToken(''); setAddPreview(null); }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bind Agent modal */}
+      {bindConn && (
+        <div class="modal-overlay" onClick={() => setBindConn(null)}>
+          <div class="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Bind Agent to {bindConn.label || bindConn.id}</h2>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
+              Messages from this connection will be routed to the selected agent.
+            </p>
+            <div class="form-group">
+              <label>Agent</label>
+              <select value={bindAgent} onChange={e => setBindAgent(e.target.value)}>
+                <option value="">-- No Agent (unbound) --</option>
+                {agents.map(a => (
+                  <option key={a.id} value={a.id}>{a.name || a.id}</option>
+                ))}
+              </select>
+            </div>
+            <div style="display:flex;gap:0.5rem;margin-top:1rem">
+              <button class="btn-primary" onClick={handleBind}>Save</button>
+              <button class="btn-secondary" onClick={() => setBindConn(null)}>Cancel</button>
             </div>
           </div>
         </div>
@@ -176,7 +352,7 @@ export function Channels() {
               {pairingCode}
             </div>
             <p style="color:var(--text-muted);font-size:12px">
-              This code expires in 5 minutes. Open {pairingChannel} and send this code as a message to the bot.
+              This code expires in 5 minutes.
             </p>
             <button class="btn-secondary" style="margin-top:16px"
               onClick={() => { setPairingCode(null); setPairingChannel(null); loadPaired(); }}>

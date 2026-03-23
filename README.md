@@ -16,11 +16,13 @@ Build AI agents that remember what they learned, work together when the job is t
 
 Most agent frameworks treat every conversation as a blank slate. SageClaw doesn't.
 
-**Learn.** Persistent memory with full-text search, BM25 ranking, and a knowledge graph. When you correct your agent, the lesson becomes a prevention rule — injected automatically in every future session. Your agent doesn't just execute. It compounds experience across every conversation, every channel, every session.
+**Compound Intelligence.** Persistent memory with FTS5 search, BM25 ranking, and a knowledge graph. When you correct your agent, the lesson becomes a prevention rule — injected automatically in future sessions. When one agent isn't enough, a coordinator breaks down the problem, delegates to specialists, monitors a shared task board, and synthesizes the best result. Your agents don't just execute — they learn, coordinate, and get better.
 
-**Orchestrate.** One agent handles simple tasks. For complex work, a coordinator breaks down the problem, delegates to specialists, monitors a shared task board, and synthesizes the best result. Four patterns — delegation, teams, handoff, and evaluate loops — ensure work isn't just distributed, it's validated. Quality isn't optional, it's architectural.
+**Quality by Design.** Four orchestration patterns — delegation, teams, handoff, and evaluate loops — ensure work isn't just distributed, it's validated. History pipeline manages context windows automatically. Auto-compaction preserves knowledge when conversations grow long. Every tool call is audited. Every decision is traceable.
 
-**Own.** Your data stays on your machine — encrypted at rest, sandboxed at runtime, private by default. Channel pairing verifies who can talk to your agent. Five-layer prompt injection protection guards against external manipulation. 14MB binary. Sub-second startup. 10 dependencies. Every package in `pkg/`, nothing hidden. No cloud accounts. No telemetry. No exceptions. You own the code, the data, and the experience.
+**Secure by Default.** Channel pairing verifies who can talk to your agent. Five-layer prompt injection protection guards against external manipulation. Credentials encrypted with AES-256-GCM. File operations sandboxed to your workspace. Identity anchoring resists social engineering. Budget enforcement stops runaway costs. Security isn't a feature — it's the foundation.
+
+**Built to Perform.** 14MB binary. Sub-second startup. 10 dependencies. SQLite with FTS5 — no external databases. Prompt caching cuts API costs up to 90%. Tiktoken-based token counting for precise context management. Every package in `pkg/`, nothing hidden. No cloud accounts. No telemetry. Your machine, your data, your agents.
 
 ## Quick Start
 

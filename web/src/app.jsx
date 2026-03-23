@@ -24,6 +24,7 @@ import Health from './views/Health';
 import { Overview } from './views/Overview';
 import Tunnel from './views/Tunnel';
 import AgentEditor from './views/AgentEditor';
+import AgentCreator from './views/AgentCreator';
 import Budget from './views/Budget';
 
 export function App() {
@@ -70,6 +71,8 @@ export function App() {
         <Audit path="/audit" />
         <Providers path="/providers" />
         <Agents path="/agents" />
+        <AgentCreator path="/agents/create" />
+        <AgentCreator path="/agents/:id/edit" />
         <AgentEditor path="/agents/:id" />
         <Channels path="/channels" />
         <Teams path="/teams" />

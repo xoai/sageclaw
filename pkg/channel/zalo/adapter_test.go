@@ -18,7 +18,7 @@ import (
 
 func TestWebhook_ReceivesMessage(t *testing.T) {
 	msgBus := localbus.New()
-	adapter := New("oa123", "", "token123")
+	adapter := New("zl_test", "oa123", "", "token123")
 	adapter.msgBus = msgBus
 
 	var received []bus.Envelope
@@ -57,8 +57,8 @@ func TestWebhook_ReceivesMessage(t *testing.T) {
 	if len(received) == 0 {
 		t.Fatal("expected inbound message")
 	}
-	if received[0].Channel != "zalo" {
-		t.Fatalf("expected zalo channel, got %s", received[0].Channel)
+	if received[0].Channel != "zl_test" {
+		t.Fatalf("expected zl_test channel, got %s", received[0].Channel)
 	}
 	if received[0].ChatID != "user456" {
 		t.Fatalf("expected user456, got %s", received[0].ChatID)
@@ -67,7 +67,7 @@ func TestWebhook_ReceivesMessage(t *testing.T) {
 
 func TestWebhook_VerifySignature(t *testing.T) {
 	secret := "mysecret"
-	adapter := New("oa123", secret, "token123")
+	adapter := New("zl_test", "oa123", secret, "token123")
 	adapter.msgBus = localbus.New()
 
 	event := WebhookEvent{EventName: "user_send_text", Sender: Sender{ID: "u1"}, Message: Message{Text: "hi"}}
@@ -97,7 +97,7 @@ func TestWebhook_VerifySignature(t *testing.T) {
 }
 
 func TestWebhook_Verify(t *testing.T) {
-	adapter := New("oa123", "", "token123")
+	adapter := New("zl_test", "oa123", "", "token123")
 	req := httptest.NewRequest("GET", "/webhook/zalo", nil)
 	w := httptest.NewRecorder()
 	adapter.handleVerify(w, req)

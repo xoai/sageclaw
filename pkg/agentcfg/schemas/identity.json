@@ -1,0 +1,87 @@
+{
+  "type": "identity",
+  "title": "Identity",
+  "subtitle": "Who your agent is",
+  "icon": "head",
+  "position": "head",
+  "sections": [
+    {
+      "title": "Basic Information",
+      "fields": [
+        {
+          "key": "name",
+          "label": "Display Name",
+          "type": "text",
+          "required": true,
+          "placeholder": "e.g., Atlas, Luna, Sage",
+          "help": "A name that reflects your agent's personality"
+        },
+        {
+          "key": "role",
+          "label": "Role",
+          "type": "text",
+          "required": true,
+          "placeholder": "e.g., Research analyst, Code reviewer, Writing assistant",
+          "help": "What this agent does — its job title"
+        },
+        {
+          "key": "creature",
+          "label": "Creature Type",
+          "type": "dropdown",
+          "options": ["AI Assistant", "Digital Companion", "Research Familiar", "Code Golem", "Knowledge Oracle", "Task Automaton", "Custom"],
+          "default": "AI Assistant",
+          "help": "A flavor for your agent's self-image"
+        }
+      ]
+    },
+    {
+      "title": "Model & Performance",
+      "fields": [
+        {
+          "key": "model",
+          "label": "Model Tier",
+          "type": "dropdown",
+          "options": ["strong", "fast", "local"],
+          "default": "strong",
+          "help": "Strong = best quality (Claude Sonnet, GPT-4o). Fast = lower latency (Haiku, GPT-4o-mini). Local = free (Ollama)."
+        },
+        {
+          "key": "max_tokens",
+          "label": "Max Response Length",
+          "type": "dropdown",
+          "options": ["2048", "4096", "8192", "16384"],
+          "default": "8192",
+          "help": "Maximum tokens per response. Higher = longer responses but more cost."
+        },
+        {
+          "key": "status",
+          "label": "Status",
+          "type": "dropdown",
+          "options": ["active", "inactive"],
+          "default": "active",
+          "help": "Inactive agents don't respond to messages"
+        }
+      ]
+    },
+    {
+      "title": "Appearance",
+      "fields": [
+        {
+          "key": "emoji",
+          "label": "Emoji",
+          "type": "text",
+          "placeholder": "🤖",
+          "help": "A single emoji that represents this agent"
+        },
+        {
+          "key": "purpose",
+          "label": "Purpose Statement",
+          "type": "textarea",
+          "placeholder": "A one-paragraph mission statement for this agent",
+          "help": "Displayed in agent listings and team views",
+          "rows": 3
+        }
+      ]
+    }
+  ]
+}

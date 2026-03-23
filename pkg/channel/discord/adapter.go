@@ -23,6 +23,7 @@ const (
 
 // Adapter implements channel.Channel for Discord.
 type Adapter struct {
+	connID  string // Connection ID: "dc_abc123"
 	token   string
 	msgBus  bus.MessageBus
 	client  *http.Client
@@ -32,40 +33,39 @@ type Adapter struct {
 }
 
 // New creates a new Discord adapter.
-func New(token string) *Adapter {
+func New(connID, token string) *Adapter {
 	return &Adapter{
+		connID: connID,
 		token:  token,
 		client: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-func (a *Adapter) Name() string { return "discord" }
+func (a *Adapter) ID() string       { return a.connID }
+func (a *Adapter) Platform() string  { return "discord" }
 
 // Start connects to Discord and begins receiving messages.
-// For v0.3, we use REST polling instead of the Gateway WebSocket
-// to avoid adding a WebSocket dependency. This polls every 5s.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	a.msgBus = msgBus
 
 	// Get bot info.
-	botUser, err := a.getMe(ctx)
+	botUser, err := a.GetMe(ctx)
 	if err != nil {
 		return fmt.Errorf("getting bot info: %w", err)
 	}
 	a.botID = botUser.ID
-	log.Printf("discord: connected as %s#%s", botUser.Username, botUser.Discriminator)
+	log.Printf("discord: connected as %s#%s (connection %s)", botUser.Username, botUser.Discriminator, a.connID)
 
 	discordCtx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 
-	// Subscribe to outbound for delivery (scoped to adapter lifecycle).
+	// Subscribe to outbound — only process messages for this connection.
 	msgBus.SubscribeOutbound(discordCtx, func(env bus.Envelope) {
-		if env.Channel == "discord" {
+		if env.Channel == a.connID {
 			a.sendResponse(env)
 		}
 	})
 
-	// Start message polling (simple REST approach for v0.3).
 	go a.pollLoop(discordCtx)
 
 	return nil
@@ -79,12 +79,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 }
 
 func (a *Adapter) pollLoop(ctx context.Context) {
-	// Discord doesn't have a simple REST polling API like Telegram's getUpdates.
-	// For v0.3, we rely on the bot being mentioned in channels or DMs.
-	// A proper Gateway WebSocket implementation would be M4.1 in a future iteration.
 	log.Println("discord: polling mode active (for full real-time, Gateway WebSocket needed)")
-
-	// Placeholder: log that Discord is connected but needs Gateway for real-time.
 	<-ctx.Done()
 }
 
@@ -135,7 +130,8 @@ func (a *Adapter) sendMessage(channelID, content string) error {
 	return nil
 }
 
-func (a *Adapter) getMe(ctx context.Context) (*DiscordUser, error) {
+// GetMe fetches the bot's user info from Discord.
+func (a *Adapter) GetMe(ctx context.Context) (*DiscordUser, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", discordAPIBase+"/users/@me", nil)
 	if err != nil {
 		return nil, err

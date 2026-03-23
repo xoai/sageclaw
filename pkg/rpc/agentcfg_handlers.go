@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/xoai/sageclaw/pkg/agentcfg"
+	"gopkg.in/yaml.v3"
 )
 
 // handleAgentsListV2 returns all agents from file-based config.
@@ -54,6 +55,8 @@ func validateAgentID(id string) bool {
 }
 
 // handleAgentGetFull returns the complete agent config (all files).
+// Returns soul/behavior/bootstrap as objects (parsed from YAML) so the
+// frontend schema forms can populate fields.
 func (s *Server) handleAgentGetFull(w http.ResponseWriter, r *http.Request) {
 	id := extractPathParam(r.URL.Path, "/api/v2/agents/")
 	// Strip any trailing path segments (soul, behavior, etc.)
@@ -74,53 +77,43 @@ func (s *Server) handleAgentGetFull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, cfg)
+	writeJSON(w, configToResponse(cfg))
 }
 
 // handleAgentCreateV2 creates a new agent from a full config.
+// Accepts: { id: "name", config: { identity: {...}, soul: {...}, ... } }
 func (s *Server) handleAgentCreateV2(w http.ResponseWriter, r *http.Request) {
-	var cfg agentcfg.AgentConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	var req struct {
+		ID     string         `json:"id"`
+		Config map[string]any `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid request"})
 		return
 	}
 
-	if cfg.ID == "" {
+	if req.ID == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "id required"})
 		return
 	}
-
-	// Prevent path traversal.
-	if !validateAgentID(cfg.ID) {
+	if !validateAgentID(req.ID) {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid agent ID"})
 		return
 	}
 
-	dir := filepath.Join(s.agentsDir, cfg.ID)
-
-	// Check if already exists.
+	dir := filepath.Join(s.agentsDir, req.ID)
 	if _, err := os.Stat(filepath.Join(dir, "identity.yaml")); err == nil {
 		w.WriteHeader(http.StatusConflict)
 		writeJSON(w, map[string]string{"error": "agent already exists"})
 		return
 	}
 
-	// Apply defaults for missing fields.
-	if cfg.Identity.Name == "" {
-		cfg.Identity.Name = cfg.ID
-	}
-	if cfg.Identity.Model == "" {
-		cfg.Identity.Model = "strong"
-	}
-	if cfg.Identity.MaxTokens == 0 {
-		cfg.Identity.MaxTokens = 8192
-	}
-	cfg.Source = "file"
+	cfg := configFromMap(req.ID, req.Config)
 
-	if err := agentcfg.SaveAgent(&cfg, dir); err != nil {
+	if err := agentcfg.SaveAgent(cfg, dir); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
@@ -130,6 +123,7 @@ func (s *Server) handleAgentCreateV2(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgentUpdateV2 updates an agent's full config.
+// Accepts: { config: { identity: {...}, soul: {...}, ... } }
 func (s *Server) handleAgentUpdateV2(w http.ResponseWriter, r *http.Request) {
 	id := extractPathParam(r.URL.Path, "/api/v2/agents/")
 	if !validateAgentID(id) {
@@ -145,17 +139,18 @@ func (s *Server) handleAgentUpdateV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var cfg agentcfg.AgentConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	var req struct {
+		Config map[string]any `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid request"})
 		return
 	}
 
-	cfg.ID = id
-	cfg.Source = "file"
+	cfg := configFromMap(id, req.Config)
 
-	if err := agentcfg.SaveAgent(&cfg, dir); err != nil {
+	if err := agentcfg.SaveAgent(cfg, dir); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
@@ -320,4 +315,127 @@ func (s *Server) handleAgentTools(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, result)
+}
+
+// configFromMap builds an AgentConfig from the frontend's config map.
+// Soul, behavior, bootstrap are stored as YAML strings (the frontend sends objects).
+func configFromMap(id string, m map[string]any) *agentcfg.AgentConfig {
+	cfg := agentcfg.Defaults(id)
+
+	// Identity: re-marshal through JSON to populate the typed struct.
+	if raw, ok := m["identity"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(b, &cfg.Identity)
+		}
+	}
+
+	// Soul, behavior, bootstrap: convert object to YAML string for file storage.
+	cfg.Soul = mapToYAML(m["soul"])
+	cfg.Behavior = mapToYAML(m["behavior"])
+	cfg.Bootstrap = mapToYAML(m["bootstrap"])
+
+	// Tools: re-marshal through JSON.
+	if raw, ok := m["tools"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(b, &cfg.Tools)
+		}
+	}
+
+	// Memory: re-marshal through JSON.
+	if raw, ok := m["memory"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(b, &cfg.Memory)
+		}
+	}
+
+	// Heartbeat: re-marshal through JSON.
+	if raw, ok := m["heartbeat"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(b, &cfg.Heartbeat)
+		}
+	}
+
+	// Channels: re-marshal through JSON.
+	if raw, ok := m["channels"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(b, &cfg.Channels)
+		}
+	}
+
+	// Apply defaults.
+	if cfg.Identity.Name == "" {
+		cfg.Identity.Name = id
+	}
+	if cfg.Identity.Model == "" {
+		cfg.Identity.Model = "strong"
+	}
+	if cfg.Identity.MaxTokens == 0 {
+		cfg.Identity.MaxTokens = 8192
+	}
+	cfg.Source = "file"
+
+	return &cfg
+}
+
+// mapToYAML converts a map/object to a YAML string. If already a string, returns as-is.
+func mapToYAML(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case map[string]any:
+		if len(val) == 0 {
+			return ""
+		}
+		data, err := yaml.Marshal(val)
+		if err != nil {
+			return ""
+		}
+		return string(data)
+	default:
+		data, err := yaml.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(data)
+	}
+}
+
+// configToResponse converts an AgentConfig to a response map.
+// Soul, behavior, bootstrap YAML strings are parsed back to objects
+// so the frontend schema forms can populate fields.
+func configToResponse(cfg *agentcfg.AgentConfig) map[string]any {
+	resp := map[string]any{
+		"id":        cfg.ID,
+		"source":    cfg.Source,
+		"identity":  cfg.Identity,
+		"tools":     cfg.Tools,
+		"memory":    cfg.Memory,
+		"heartbeat": cfg.Heartbeat,
+		"channels":  cfg.Channels,
+	}
+
+	// Parse YAML strings back to objects for the frontend.
+	resp["soul"] = yamlToMap(cfg.Soul)
+	resp["behavior"] = yamlToMap(cfg.Behavior)
+	resp["bootstrap"] = yamlToMap(cfg.Bootstrap)
+
+	return resp
+}
+
+// yamlToMap parses a YAML string into a map. Returns empty map on failure.
+func yamlToMap(s string) map[string]any {
+	if s == "" {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal([]byte(s), &m); err != nil {
+		return map[string]any{}
+	}
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
 }

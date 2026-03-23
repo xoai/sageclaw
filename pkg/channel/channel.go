@@ -8,7 +8,8 @@ import (
 
 // Channel defines the interface for messaging platforms.
 type Channel interface {
-	Name() string
+	ID() string       // Connection ID: "tg_abc123"
+	Platform() string // Platform type: "telegram", "discord", etc.
 	Start(ctx context.Context, msgBus bus.MessageBus) error
 	Stop(ctx context.Context) error
 }

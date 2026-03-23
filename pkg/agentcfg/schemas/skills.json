@@ -1,0 +1,27 @@
+{
+  "type": "skills",
+  "title": "Skills",
+  "subtitle": "Professional expertise & processes",
+  "icon": "skills",
+  "position": "left-arm",
+  "sections": [
+    {
+      "title": "Professional Skills",
+      "fields": [
+        { "key": "professional_skills", "label": "Skills", "type": "checklist", "options": ["Research & Analysis", "Technical Writing", "Code Review", "Data Analysis", "Project Management", "Content Creation", "SEO & Marketing", "System Design", "Database Management", "API Development", "Testing & QA", "DevOps", "UI/UX Design", "Financial Analysis", "Legal Research", "Translation", "Teaching & Tutoring"], "default": [], "help": "Select the professional skills this agent has" }
+      ]
+    },
+    {
+      "title": "Work Processes",
+      "fields": [
+        { "key": "processes", "label": "How This Agent Works", "type": "textarea", "placeholder": "Describe the agent's work methodology.\ne.g., For research tasks: search first, read sources in depth, cross-reference findings, synthesize into a summary with citations.", "rows": 6, "help": "Step-by-step processes the agent follows for its primary tasks" }
+      ]
+    },
+    {
+      "title": "Knowledge Sources",
+      "fields": [
+        { "key": "knowledge_sources", "label": "Trusted Sources", "type": "textarea", "placeholder": "Where should this agent look for information?\ne.g., Official documentation first, then Stack Overflow, then blog posts. Never use AI-generated answers as sources.", "rows": 4, "help": "Preferred information sources and what to avoid" }
+      ]
+    }
+  ]
+}

@@ -12,10 +12,14 @@ import (
 	"github.com/xoai/sageclaw/pkg/canonical"
 )
 
-const chatID = "cli-local"
+const (
+	connIDDefault = "cli_local"
+	chatID        = "cli-local"
+)
 
 // Adapter implements channel.Channel for interactive terminal chat.
 type Adapter struct {
+	connID string
 	reader *bufio.Scanner
 	writer io.Writer
 	msgBus bus.MessageBus
@@ -36,6 +40,7 @@ func WithIO(reader io.Reader, writer io.Writer) Option {
 // New creates a new CLI adapter.
 func New(opts ...Option) *Adapter {
 	a := &Adapter{
+		connID: connIDDefault,
 		reader: bufio.NewScanner(os.Stdin),
 		writer: os.Stdout,
 	}
@@ -45,7 +50,8 @@ func New(opts ...Option) *Adapter {
 	return a
 }
 
-func (a *Adapter) Name() string { return "cli" }
+func (a *Adapter) ID() string       { return a.connID }
+func (a *Adapter) Platform() string  { return "cli" }
 
 // Start begins the interactive read loop and subscribes to outbound messages.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
@@ -55,7 +61,7 @@ func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 
 	// Subscribe to outbound messages for response delivery.
 	msgBus.SubscribeOutbound(ctx, func(env bus.Envelope) {
-		if env.ChatID == chatID || env.Channel == "cli" {
+		if env.ChatID == chatID || env.Channel == a.connID {
 			a.printResponse(env)
 		}
 	})
@@ -110,7 +116,7 @@ func (a *Adapter) readLoop(ctx context.Context) {
 
 		// Publish to inbound bus.
 		a.msgBus.PublishInbound(ctx, bus.Envelope{
-			Channel: "cli",
+			Channel: a.connID,
 			ChatID:  chatID,
 			Messages: []canonical.Message{
 				{Role: "user", Content: []canonical.Content{{Type: "text", Text: input}}},

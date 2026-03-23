@@ -9,17 +9,17 @@ export function Overview() {
   const [recentEvents, setRecentEvents] = useState([]);
 
   const [dataReady, setDataReady] = useState(false);
+  const [showSetup, setShowSetup] = useState(false);
 
   useEffect(() => {
     // Load all data in parallel, mark ready only when all complete.
-    // This prevents the setup wizard from flashing during partial load.
+    // Compute setup status BEFORE rendering to prevent flash.
     Promise.all([
       fetch('/api/status').then(r => r.json()).catch(() => null),
       fetch('/api/health').then(r => r.json()).catch(() => null),
       fetch('/api/providers').then(r => r.json()).catch(() => []),
       rpc('sessions.list', { limit: 5 }).catch(() => []),
     ]).then(([statusData, healthData, dbProviders, sessions]) => {
-      if (statusData) setStatus(statusData);
       if (healthData) {
         // Merge DB providers into health map.
         if (Array.isArray(dbProviders) && dbProviders.length > 0) {
@@ -29,9 +29,17 @@ export function Overview() {
           });
           healthData.providers = merged;
         }
-        setHealth(healthData);
       }
+
+      // Compute setup status before any render.
+      const providerConnected = healthData?.providers && Object.values(healthData.providers).some(s => s === 'connected');
+      const agentExists = (statusData?.agents ?? 0) > 0;
+      const needsSetup = !providerConnected || !agentExists;
+
+      if (statusData) setStatus(statusData);
+      if (healthData) setHealth(healthData);
       setRecentSessions(sessions || []);
+      setShowSetup(needsSetup);
       setDataReady(true);
     });
 
@@ -84,8 +92,8 @@ export function Overview() {
         )}
       </div>
 
-      {/* Setup wizard — only show after all data loaded to prevent flash */}
-      {dataReady && !setupComplete && status && (
+      {/* Setup wizard — computed once before first render to prevent flash */}
+      {dataReady && showSetup && (
         <div class="card" style="padding:20px;margin-bottom:24px;border-color:var(--primary);border-width:2px">
           <h2 style="font-size:16px;margin-bottom:4px">Getting Started</h2>
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">

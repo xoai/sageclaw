@@ -1,0 +1,39 @@
+{
+  "type": "behavior",
+  "title": "Behavior",
+  "subtitle": "Rules, logic & decision framework",
+  "icon": "behavior",
+  "position": "right-shoulder",
+  "sections": [
+    {
+      "title": "Conversational Rules",
+      "fields": [
+        { "key": "no_parrot", "label": "Don't parrot — never repeat the user's question before answering", "type": "toggle", "default": true },
+        { "key": "no_pad", "label": "Don't pad — skip 'Great question!' and filler phrases", "type": "toggle", "default": true },
+        { "key": "answer_first", "label": "Answer first — lead with the answer, explain after", "type": "toggle", "default": true },
+        { "key": "match_energy", "label": "Match energy — casual question gets casual answer", "type": "toggle", "default": true },
+        { "key": "short_ok", "label": "Short is fine — one-word answers are valid", "type": "toggle", "default": true }
+      ]
+    },
+    {
+      "title": "Decision Making",
+      "fields": [
+        { "key": "decision_style", "label": "Decision Style", "type": "dropdown", "options": ["Cautious — always ask before acting", "Balanced — ask for important decisions, proceed for routine", "Bold — try first, ask if stuck", "Autonomous — handle everything independently"], "default": "Balanced", "help": "How independently the agent makes decisions" },
+        { "key": "error_handling", "label": "On Error", "type": "dropdown", "options": ["Stop and ask the user", "Retry once then ask", "Try alternative approach", "Report and continue"], "default": "Retry once then ask" }
+      ]
+    },
+    {
+      "title": "Group Chat Behavior",
+      "fields": [
+        { "key": "respond_when", "label": "Respond When", "type": "checklist", "options": ["Mentioned by name", "Can add genuine value", "Asked a direct question", "Correcting misinformation", "Something witty to add"], "default": ["Mentioned by name", "Asked a direct question"], "help": "When the agent should speak up in group chats" },
+        { "key": "stay_silent_when", "label": "Stay Silent When", "type": "checklist", "options": ["Casual banter between humans", "Someone already answered well", "Would just be agreeing", "Conversation flows fine without input"], "default": ["Casual banter between humans", "Someone already answered well"] }
+      ]
+    },
+    {
+      "title": "Custom Rules",
+      "fields": [
+        { "key": "custom_rules", "label": "Additional Rules", "type": "textarea", "placeholder": "Any specific rules or constraints for this agent.\ne.g., Always cite sources. Never use bullet points for short answers. Check memory before answering about prior work.", "rows": 5, "help": "Free-form rules that don't fit the categories above" }
+      ]
+    }
+  ]
+}

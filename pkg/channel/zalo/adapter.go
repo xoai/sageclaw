@@ -21,6 +21,7 @@ const zaloAPIBase = "https://openapi.zalo.me/v3.0/oa/message/cs"
 
 // Adapter implements channel.Channel for Zalo Official Account.
 type Adapter struct {
+	connID      string // Connection ID: "zl_abc123"
 	oaID        string
 	secretKey   string
 	accessToken string
@@ -40,8 +41,9 @@ func WithListenAddr(addr string) Option {
 }
 
 // New creates a new Zalo OA adapter.
-func New(oaID, secretKey, accessToken string, opts ...Option) *Adapter {
+func New(connID, oaID, secretKey, accessToken string, opts ...Option) *Adapter {
 	a := &Adapter{
+		connID:      connID,
 		oaID:        oaID,
 		secretKey:   secretKey,
 		accessToken: accessToken,
@@ -54,7 +56,8 @@ func New(oaID, secretKey, accessToken string, opts ...Option) *Adapter {
 	return a
 }
 
-func (a *Adapter) Name() string { return "zalo" }
+func (a *Adapter) ID() string       { return a.connID }
+func (a *Adapter) Platform() string  { return "zalo" }
 
 // Start begins the webhook HTTP server.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
@@ -62,9 +65,9 @@ func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	adapterCtx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 
-	// Subscribe to outbound for response delivery (scoped to adapter lifecycle).
+	// Subscribe to outbound — only process messages for this connection.
 	msgBus.SubscribeOutbound(adapterCtx, func(env bus.Envelope) {
-		if env.Channel == "zalo" {
+		if env.Channel == a.connID {
 			a.sendResponse(env)
 		}
 	})
@@ -79,7 +82,7 @@ func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	}
 
 	go func() {
-		log.Printf("zalo: webhook listening on %s/webhook/zalo", a.listenAddr)
+		log.Printf("zalo: webhook listening on %s/webhook/zalo (connection %s)", a.listenAddr, a.connID)
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("zalo: server error: %v", err)
 		}
@@ -99,7 +102,6 @@ func (a *Adapter) Stop(ctx context.Context) error {
 }
 
 func (a *Adapter) handleVerify(w http.ResponseWriter, r *http.Request) {
-	// Zalo webhook verification — echo the challenge.
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
@@ -111,7 +113,6 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify signature if secret key is set.
 	if a.secretKey != "" {
 		sig := r.Header.Get("X-ZEvent-Signature")
 		if !a.verifySignature(body, sig) {
@@ -126,10 +127,9 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle user_send_text event.
 	if event.EventName == "user_send_text" && event.Message.Text != "" {
 		a.msgBus.PublishInbound(r.Context(), bus.Envelope{
-			Channel: "zalo",
+			Channel: a.connID,
 			ChatID:  event.Sender.ID,
 			Messages: []canonical.Message{
 				{Role: "user", Content: []canonical.Content{{Type: "text", Text: event.Message.Text}}},

@@ -45,8 +45,8 @@ func TestCLI_SendsInboundMessage(t *testing.T) {
 	}
 
 	env := received[0]
-	if env.Channel != "cli" {
-		t.Fatalf("expected cli channel, got %s", env.Channel)
+	if env.Channel != "cli_local" {
+		t.Fatalf("expected cli_local channel, got %s", env.Channel)
 	}
 	if env.ChatID != "cli-local" {
 		t.Fatalf("expected cli-local chat ID, got %s", env.ChatID)
@@ -75,7 +75,7 @@ func TestCLI_ReceivesOutboundResponse(t *testing.T) {
 
 	// Simulate agent response.
 	msgBus.PublishOutbound(ctx, bus.Envelope{
-		Channel: "cli",
+		Channel: "cli_local",
 		ChatID:  chatID,
 		Messages: []canonical.Message{
 			{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: "Hello! I'm SageClaw."}}},

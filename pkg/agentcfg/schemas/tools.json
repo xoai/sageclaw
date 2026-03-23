@@ -1,0 +1,39 @@
+{
+  "type": "tools",
+  "title": "Tools",
+  "subtitle": "What your agent can do",
+  "icon": "tools",
+  "position": "right-arm",
+  "sections": [
+    {
+      "title": "Enabled Tools",
+      "description": "Select which tools this agent can use. Fewer tools = more focused agent.",
+      "fields": [
+        {
+          "key": "enabled",
+          "label": "Tools",
+          "type": "tool-selector",
+          "categories": {
+            "File System": ["read_file", "write_file", "list_directory"],
+            "Shell": ["execute_command"],
+            "Web": ["web_search", "web_fetch"],
+            "Memory": ["memory_search", "memory_store", "memory_delete", "memory_link", "memory_graph"],
+            "Scheduling": ["cron_create", "cron_list", "cron_delete"],
+            "Team": ["delegate", "delegation_status", "team_create_task", "team_assign_task", "team_claim_task", "team_complete_task", "team_list_tasks", "team_send", "team_inbox"],
+            "Orchestration": ["handoff", "evaluate", "spawn"],
+            "Audit": ["audit_search", "audit_stats"],
+            "Credentials": ["credential_store", "credential_get"]
+          },
+          "default": ["read_file", "write_file", "list_directory", "execute_command", "web_search", "web_fetch", "memory_search", "memory_store"],
+          "help": "Tools are grouped by category. Click a category to toggle all tools in it."
+        }
+      ]
+    },
+    {
+      "title": "Tool Usage Guidance",
+      "fields": [
+        { "key": "tool_guidance", "label": "How to Use Tools", "type": "textarea", "placeholder": "Specific instructions for tool usage.\ne.g., Use web_search for current events only. Always check memory before researching. Save important findings to memory after research.", "rows": 4, "help": "Natural language guidance for how and when to use tools" }
+      ]
+    }
+  ]
+}

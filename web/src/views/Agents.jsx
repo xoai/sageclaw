@@ -51,10 +51,7 @@ export function Agents() {
   };
 
   const openCreate = () => {
-    const num = Math.floor(Math.random() * 900) + 100;
-    setCreateForm({ id: `agent-${num}`, name: `Agent ${num}`, role: 'AI assistant', model: 'strong' });
-    setCreateError('');
-    setShowCreate(true);
+    route('/agents/create');
   };
 
   useEffect(() => {
@@ -98,7 +95,7 @@ export function Agents() {
                   {a.has_behavior && <span class="badge badge-green" title="Has behavior.md">behavior</span>}
                   {a.has_bootstrap && <span class="badge badge-blue" title="Has bootstrap.md">bootstrap</span>}
                   {a.tools_count > 0 && <span class="badge badge-gray">{a.tools_count} tools</span>}
-                  <button class="btn-small" onClick={(e) => { e.stopPropagation(); route(`/agents/${a.id}`); }}>Edit</button>
+                  <button class="btn-small" onClick={(e) => { e.stopPropagation(); route(`/agents/${a.id}/edit`); }}>Edit</button>
                   <button class="btn-small btn-danger" onClick={(e) => { e.stopPropagation(); deleteAgent(a.id); }}>Delete</button>
                 </div>
               </div>

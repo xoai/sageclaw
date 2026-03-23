@@ -1,0 +1,41 @@
+{
+  "type": "heartbeat",
+  "title": "Heartbeat",
+  "subtitle": "Scheduled tasks & proactive behavior",
+  "icon": "heartbeat",
+  "position": "left-leg",
+  "sections": [
+    {
+      "title": "Scheduled Tasks",
+      "description": "Set up recurring tasks that the agent runs automatically.",
+      "fields": [
+        {
+          "key": "tasks",
+          "label": "Cron Tasks",
+          "type": "repeating",
+          "item_fields": [
+            { "key": "name", "label": "Task Name", "type": "text", "placeholder": "e.g., Daily summary" },
+            { "key": "schedule", "label": "Schedule", "type": "cron", "placeholder": "0 9 * * *", "help": "Cron expression or preset",
+              "presets": [
+                { "label": "Every hour", "value": "0 * * * *" },
+                { "label": "Every day at 9am", "value": "0 9 * * *" },
+                { "label": "Every Monday", "value": "0 9 * * 1" },
+                { "label": "Every 30 minutes", "value": "*/30 * * * *" },
+                { "label": "Every day at 6pm", "value": "0 18 * * *" }
+              ]
+            },
+            { "key": "prompt", "label": "What to do", "type": "textarea", "placeholder": "e.g., Check my calendar and summarize today's tasks", "rows": 2 }
+          ],
+          "default": [],
+          "help": "Each task runs on a schedule and sends the prompt to the agent"
+        }
+      ]
+    },
+    {
+      "title": "Proactive Behavior",
+      "fields": [
+        { "key": "proactive_rules", "label": "When to Act Proactively", "type": "textarea", "placeholder": "Describe situations where the agent should take initiative.\ne.g., If a deadline is approaching, remind me. If a research task has been idle for 2 days, follow up.", "rows": 4, "help": "Optional — most agents are reactive (respond to messages). Proactive agents initiate actions on their own." }
+      ]
+    }
+  ]
+}
