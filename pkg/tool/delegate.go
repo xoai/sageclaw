@@ -16,13 +16,13 @@ type DelegateStatusFunc func(ctx context.Context, delegationID string) (status, 
 
 // RegisterDelegate registers delegation tools.
 func RegisterDelegate(reg *Registry, delegateFn DelegateFunc, statusFn DelegateStatusFunc) {
-	reg.Register("delegate", "Delegate a task to another agent",
+	reg.RegisterWithGroup("delegate", "Delegate a task to another agent",
 		json.RawMessage(`{"type":"object","properties":{"agent_id":{"type":"string","description":"Target agent ID"},"prompt":{"type":"string","description":"Task prompt for the target agent"},"mode":{"type":"string","description":"sync (wait for result) or async (return immediately)","default":"sync"}},"required":["agent_id","prompt"]}`),
-		delegateToolFn(delegateFn))
+		GroupOrchestration, RiskSensitive, "builtin", delegateToolFn(delegateFn))
 
-	reg.Register("delegation_status", "Check the status of an async delegation",
+	reg.RegisterWithGroup("delegation_status", "Check the status of an async delegation",
 		json.RawMessage(`{"type":"object","properties":{"delegation_id":{"type":"string","description":"Delegation record ID"}},"required":["delegation_id"]}`),
-		delegationStatusFn(statusFn))
+		GroupOrchestration, RiskSensitive, "builtin", delegationStatusFn(statusFn))
 }
 
 func delegateToolFn(delegateFn DelegateFunc) ToolFunc {

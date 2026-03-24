@@ -592,7 +592,7 @@ Key behaviors:
 		for _, s := range skills {
 			for _, bt := range s.BundledTools {
 				toolName := s.Name + "_" + bt.Name
-				toolReg.Register(toolName, bt.Description, bt.Schema, skill.MakeShellToolFunc(bt.ScriptPath))
+				toolReg.RegisterWithGroup(toolName, bt.Description, bt.Schema, tool.GroupOther, tool.RiskModerate, "skill:"+s.Name, skill.MakeShellToolFunc(bt.ScriptPath))
 			}
 			log.Printf("skill: %s (%d bundled tools)", s.Name, len(s.BundledTools))
 		}
@@ -608,8 +608,14 @@ Key behaviors:
 		middleware.PostToolAudit(appStore),
 	)
 
+	// --- Consent ---
+	consentStore := tool.NewConsentStore()
+
 	// --- Agent ---
 	appStore.DB().Exec(`INSERT OR IGNORE INTO agents (id, name, model) VALUES ('default', 'SageClaw', 'strong')`)
+
+	// Forward-reference for SSE broadcast (set after RPC server is created).
+	var sseBroadcast func(agent.Event)
 
 	var agentLoop *agent.Loop
 	if !noProviders {
@@ -624,10 +630,18 @@ Key behaviors:
 					if e.ToolCall != nil {
 						log.Printf("[%s] tool call: %s", e.SessionID, e.ToolCall.Name)
 					}
+				case agent.EventConsentNeeded:
+					if e.Consent != nil {
+						log.Printf("[%s] consent needed: %s (%s/%s)", e.SessionID, e.Consent.ToolName, e.Consent.Group, e.Consent.RiskLevel)
+					}
 				case agent.EventRunFailed:
 					log.Printf("[%s] run failed: %v", e.SessionID, e.Error)
 				}
-			}, agent.WithRouter(router))
+				// Broadcast to SSE clients (web dashboard).
+				if sseBroadcast != nil {
+					sseBroadcast(e)
+				}
+			}, agent.WithRouter(router), agent.WithConsentStore(consentStore))
 	}
 
 	// --- Channel Pairing ---
@@ -797,6 +811,24 @@ Key behaviors:
 		log.Printf("tunnel: running=%v url=%s", status.Running, status.URL)
 	})
 
+	// --- MCP Manager ---
+	mcpMgr := mcp.NewManager(toolReg)
+	// Collect MCP server configs from file-based agent configs.
+	mcpServers := make(map[string]mcp.MCPServerConfig)
+	if len(fileAgents) > 0 {
+		for _, ac := range fileAgents {
+			for name, cfg := range ac.Tools.MCPServers {
+				if _, exists := mcpServers[name]; !exists {
+					mcpServers[name] = cfg
+				}
+			}
+		}
+	}
+	if len(mcpServers) > 0 {
+		mcpMgr.StartAll(startCtx, mcpServers)
+		defer mcpMgr.Stop()
+	}
+
 	rpcServer := rpc.NewServer(appStore, memEngine, msgBus, rpc.Config{ListenAddr: rpcAddr},
 		rpc.WithGraphEngine(graphOps),
 		rpc.WithToolRegistry(toolReg),
@@ -808,7 +840,12 @@ Key behaviors:
 		rpc.WithEncryptionKey(encKey),
 		rpc.WithRouter(router),
 		rpc.WithChannelManager(chanMgr),
+		rpc.WithMCPManager(mcpMgr),
+		rpc.WithConsentHandler(p.InjectConsent),
 	)
+	// Wire SSE broadcast now that rpcServer exists.
+	sseBroadcast = rpcServer.EventHandler()
+
 	if err := rpcServer.Start(startCtx); err != nil {
 		log.Printf("warning: dashboard server failed: %v", err)
 	} else {

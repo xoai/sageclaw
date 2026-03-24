@@ -12,17 +12,17 @@ import (
 
 // RegisterCron registers cron management tools.
 func RegisterCron(reg *Registry, store store.CronStore) {
-	reg.Register("cron_create", "Create a scheduled cron job",
+	reg.RegisterWithGroup("cron_create", "Create a scheduled cron job",
 		json.RawMessage(`{"type":"object","properties":{"schedule":{"type":"string","description":"Schedule expression: @every 5m, @hourly, @daily, or */N * * * *"},"prompt":{"type":"string","description":"Prompt to send to the agent on schedule"},"agent_id":{"type":"string","description":"Agent ID (default: current agent)"}},"required":["schedule","prompt"]}`),
-		cronCreate(store))
+		GroupCron, RiskModerate, "builtin", cronCreate(store))
 
-	reg.Register("cron_list", "List active cron jobs",
+	reg.RegisterWithGroup("cron_list", "List active cron jobs",
 		json.RawMessage(`{"type":"object","properties":{}}`),
-		cronList(store))
+		GroupCron, RiskModerate, "builtin", cronList(store))
 
-	reg.Register("cron_delete", "Delete a cron job",
+	reg.RegisterWithGroup("cron_delete", "Delete a cron job",
 		json.RawMessage(`{"type":"object","properties":{"id":{"type":"string","description":"Cron job ID"}},"required":["id"]}`),
-		cronDelete(store))
+		GroupCron, RiskModerate, "builtin", cronDelete(store))
 }
 
 func cronCreate(store store.CronStore) ToolFunc {

@@ -26,6 +26,7 @@ import Tunnel from './views/Tunnel';
 import AgentEditor from './views/AgentEditor';
 import AgentCreator from './views/AgentCreator';
 import Budget from './views/Budget';
+import MCPServers from './views/MCPServers';
 
 export function App() {
   const [authState, setAuthState] = useState('loading');
@@ -79,6 +80,7 @@ export function App() {
         <Delegation path="/delegation" />
         <Skills path="/skills" />
         <Tools path="/tools" />
+        <MCPServers path="/mcp" />
         <Cron path="/cron" />
         <Budget path="/budget" />
         <Tunnel path="/tunnel" />

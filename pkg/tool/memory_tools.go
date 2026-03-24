@@ -12,13 +12,13 @@ import (
 
 // RegisterMemory registers memory tools on the registry.
 func RegisterMemory(reg *Registry, engine memory.MemoryEngine) {
-	reg.Register("memory_search", "Search stored memories by natural language query",
+	reg.RegisterWithGroup("memory_search", "Search stored memories by natural language query",
 		json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"tags":{"type":"array","items":{"type":"string"},"description":"Tags to boost in results"},"filter_tags":{"type":"array","items":{"type":"string"},"description":"Only return memories with ALL these tags"},"limit":{"type":"integer","description":"Max results (default 10)"}},"required":["query"]}`),
-		memorySearch(engine))
+		GroupMemory, RiskSafe, "builtin", memorySearch(engine))
 
-	reg.Register("memory_get", "Retrieve a specific memory by ID",
+	reg.RegisterWithGroup("memory_get", "Retrieve a specific memory by ID",
 		json.RawMessage(`{"type":"object","properties":{"id":{"type":"string","description":"Memory ID"}},"required":["id"]}`),
-		memoryGet(engine))
+		GroupMemory, RiskSafe, "builtin", memoryGet(engine))
 }
 
 func memorySearch(engine memory.MemoryEngine) ToolFunc {

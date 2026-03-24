@@ -12,13 +12,13 @@ import (
 
 // RegisterGraph registers memory graph tools (ontology).
 func RegisterGraph(reg *Registry, graph memory.GraphEngine) {
-	reg.Register("memory_link", "Create a typed relationship between two memories",
+	reg.RegisterWithGroup("memory_link", "Create a typed relationship between two memories",
 		json.RawMessage(`{"type":"object","properties":{"source_id":{"type":"string","description":"Source memory ID"},"target_id":{"type":"string","description":"Target memory ID"},"relation":{"type":"string","description":"Relationship type (e.g. depends_on, contains, owned_by)"}},"required":["source_id","target_id","relation"]}`),
-		memoryLink(graph))
+		GroupMemory, RiskSafe, "builtin", memoryLink(graph))
 
-	reg.Register("memory_graph", "Traverse relationships from a memory",
+	reg.RegisterWithGroup("memory_graph", "Traverse relationships from a memory",
 		json.RawMessage(`{"type":"object","properties":{"start_id":{"type":"string","description":"Starting memory ID"},"direction":{"type":"string","description":"Traversal direction: outbound, inbound, or both","default":"outbound"},"depth":{"type":"integer","description":"Max traversal depth (1-5, default 2)","default":2}},"required":["start_id"]}`),
-		memoryGraph(graph))
+		GroupMemory, RiskSafe, "builtin", memoryGraph(graph))
 }
 
 func memoryLink(graph memory.GraphEngine) ToolFunc {

@@ -20,32 +20,26 @@ const (
 
 // RegisterWeb registers web search and fetch tools.
 func RegisterWeb(reg *Registry) {
-	reg.Register("web_fetch", "Fetch a URL and return its text content",
+	reg.RegisterWithGroup("web_fetch", "Fetch a URL and return its text content",
 		json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch"}},"required":["url"]}`),
-		webFetch())
+		GroupWeb, RiskModerate, "builtin", webFetch())
 
-	reg.Register("web_search", "Search the web",
+	reg.RegisterWithGroup("web_search", "Search the web",
 		json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"num_results":{"type":"integer","description":"Number of results (default 5)"}},"required":["query"]}`),
-		webSearch())
+		GroupWeb, RiskModerate, "builtin", webSearch())
 }
 
-// privateIPRanges for SSRF protection.
-var privateIPRanges = []string{
-	"10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.",
-	"172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
-	"172.28.", "172.29.", "172.30.", "172.31.", "192.168.", "127.", "0.",
-}
-
-func isPrivateIP(ip string) bool {
-	for _, prefix := range privateIPRanges {
-		if strings.HasPrefix(ip, prefix) {
-			return true
-		}
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return true // fail closed on unparseable IPs
 	}
-	if ip == "::1" || ip == "fe80::" {
-		return true
+	// Normalize IPv6-mapped IPv4 (e.g. ::ffff:127.0.0.1) to IPv4.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
 	}
-	return false
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 func checkSSRF(urlStr string) error {

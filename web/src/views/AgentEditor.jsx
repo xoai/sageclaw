@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
 import { Label } from '../components/InfoTip';
+import ConfigPanel from '../components/ConfigPanel';
 
 export default function AgentEditor({ id }) {
   const [agent, setAgent] = useState(null);
@@ -11,9 +12,16 @@ export default function AgentEditor({ id }) {
   const [msg, setMsg] = useState('');
   const [availableTools, setAvailableTools] = useState([]);
   const [modelData, setModelData] = useState({ models: [], connected: {} });
-  const isNew = id === 'new';
+  const [schemas, setSchemas] = useState([]);
+  const isNew = !id || id === 'new';
 
   useEffect(() => {
+    // Reset state when navigating between agents.
+    setAgent(null);
+    setLoading(true);
+    setTab('identity');
+    setMsg('');
+
     if (!isNew) {
       fetch(`/api/v2/agents/${id}`)
         .then(r => r.json())
@@ -42,9 +50,10 @@ export default function AgentEditor({ id }) {
       setLoading(false);
     }
 
-    // Load available tools and models.
+    // Load available tools, models, and schemas.
     fetch('/api/tools').then(r => r.json()).then(setAvailableTools).catch(() => {});
     fetch('/api/providers/models').then(r => r.json()).then(setModelData).catch(() => {});
+    fetch('/api/v2/agents/schemas').then(r => r.json()).then(data => setSchemas(data || [])).catch(() => {});
   }, [id]);
 
   const save = async () => {
@@ -124,9 +133,9 @@ export default function AgentEditor({ id }) {
 
       {/* Tab content */}
       {tab === 'identity' && <IdentityTab agent={agent} update={update} isNew={isNew} modelData={modelData} />}
-      {tab === 'soul' && <MarkdownTab value={agent.soul} onChange={v => update('soul', v)} label="Soul" placeholder="Define who this agent is — personality, voice, values..." />}
-      {tab === 'behavior' && <MarkdownTab value={agent.behavior} onChange={v => update('behavior', v)} label="Behavior" placeholder="Define how this agent works — rules, constraints, decision frameworks..." />}
-      {tab === 'bootstrap' && <BootstrapTab agent={agent} update={update} />}
+      {tab === 'soul' && <SectionTab section="soul" value={agent.soul} onChange={v => update('soul', v)} schemas={schemas} label="Soul" placeholder="Define who this agent is — personality, voice, values..." />}
+      {tab === 'behavior' && <SectionTab section="behavior" value={agent.behavior} onChange={v => update('behavior', v)} schemas={schemas} label="Behavior" placeholder="Define how this agent works — rules, constraints, decision frameworks..." />}
+      {tab === 'bootstrap' && <SectionTab section="bootstrap" value={agent.bootstrap} onChange={v => update('bootstrap', v)} schemas={schemas} label="Bootstrap" placeholder="First-run instructions for the agent's initial conversation..." />}
       {tab === 'tools' && <ToolsTab agent={agent} update={update} available={availableTools} />}
       {tab === 'memory' && <MemoryTab agent={agent} update={update} />}
       {tab === 'heartbeat' && <HeartbeatTab agent={agent} update={update} />}
@@ -237,72 +246,76 @@ function IdentityTab({ agent, update, isNew, modelData }) {
   );
 }
 
-function MarkdownTab({ value, onChange, label, placeholder }) {
-  const [preview, setPreview] = useState(false);
-  return (
-    <div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <span style="font-size:13px;color:var(--text-muted)">{label} — Markdown</span>
-        <button class="btn-small" onClick={() => setPreview(!preview)}>
-          {preview ? 'Edit' : 'Preview'}
-        </button>
-      </div>
-      {preview ? (
-        <div class="card" style="padding:16px;min-height:300px;white-space:pre-wrap;font-size:13px;line-height:1.8">
-          {value || <span style="color:var(--text-muted)">No content yet.</span>}
+function SectionTab({ section, value, onChange, schemas, label, placeholder }) {
+  const [mode, setMode] = useState('structured'); // 'structured' or 'advanced'
+  const schema = schemas.find(s => s.type === section);
+
+  // Normalize value: could be string (legacy markdown) or object (schema-based).
+  const isObject = value && typeof value === 'object';
+  const objValue = isObject ? value : {};
+  const strValue = isObject ? '' : (value || '');
+
+  // When switching to advanced mode with object data, serialize to YAML-like string.
+  const getAdvancedText = () => {
+    if (!isObject) return strValue;
+    // Convert object to readable key: value lines.
+    return Object.entries(value)
+      .filter(([, v]) => v !== '' && v !== null && v !== undefined)
+      .map(([k, v]) => {
+        if (Array.isArray(v)) return `${k}: ${v.join(', ')}`;
+        return `${k}: ${v}`;
+      }).join('\n');
+  };
+
+  if (mode === 'advanced' || !schema) {
+    return (
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-size:13px;color:var(--text-muted)">{label} — Markdown</span>
+          {schema && (
+            <button class="btn-small" onClick={() => setMode('structured')}>
+              Structured Editor
+            </button>
+          )}
         </div>
-      ) : (
         <textarea
-          value={value || ''}
+          value={mode === 'advanced' && isObject ? getAdvancedText() : strValue}
           onInput={e => onChange(e.target.value)}
           placeholder={placeholder}
           style="width:100%;min-height:400px;font-family:var(--mono);font-size:13px;line-height:1.6;resize:vertical;background:var(--bg)"
         />
-      )}
-    </div>
-  );
-}
+      </div>
+    );
+  }
 
-function BootstrapTab({ agent, update }) {
-  const hasBootstrap = agent.bootstrap && agent.bootstrap.trim().length > 0;
   return (
     <div>
-      <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
-        Bootstrap instructions run once on the agent's first conversation, then the file is automatically deleted.
-        Use this for first-run rituals — introducing the agent, learning about the user, or initial setup tasks.
-      </p>
-
-      {!hasBootstrap && (
-        <div class="card" style="padding:16px;margin-bottom:16px;border-style:dashed;text-align:center">
-          <p style="color:var(--text-muted);margin-bottom:12px">No bootstrap configured. The agent will start with its normal personality.</p>
-          <button class="btn-secondary" onClick={() => update('bootstrap',
-            '# Bootstrap\n\nThis is your first conversation with a new user.\n\n' +
-            '## First Run Tasks\n1. Introduce yourself warmly\n2. Ask what the user needs help with\n3. Learn their preferences\n\n' +
-            '## After Bootstrap\nOnce complete, operate normally using your soul and behavior guidelines.'
-          )}>Add Bootstrap Template</button>
-        </div>
-      )}
-
-      {hasBootstrap && (
-        <div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <span class="badge badge-blue">One-time — deleted after first conversation</span>
-            <button class="btn-small btn-danger" onClick={() => update('bootstrap', '')}>Remove Bootstrap</button>
-          </div>
-          <textarea
-            value={agent.bootstrap}
-            onInput={e => update('bootstrap', e.target.value)}
-            placeholder="First-run instructions..."
-            style="width:100%;min-height:300px;font-family:var(--mono);font-size:13px;line-height:1.6;resize:vertical;background:var(--bg)"
-          />
-        </div>
-      )}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <span style="font-size:13px;color:var(--text-muted)">{label} — Structured</span>
+        <button class="btn-small" onClick={() => setMode('advanced')}>
+          Advanced (Markdown)
+        </button>
+      </div>
+      <ConfigPanel
+        schema={schema}
+        values={objValue}
+        onChange={(vals) => onChange({ ...objValue, ...vals })}
+        onClose={() => {}}
+        inline={true}
+      />
     </div>
   );
 }
+
 
 function ToolsTab({ agent, update, available }) {
   const enabled = new Set(agent.tools?.enabled || []);
+  const denied = new Set(agent.tools?.deny || []);
+  const profile = agent.tools?.profile || 'standard';
+  const shellDeny = new Set(agent.tools?.shell_deny_groups || []);
+  const mcpServers = agent.tools?.mcp_servers || {};
+  const [showAddMCP, setShowAddMCP] = useState(false);
+  const [newMCP, setNewMCP] = useState({ name: '', transport: 'stdio', command: '', url: '', trust: 'untrusted' });
 
   const toggle = (name) => {
     const next = new Set(enabled);
@@ -310,35 +323,197 @@ function ToolsTab({ agent, update, available }) {
     update('tools.enabled', Array.from(next));
   };
 
-  const allEnabled = enabled.size === 0; // Empty = all tools
+  const toggleDeny = (name) => {
+    const next = new Set(denied);
+    if (next.has(name)) next.delete(name); else next.add(name);
+    update('tools.deny', Array.from(next));
+  };
+
+  const toggleShellGroup = (group) => {
+    const next = new Set(shellDeny);
+    if (next.has(group)) next.delete(group); else next.add(group);
+    update('tools.shell_deny_groups', Array.from(next));
+  };
+
+  const addMCPServer = () => {
+    if (!newMCP.name) return;
+    const cfg = { transport: newMCP.transport, trust: newMCP.trust };
+    if (newMCP.transport === 'stdio') {
+      cfg.command = newMCP.command;
+    } else {
+      cfg.url = newMCP.url;
+    }
+    update('tools.mcp_servers', { ...mcpServers, [newMCP.name]: cfg });
+    setNewMCP({ name: '', transport: 'stdio', command: '', url: '', trust: 'untrusted' });
+    setShowAddMCP(false);
+  };
+
+  const removeMCPServer = (name) => {
+    const next = { ...mcpServers };
+    delete next[name];
+    update('tools.mcp_servers', next);
+  };
+
+  const allEnabled = enabled.size === 0;
+  const shellGroups = ['filesystem', 'network', 'process', 'system', 'package'];
 
   return (
     <div>
-      <div style="margin-bottom:16px">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      {/* Tool Profile */}
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:14px;margin-bottom:8px">Tool Profile</h3>
+        <select value={profile} onChange={e => update('tools.profile', e.target.value)} style="width:280px">
+          <option value="minimal">Minimal — safe tools only</option>
+          <option value="standard">Standard — safe + moderate tools</option>
+          <option value="full">Full — all risk levels (requires consent for sensitive)</option>
+        </select>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+          Controls which risk levels this agent can access. Sensitive tools always require user consent.
+        </div>
+      </div>
+
+      {/* Enabled Tools */}
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:14px;margin-bottom:8px">Enabled Tools</h3>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:12px">
           <input type="checkbox" checked={allEnabled}
             onChange={() => update('tools.enabled', allEnabled ? available.map(t => t.name) : [])} />
           <span style="font-size:13px">All tools enabled (leave empty for full access)</span>
         </label>
+
+        {!allEnabled && (
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px">
+            {available.map(t => (
+              <label key={t.name} class="card" style="padding:8px 12px;display:flex;gap:8px;align-items:flex-start;cursor:pointer">
+                <input type="checkbox" checked={enabled.has(t.name)} onChange={() => toggle(t.name)}
+                  style="margin-top:2px" />
+                <div>
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <span style="font-family:var(--mono);font-size:12px;color:var(--primary)">{t.name}</span>
+                    {t.risk && t.risk !== 'safe' && (
+                      <span class={`badge ${t.risk === 'sensitive' ? 'badge-red' : 'badge-yellow'}`} style="font-size:10px">{t.risk}</span>
+                    )}
+                  </div>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px">{t.description}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+        <div style="font-size:12px;color:var(--text-muted);margin-top:8px">
+          {allEnabled ? `${available.length} tools available` : `${enabled.size} of ${available.length} tools enabled`}
+        </div>
       </div>
 
-      {!allEnabled && (
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px">
-          {available.map(t => (
-            <label key={t.name} class="card" style="padding:8px 12px;display:flex;gap:8px;align-items:flex-start;cursor:pointer">
-              <input type="checkbox" checked={enabled.has(t.name)} onChange={() => toggle(t.name)}
-                style="margin-top:2px" />
-              <div>
-                <div style="font-family:var(--mono);font-size:12px;color:var(--primary)">{t.name}</div>
-                <div style="font-size:11px;color:var(--text-muted);margin-top:2px">{t.description}</div>
-              </div>
+      {/* Deny List */}
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:14px;margin-bottom:8px">Deny List</h3>
+        <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+          Block specific tools from this agent, even if their risk level is allowed by the profile.
+        </p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px">
+          {available.filter(t => t.risk === 'sensitive' || t.risk === 'moderate').map(t => (
+            <label key={t.name} style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:4px 0">
+              <input type="checkbox" checked={denied.has(t.name)} onChange={() => toggleDeny(t.name)} />
+              <span style="font-family:var(--mono);color:var(--text)">{t.name}</span>
+              <span class={`badge ${t.risk === 'sensitive' ? 'badge-red' : 'badge-yellow'}`} style="font-size:10px">{t.risk}</span>
             </label>
           ))}
         </div>
-      )}
+        {denied.size > 0 && (
+          <div style="font-size:12px;color:var(--warning);margin-top:8px">{denied.size} tool(s) denied</div>
+        )}
+      </div>
 
-      <div style="font-size:12px;color:var(--text-muted);margin-top:16px">
-        {allEnabled ? `${available.length} tools available` : `${enabled.size} of ${available.length} tools enabled`}
+      {/* Shell Deny Groups */}
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:14px;margin-bottom:8px">Shell Command Restrictions</h3>
+        <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+          Block categories of shell commands. The agent cannot execute commands in denied groups.
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          {shellGroups.map(g => (
+            <label key={g} class="card" style="padding:8px 14px;display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" checked={shellDeny.has(g)} onChange={() => toggleShellGroup(g)} />
+              <span style="text-transform:capitalize;font-size:13px">{g}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {/* MCP Servers */}
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="font-size:14px;margin:0">MCP Servers</h3>
+          <button class="btn-small" onClick={() => setShowAddMCP(true)}>+ Add</button>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+          External tool servers connected via Model Context Protocol.
+        </p>
+
+        {Object.keys(mcpServers).length === 0 ? (
+          <div style="font-size:12px;color:var(--text-muted)">No MCP servers configured for this agent.</div>
+        ) : (
+          <div class="card-list">
+            {Object.entries(mcpServers).map(([name, cfg]) => (
+              <div key={name} class="card" style="padding:12px;display:flex;justify-content:space-between;align-items:center">
+                <div>
+                  <div style="font-family:var(--mono);font-size:13px;color:var(--primary)">{name}</div>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+                    {cfg.transport || 'stdio'} &middot; {cfg.trust || 'untrusted'}
+                    {cfg.command && ` &middot; ${cfg.command}`}
+                    {cfg.url && ` &middot; ${cfg.url}`}
+                  </div>
+                </div>
+                <button class="btn-small btn-danger" onClick={() => removeMCPServer(name)}>Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {showAddMCP && (
+          <div class="card" style="padding:16px;margin-top:12px;border-color:var(--primary)">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div class="form-group">
+                <label>Server Name</label>
+                <input type="text" value={newMCP.name} placeholder="e.g. brave-search"
+                  onInput={e => setNewMCP({ ...newMCP, name: e.target.value })} />
+              </div>
+              <div class="form-group">
+                <label>Transport</label>
+                <select value={newMCP.transport} onChange={e => setNewMCP({ ...newMCP, transport: e.target.value })}>
+                  <option value="stdio">stdio (local process)</option>
+                  <option value="sse">SSE (remote)</option>
+                  <option value="streamable-http">Streamable HTTP (remote)</option>
+                </select>
+              </div>
+            </div>
+            {newMCP.transport === 'stdio' ? (
+              <div class="form-group">
+                <label>Command</label>
+                <input type="text" value={newMCP.command} placeholder="e.g. npx -y @anthropic/mcp-server-brave"
+                  onInput={e => setNewMCP({ ...newMCP, command: e.target.value })} />
+              </div>
+            ) : (
+              <div class="form-group">
+                <label>URL</label>
+                <input type="text" value={newMCP.url} placeholder="e.g. http://localhost:8080/mcp"
+                  onInput={e => setNewMCP({ ...newMCP, url: e.target.value })} />
+              </div>
+            )}
+            <div class="form-group">
+              <label>Trust Level</label>
+              <select value={newMCP.trust} onChange={e => setNewMCP({ ...newMCP, trust: e.target.value })}>
+                <option value="untrusted">Untrusted (results wrapped + scrubbed)</option>
+                <option value="trusted">Trusted (raw results passed through)</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+              <button class="btn-secondary" onClick={() => setShowAddMCP(false)}>Cancel</button>
+              <button class="btn-primary" onClick={addMCPServer} disabled={!newMCP.name}>Add Server</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

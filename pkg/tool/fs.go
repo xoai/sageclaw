@@ -14,17 +14,17 @@ import (
 
 // RegisterFS registers file system tools on the registry.
 func RegisterFS(reg *Registry, sandbox *security.Sandbox) {
-	reg.Register("read_file", "Read the contents of a file",
+	reg.RegisterWithGroup("read_file", "Read the contents of a file",
 		json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path relative to workspace"}},"required":["path"]}`),
-		fsRead(sandbox))
+		GroupFS, RiskModerate, "builtin", fsRead(sandbox))
 
-	reg.Register("write_file", "Write content to a file",
+	reg.RegisterWithGroup("write_file", "Write content to a file",
 		json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path relative to workspace"},"content":{"type":"string","description":"Content to write"}},"required":["path","content"]}`),
-		fsWrite(sandbox))
+		GroupFS, RiskModerate, "builtin", fsWrite(sandbox))
 
-	reg.Register("list_directory", "List files and directories",
+	reg.RegisterWithGroup("list_directory", "List files and directories",
 		json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Directory path relative to workspace"}},"required":["path"]}`),
-		fsList(sandbox))
+		GroupFS, RiskModerate, "builtin", fsList(sandbox))
 }
 
 func fsRead(sandbox *security.Sandbox) ToolFunc {

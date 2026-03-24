@@ -56,6 +56,8 @@ type Server struct {
 	budgetEngine   *provider.BudgetEngine
 	router         *provider.Router
 	chanMgr        *channel.Manager
+	mcpMgr         *mcp.Manager
+	consentHandler func(group string, granted bool) // Callback for consent responses.
 	agentsDir      string
 	encKey         []byte // Credential encryption key.
 	startTime      time.Time
@@ -129,6 +131,16 @@ func WithRouter(r *provider.Router) ServerOption {
 // WithChannelManager adds channel hot-reload capability.
 func WithChannelManager(m *channel.Manager) ServerOption {
 	return func(s *Server) { s.chanMgr = m }
+}
+
+// WithMCPManager adds MCP server management to the RPC server.
+func WithMCPManager(m *mcp.Manager) ServerOption {
+	return func(s *Server) { s.mcpMgr = m }
+}
+
+// WithConsentHandler sets the callback for consent responses from the dashboard.
+func WithConsentHandler(fn func(group string, granted bool)) ServerOption {
+	return func(s *Server) { s.consentHandler = fn }
 }
 
 // NewServer creates a new RPC server.
@@ -231,6 +243,16 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 
 	// Tools (authenticated).
 	mux.HandleFunc("GET /api/tools", srv.authGuard(srv.handleToolsList))
+	mux.HandleFunc("GET /api/tools/profiles", srv.authGuard(srv.handleToolProfiles))
+	mux.HandleFunc("GET /api/tools/groups", srv.authGuard(srv.handleToolGroups))
+
+	// MCP servers (authenticated).
+	mux.HandleFunc("GET /api/mcp/servers", srv.authGuard(srv.handleMCPServersList))
+	mux.HandleFunc("POST /api/mcp/servers", srv.authGuard(srv.handleMCPServersAdd))
+	mux.HandleFunc("DELETE /api/mcp/servers/", srv.authGuard(srv.handleMCPServersRemove))
+
+	// Consent (authenticated).
+	mux.HandleFunc("POST /api/consent", srv.authGuard(srv.handleConsentResponse))
 
 	// Credentials (authenticated).
 	mux.HandleFunc("GET /api/credentials", srv.authGuard(srv.handleCredentialsList))
@@ -359,13 +381,20 @@ func (s *Server) Stop(ctx context.Context) error {
 // EventHandler returns an agent.EventHandler that broadcasts to SSE clients.
 func (s *Server) EventHandler() agent.EventHandler {
 	return func(e agent.Event) {
-		data, _ := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"type":       e.Type,
 			"session_id": e.SessionID,
 			"agent_id":   e.AgentID,
 			"text":       e.Text,
 			"iteration":  e.Iteration,
-		})
+		}
+		if e.ToolCall != nil {
+			payload["tool_call"] = e.ToolCall
+		}
+		if e.Consent != nil {
+			payload["consent"] = e.Consent
+		}
+		data, _ := json.Marshal(payload)
 		s.broadcast(data)
 	}
 }

@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xoai/sageclaw/pkg/mcp"
 	"github.com/xoai/sageclaw/pkg/provider"
+	"github.com/xoai/sageclaw/pkg/tool"
 )
 
 // --- C1: Cron Job Management ---
@@ -501,13 +503,23 @@ func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request) {
 
 	var tools []map[string]any
 	for _, d := range defs {
-		category := categorizeToolName(d.Name)
-		tools = append(tools, map[string]any{
+		group, risk, source, _ := s.toolRegistry.GetMeta(d.Name)
+		if group == "" {
+			group = categorizeToolName(d.Name)
+		}
+		entry := map[string]any{
 			"name":        d.Name,
 			"description": d.Description,
 			"schema":      json.RawMessage(d.InputSchema),
-			"category":    category,
-		})
+			"category":    group,
+		}
+		if risk != "" {
+			entry["risk"] = risk
+		}
+		if source != "" {
+			entry["source"] = source
+		}
+		tools = append(tools, entry)
 	}
 	writeJSON(w, tools)
 }
@@ -541,6 +553,47 @@ func categorizeToolName(name string) string {
 	default:
 		return "other"
 	}
+}
+
+func (s *Server) handleToolProfiles(w http.ResponseWriter, r *http.Request) {
+	profiles := tool.AllProfiles()
+	result := make([]map[string]any, 0, len(profiles))
+	for _, p := range profiles {
+		groups := tool.ProfileGroups(p)
+		groupNames := make([]string, 0, len(groups))
+		for g := range groups {
+			groupNames = append(groupNames, g)
+		}
+		sort.Strings(groupNames)
+		result = append(result, map[string]any{
+			"name":   p,
+			"groups": groupNames,
+		})
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) handleToolGroups(w http.ResponseWriter, r *http.Request) {
+	if s.toolRegistry == nil {
+		writeJSON(w, map[string]any{})
+		return
+	}
+
+	// Build group → tools map from registry.
+	defs := s.toolRegistry.List()
+	groups := make(map[string][]map[string]any)
+	for _, d := range defs {
+		group, risk, _, _ := s.toolRegistry.GetMeta(d.Name)
+		if group == "" {
+			group = "other"
+		}
+		groups[group] = append(groups[group], map[string]any{
+			"name":        d.Name,
+			"description": d.Description,
+			"risk":        risk,
+		})
+	}
+	writeJSON(w, groups)
 }
 
 // --- C9: Credential Management ---
@@ -852,4 +905,86 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, health)
+}
+
+// --- MCP Server Management ---
+
+func (s *Server) handleMCPServersList(w http.ResponseWriter, r *http.Request) {
+	if s.mcpMgr == nil {
+		writeJSON(w, []any{})
+		return
+	}
+	writeJSON(w, s.mcpMgr.ListServers())
+}
+
+func (s *Server) handleMCPServersAdd(w http.ResponseWriter, r *http.Request) {
+	if s.mcpMgr == nil {
+		http.Error(w, "MCP manager not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		Name   string               `json:"name"`
+		Config mcp.MCPServerConfig  `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.mcpMgr.AddServer(req.Name, req.Config); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "connected", "name": req.Name})
+}
+
+func (s *Server) handleMCPServersRemove(w http.ResponseWriter, r *http.Request) {
+	if s.mcpMgr == nil {
+		http.Error(w, "MCP manager not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	name := strings.TrimPrefix(r.URL.Path, "/api/mcp/servers/")
+	if name == "" {
+		http.Error(w, "server name required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.mcpMgr.RemoveServer(name); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "removed", "name": name})
+}
+
+// --- Consent ---
+
+func (s *Server) handleConsentResponse(w http.ResponseWriter, r *http.Request) {
+	if s.consentHandler == nil {
+		http.Error(w, "consent handler not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		Group   string `json:"group"`
+		Granted bool   `json:"granted"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Group == "" {
+		http.Error(w, "group is required", http.StatusBadRequest)
+		return
+	}
+
+	s.consentHandler(req.Group, req.Granted)
+	writeJSON(w, map[string]string{"status": "ok"})
 }

@@ -13,9 +13,9 @@ type spawnDepthKey struct{}
 
 // RegisterSpawn registers the spawn subagent tool.
 func RegisterSpawn(reg *Registry) {
-	reg.Register("spawn", "Spawn a subagent to handle a subtask",
+	reg.RegisterWithGroup("spawn", "Spawn a subagent to handle a subtask",
 		json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"Task prompt for the subagent"}},"required":["prompt"]}`),
-		spawnTool())
+		GroupOrchestration, RiskSensitive, "builtin", spawnTool())
 }
 
 func spawnTool() ToolFunc {

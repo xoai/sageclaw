@@ -13,9 +13,9 @@ type HandoffFunc func(ctx context.Context, sessionID, sourceAgentID, targetAgent
 
 // RegisterHandoff registers the handoff tool.
 func RegisterHandoff(reg *Registry, handoffFn HandoffFunc) {
-	reg.Register("handoff", "Transfer this conversation to another agent",
+	reg.RegisterWithGroup("handoff", "Transfer this conversation to another agent",
 		json.RawMessage(`{"type":"object","properties":{"target_agent_id":{"type":"string","description":"Agent to hand off to"},"reason":{"type":"string","description":"Why the handoff is happening"}},"required":["target_agent_id"]}`),
-		handoffTool(handoffFn))
+		GroupOrchestration, RiskSensitive, "builtin", handoffTool(handoffFn))
 }
 
 func handoffTool(handoffFn HandoffFunc) ToolFunc {

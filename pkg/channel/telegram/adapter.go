@@ -216,7 +216,7 @@ func (a *Adapter) handleMessage(ctx context.Context, msg *TelegramMessage) {
 	// Detect thread/topic.
 	threadID := ""
 	if msg.MessageThreadID != 0 {
-		threadID = strconv.Itoa(msg.MessageThreadID)
+		threadID = bus.SanitizeThreadID(strconv.Itoa(msg.MessageThreadID))
 	}
 
 	a.msgBus.PublishInbound(ctx, bus.Envelope{

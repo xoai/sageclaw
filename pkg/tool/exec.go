@@ -19,13 +19,18 @@ const (
 )
 
 // RegisterExec registers the shell execution tool.
-func RegisterExec(reg *Registry, workdir string) {
-	reg.Register("execute_command", "Execute a shell command",
+// disabledDenyGroups controls which shell deny groups are skipped (nil = all enabled).
+func RegisterExec(reg *Registry, workdir string, disabledDenyGroups ...map[string]bool) {
+	var disabled map[string]bool
+	if len(disabledDenyGroups) > 0 {
+		disabled = disabledDenyGroups[0]
+	}
+	reg.RegisterWithGroup("execute_command", "Execute a shell command",
 		json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default 30000, max 300000)"}},"required":["command"]}`),
-		execCommand(workdir))
+		GroupRuntime, RiskSensitive, "builtin", execCommand(workdir, disabled))
 }
 
-func execCommand(workdir string) ToolFunc {
+func execCommand(workdir string, disabledDenyGroups map[string]bool) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
 			Command   string `json:"command"`
@@ -36,7 +41,7 @@ func execCommand(workdir string) ToolFunc {
 		}
 
 		// Check deny patterns.
-		if err := security.CheckCommand(params.Command); err != nil {
+		if err := security.CheckCommand(params.Command, disabledDenyGroups); err != nil {
 			return errorResult(err.Error()), nil
 		}
 

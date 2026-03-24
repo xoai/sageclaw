@@ -42,6 +42,7 @@ export function Chat() {
   const [agents, setAgents] = useState([]);
   const [selectedSession, setSelectedSession] = useState(null);
   const [selectedAgent, setSelectedAgent] = useState('');
+  const [consentPrompt, setConsentPrompt] = useState(null);
   const bottomRef = useRef(null);
   const timerRef = useRef(null);
   const sseRef = useRef(null);
@@ -143,6 +144,13 @@ export function Chat() {
           if (event.type === 'tool.call') {
             setStreaming('Using tools...');
           }
+        }
+
+        // Consent prompt — agent needs permission to use a tool.
+        if (event.type === 'consent.needed' && event.consent) {
+          gotChunks = true;
+          setConsentPrompt(event.consent);
+          setStreaming('Waiting for permission...');
         }
 
         if (event.type === 'run.completed') {
@@ -250,6 +258,18 @@ export function Chat() {
     }
   };
 
+  const respondConsent = async (granted) => {
+    if (!consentPrompt) return;
+    await fetch('/api/consent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ group: consentPrompt.group, granted }),
+    });
+    setConsentPrompt(null);
+    setStreaming(granted ? 'Permission granted, continuing...' : 'Permission denied.');
+  };
+
   const switchSession = async (sid) => {
     setSelectedSession(sid);
     if (sid) {
@@ -328,6 +348,33 @@ export function Chat() {
 
         <div ref={bottomRef} />
       </div>
+
+      {/* Consent modal */}
+      {consentPrompt && (
+        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100">
+          <div class="card" style="padding:24px;max-width:420px;width:100%">
+            <h3 style="margin-top:0">Permission Required</h3>
+            <p>The agent wants to use a tool that requires your approval:</p>
+            <div style="background:var(--bg);padding:12px;border-radius:6px;margin:12px 0">
+              <div><strong>{consentPrompt.tool_name}</strong></div>
+              <div style="color:var(--text-muted);font-size:0.9rem;margin-top:4px">
+                Group: <span style="text-transform:capitalize">{consentPrompt.group}</span>
+                {' '}&middot;{' '}
+                Risk: <span class={`badge ${consentPrompt.risk_level === 'sensitive' ? 'badge-red' : 'badge-yellow'}`}>
+                  {consentPrompt.risk_level}
+                </span>
+              </div>
+              {consentPrompt.explanation && (
+                <div style="color:var(--text-muted);font-size:0.85rem;margin-top:8px">{consentPrompt.explanation}</div>
+              )}
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+              <button class="btn-secondary" onClick={() => respondConsent(false)}>Deny</button>
+              <button class="btn-primary" onClick={() => respondConsent(true)}>Allow</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div class="chat-input-row">
         <input

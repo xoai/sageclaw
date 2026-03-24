@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"strings"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
 )
@@ -17,6 +18,14 @@ type Envelope struct {
 	Mentioned bool   // Was bot @mentioned? (relevant for groups)
 	Messages  []canonical.Message
 	Metadata  map[string]string
+}
+
+// SanitizeThreadID ensures a thread ID is safe for use in session keys.
+// Session keys use ":" as a delimiter, so thread IDs must not contain it.
+// Current platforms (Telegram integers, Discord snowflakes, Slack timestamps)
+// naturally satisfy this, but future adapters must call this function.
+func SanitizeThreadID(threadID string) string {
+	return strings.ReplaceAll(threadID, ":", "_")
 }
 
 // MessageBus is the process boundary interface for message routing (ADR-013).

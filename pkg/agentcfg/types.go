@@ -50,11 +50,42 @@ type Identity struct {
 
 // ToolsConfig defines which tools the agent can use (tools.yaml).
 type ToolsConfig struct {
-	// Enabled lists tool names. Empty = all tools available.
+	// Enabled lists tool names. Empty = all tools available (backward compat).
 	Enabled []string `json:"enabled" yaml:"enabled"`
+
+	// Profile sets the base tool set: full, coding, messaging, readonly, minimal.
+	// Default: "" (treated as "full").
+	Profile string `json:"profile,omitempty" yaml:"profile"`
+
+	// Deny removes tools or groups. Use "group:runtime" to deny an entire group.
+	Deny []string `json:"deny,omitempty" yaml:"deny"`
+
+	// AlsoAllow adds tools back after deny. Use "group:fs" to re-allow a group.
+	AlsoAllow []string `json:"also_allow,omitempty" yaml:"also_allow"`
+
+	// ShellDenyGroups controls which deny pattern groups are active for exec.
+	// All groups are enabled by default. Set a group to false to disable it.
+	ShellDenyGroups map[string]bool `json:"shell_deny_groups,omitempty" yaml:"shell_deny_groups"`
+
+	// MCPServers defines external MCP server connections.
+	MCPServers map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers"`
 
 	// Config holds per-tool configuration overrides.
 	Config map[string]map[string]any `json:"config,omitempty" yaml:"config"`
+}
+
+// MCPServerConfig defines how to connect to an external MCP server.
+type MCPServerConfig struct {
+	Transport  string            `json:"transport" yaml:"transport"`               // stdio, sse, streamable-http
+	Command    string            `json:"command,omitempty" yaml:"command"`          // stdio only
+	Args       []string          `json:"args,omitempty" yaml:"args"`               // stdio only
+	Env        map[string]string `json:"env,omitempty" yaml:"env"`                 // stdio only
+	URL        string            `json:"url,omitempty" yaml:"url"`                 // sse/http only
+	Headers    map[string]string `json:"headers,omitempty" yaml:"headers"`         // sse/http only
+	ToolPrefix string            `json:"tool_prefix,omitempty" yaml:"tool_prefix"` // prefix for tool names
+	TimeoutSec int               `json:"timeout_sec,omitempty" yaml:"timeout_sec"` // per-call timeout (default 60)
+	Trust      string            `json:"trust,omitempty" yaml:"trust"`             // trusted or untrusted (default)
+	Enabled    *bool             `json:"enabled,omitempty" yaml:"enabled"`         // default true
 }
 
 // MemoryConfig defines memory behavior (memory.yaml).

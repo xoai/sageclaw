@@ -88,6 +88,7 @@ export function Nav({ open, onNavigate }) {
       <div class="nav-section-label">Capabilities</div>
       {link('/skills', 'Skills')}
       {link('/tools', 'Tools')}
+      {link('/mcp', 'MCP Servers')}
       {link('/cron', 'Cron')}
       {link('/teams', 'Teams')}
       {link('/delegation', 'Delegation')}

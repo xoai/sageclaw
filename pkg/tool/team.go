@@ -27,67 +27,67 @@ type TeamOps interface {
 // Members get all tools including mailbox.
 func RegisterTeamForRole(reg *Registry, ops TeamOps, isLead bool) {
 	// Task tools — available to both leads and members.
-	reg.Register("team_create_task", "Create a task on the team board",
+	reg.RegisterWithGroup("team_create_task", "Create a task on the team board",
 		json.RawMessage(`{"type":"object","properties":{"team_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"assignee":{"type":"string","description":"Agent ID to assign to"},"blocked_by":{"type":"string","description":"Comma-separated task IDs this task depends on"}},"required":["team_id","title"]}`),
-		teamCreateTask(ops))
+		GroupTeam, RiskModerate, "builtin", teamCreateTask(ops))
 
-	reg.Register("team_assign_task", "Assign a task to a team member",
+	reg.RegisterWithGroup("team_assign_task", "Assign a task to a team member",
 		json.RawMessage(`{"type":"object","properties":{"task_id":{"type":"string"},"agent_id":{"type":"string"}},"required":["task_id","agent_id"]}`),
-		teamClaimTask(ops))
+		GroupTeam, RiskModerate, "builtin", teamClaimTask(ops))
 
-	reg.Register("team_claim_task", "Claim an open task",
+	reg.RegisterWithGroup("team_claim_task", "Claim an open task",
 		json.RawMessage(`{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}`),
-		teamClaimSelf(ops))
+		GroupTeam, RiskModerate, "builtin", teamClaimSelf(ops))
 
-	reg.Register("team_complete_task", "Mark a task as completed with result",
+	reg.RegisterWithGroup("team_complete_task", "Mark a task as completed with result",
 		json.RawMessage(`{"type":"object","properties":{"task_id":{"type":"string"},"result":{"type":"string"}},"required":["task_id","result"]}`),
-		teamCompleteTask(ops))
+		GroupTeam, RiskModerate, "builtin", teamCompleteTask(ops))
 
-	reg.Register("team_list_tasks", "List tasks on the team board",
+	reg.RegisterWithGroup("team_list_tasks", "List tasks on the team board",
 		json.RawMessage(`{"type":"object","properties":{"team_id":{"type":"string"},"status":{"type":"string","description":"Filter: open, claimed, completed, blocked"}},"required":["team_id"]}`),
-		teamListTasks(ops))
+		GroupTeam, RiskModerate, "builtin", teamListTasks(ops))
 
 	// Mailbox tools — members only (leads coordinate via tasks, not messages).
 	if !isLead {
-		reg.Register("team_send", "Send a message to a team member or broadcast",
+		reg.RegisterWithGroup("team_send", "Send a message to a team member or broadcast",
 			json.RawMessage(`{"type":"object","properties":{"team_id":{"type":"string"},"to_agent":{"type":"string","description":"Target agent ID (empty=broadcast)"},"content":{"type":"string"}},"required":["team_id","content"]}`),
-			teamSend(ops))
+			GroupTeam, RiskModerate, "builtin", teamSend(ops))
 
-		reg.Register("team_inbox", "Check team inbox messages",
+		reg.RegisterWithGroup("team_inbox", "Check team inbox messages",
 			json.RawMessage(`{"type":"object","properties":{"unread_only":{"type":"boolean","default":true}}}`),
-			teamInbox(ops))
+			GroupTeam, RiskModerate, "builtin", teamInbox(ops))
 	}
 }
 
 // RegisterTeam registers all team tools (backward compatible — all tools for all roles).
 func RegisterTeam(reg *Registry, ops TeamOps) {
-	reg.Register("team_create_task", "Create a task on the team board",
+	reg.RegisterWithGroup("team_create_task", "Create a task on the team board",
 		json.RawMessage(`{"type":"object","properties":{"team_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"assignee":{"type":"string","description":"Agent ID to assign to"},"blocked_by":{"type":"string","description":"Comma-separated task IDs this task depends on"}},"required":["team_id","title"]}`),
-		teamCreateTask(ops))
+		GroupTeam, RiskModerate, "builtin", teamCreateTask(ops))
 
-	reg.Register("team_assign_task", "Assign a task to a team member",
+	reg.RegisterWithGroup("team_assign_task", "Assign a task to a team member",
 		json.RawMessage(`{"type":"object","properties":{"task_id":{"type":"string"},"agent_id":{"type":"string"}},"required":["task_id","agent_id"]}`),
-		teamClaimTask(ops))
+		GroupTeam, RiskModerate, "builtin", teamClaimTask(ops))
 
-	reg.Register("team_claim_task", "Claim an open task",
+	reg.RegisterWithGroup("team_claim_task", "Claim an open task",
 		json.RawMessage(`{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}`),
-		teamClaimSelf(ops))
+		GroupTeam, RiskModerate, "builtin", teamClaimSelf(ops))
 
-	reg.Register("team_complete_task", "Mark a task as completed with result",
+	reg.RegisterWithGroup("team_complete_task", "Mark a task as completed with result",
 		json.RawMessage(`{"type":"object","properties":{"task_id":{"type":"string"},"result":{"type":"string"}},"required":["task_id","result"]}`),
-		teamCompleteTask(ops))
+		GroupTeam, RiskModerate, "builtin", teamCompleteTask(ops))
 
-	reg.Register("team_list_tasks", "List tasks on the team board",
+	reg.RegisterWithGroup("team_list_tasks", "List tasks on the team board",
 		json.RawMessage(`{"type":"object","properties":{"team_id":{"type":"string"},"status":{"type":"string","description":"Filter: open, claimed, completed, blocked"}},"required":["team_id"]}`),
-		teamListTasks(ops))
+		GroupTeam, RiskModerate, "builtin", teamListTasks(ops))
 
-	reg.Register("team_send", "Send a message to a team member or broadcast",
+	reg.RegisterWithGroup("team_send", "Send a message to a team member or broadcast",
 		json.RawMessage(`{"type":"object","properties":{"team_id":{"type":"string"},"to_agent":{"type":"string","description":"Target agent ID (empty=broadcast)"},"content":{"type":"string"}},"required":["team_id","content"]}`),
-		teamSend(ops))
+		GroupTeam, RiskModerate, "builtin", teamSend(ops))
 
-	reg.Register("team_inbox", "Check team inbox messages",
+	reg.RegisterWithGroup("team_inbox", "Check team inbox messages",
 		json.RawMessage(`{"type":"object","properties":{"unread_only":{"type":"boolean","default":true}}}`),
-		teamInbox(ops))
+		GroupTeam, RiskModerate, "builtin", teamInbox(ops))
 }
 
 func teamCreateTask(ops TeamOps) ToolFunc {

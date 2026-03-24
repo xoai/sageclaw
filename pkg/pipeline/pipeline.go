@@ -65,6 +65,21 @@ func New(
 	return p
 }
 
+// InjectConsent sends a consent response into the agent loop's inject channel.
+func (p *Pipeline) InjectConsent(group string, granted bool) {
+	if p.agentLoop == nil {
+		return
+	}
+	action := "__consent_deny__"
+	if granted {
+		action = "__consent_grant__"
+	}
+	p.agentLoop.Inject(canonical.Message{
+		Role: "user",
+		Content: []canonical.Content{{Type: "text", Text: action + group}},
+	})
+}
+
 // channelKey encodes channel, kind, chatID, threadID, and optional agentID into a single key for the debouncer.
 // Kind and threadID are included so DM and group messages debounce independently.
 func channelKey(channel, kind, chatID, threadID, agentID string) string {
@@ -108,6 +123,7 @@ func parseChannelKey(key string) (channel, kind, chatID, threadID, agentID strin
 func (p *Pipeline) checkPolicy(ctx context.Context, env bus.Envelope) bool {
 	conn, err := p.store.GetConnection(ctx, env.Channel)
 	if err != nil {
+		log.Printf("policy: unknown connection %s, allowing (legacy compat)", env.Channel)
 		return true // Unknown connection → allow (legacy compat)
 	}
 

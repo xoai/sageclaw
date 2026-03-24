@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -12,10 +13,20 @@ import (
 // ToolFunc is the execution signature for all tools.
 type ToolFunc func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error)
 
+// Risk levels for tool consent.
+const (
+	RiskSafe      = "safe"      // No external effects (memory, audit)
+	RiskModerate  = "moderate"  // File/web access (fs, web, cron)
+	RiskSensitive = "sensitive" // Shell execution, delegation, MCP
+)
+
 // registeredTool holds a tool's definition and implementation.
 type registeredTool struct {
-	def  canonical.ToolDef
-	exec ToolFunc
+	def    canonical.ToolDef
+	exec   ToolFunc
+	group  string // e.g. "fs", "runtime", "web", "memory", "mcp"
+	risk   string // "safe", "moderate", "sensitive"
+	source string // "builtin", "mcp:{server}", "skill:{name}"
 }
 
 // Registry manages available tools.
@@ -29,8 +40,13 @@ func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]registeredTool)}
 }
 
-// Register adds a tool to the registry.
+// Register adds a tool to the registry (backward compatible, group="other").
 func (r *Registry) Register(name, description string, schema json.RawMessage, fn ToolFunc) {
+	r.RegisterWithGroup(name, description, schema, "other", RiskModerate, "builtin", fn)
+}
+
+// RegisterWithGroup adds a tool with group, risk level, and source metadata.
+func (r *Registry) RegisterWithGroup(name, description string, schema json.RawMessage, group, risk, source string, fn ToolFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[name] = registeredTool{
@@ -39,7 +55,10 @@ func (r *Registry) Register(name, description string, schema json.RawMessage, fn
 			Description: description,
 			InputSchema: schema,
 		},
-		exec: fn,
+		exec:   fn,
+		group:  group,
+		risk:   risk,
+		source: source,
 	}
 }
 
@@ -52,6 +71,29 @@ func (r *Registry) Get(name string) (canonical.ToolDef, ToolFunc, bool) {
 		return canonical.ToolDef{}, nil, false
 	}
 	return t.def, t.exec, true
+}
+
+// GetMeta returns a tool's group, risk, and source by name.
+func (r *Registry) GetMeta(name string) (group, risk, source string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, found := r.tools[name]
+	if !found {
+		return "", "", "", false
+	}
+	return t.group, t.risk, t.source, true
+}
+
+// HasMCPTools returns true if any registered tools come from MCP servers.
+func (r *Registry) HasMCPTools() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, t := range r.tools {
+		if strings.HasPrefix(t.source, "mcp:") {
+			return true
+		}
+	}
+	return false
 }
 
 // Execute runs a tool by name with the given input.
@@ -74,6 +116,76 @@ func (r *Registry) List() []canonical.ToolDef {
 	return defs
 }
 
+// ListForAgent returns tool definitions filtered by profile, deny, and alsoAllow.
+// Resolution: start with profile set → intersect with enabled (if non-empty) →
+// remove deny → add back alsoAllow.
+func (r *Registry) ListForAgent(profile string, enabled, deny, alsoAllow []string) []canonical.ToolDef {
+	if profile == "" {
+		profile = ProfileFull
+	}
+
+	// Step 1: Get profile's allowed groups.
+	allowedGroups := ProfileGroups(profile)
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Step 2: Collect tools matching profile groups.
+	// "full" profile means all tools.
+	candidates := make(map[string]registeredTool)
+	for name, t := range r.tools {
+		if profile == ProfileFull {
+			candidates[name] = t
+		} else if allowedGroups[t.group] {
+			candidates[name] = t
+		}
+	}
+
+	// Step 3: Intersect with enabled list (backward compat).
+	if len(enabled) > 0 {
+		enabledSet := toSet(enabled)
+		for name := range candidates {
+			if !enabledSet[name] {
+				delete(candidates, name)
+			}
+		}
+	}
+
+	// Step 4: Remove denied tools/groups.
+	for _, d := range deny {
+		if strings.HasPrefix(d, "group:") {
+			groupName := strings.TrimPrefix(d, "group:")
+			for name, t := range candidates {
+				if t.group == groupName {
+					delete(candidates, name)
+				}
+			}
+		} else {
+			delete(candidates, d)
+		}
+	}
+
+	// Step 5: Add back alsoAllow tools.
+	for _, a := range alsoAllow {
+		if strings.HasPrefix(a, "group:") {
+			groupName := strings.TrimPrefix(a, "group:")
+			for name, t := range r.tools {
+				if t.group == groupName {
+					candidates[name] = t
+				}
+			}
+		} else if t, ok := r.tools[a]; ok {
+			candidates[a] = t
+		}
+	}
+
+	defs := make([]canonical.ToolDef, 0, len(candidates))
+	for _, t := range candidates {
+		defs = append(defs, t.def)
+	}
+	return defs
+}
+
 // Unregister removes a tool from the registry.
 func (r *Registry) Unregister(name string) {
 	r.mu.Lock()
@@ -90,4 +202,12 @@ func (r *Registry) Names() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+func toSet(items []string) map[string]bool {
+	s := make(map[string]bool, len(items))
+	for _, item := range items {
+		s[item] = true
+	}
+	return s
 }

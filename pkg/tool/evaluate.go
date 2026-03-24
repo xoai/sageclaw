@@ -13,9 +13,9 @@ type EvalFunc func(ctx context.Context, prompt string, maxRounds int, threshold 
 
 // RegisterEvaluate registers the evaluate tool.
 func RegisterEvaluate(reg *Registry, evalFn EvalFunc) {
-	reg.Register("evaluate", "Run a generator-evaluator loop for quality output",
+	reg.RegisterWithGroup("evaluate", "Run a generator-evaluator loop for quality output",
 		json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"Task prompt"},"max_rounds":{"type":"integer","description":"Max improvement rounds (default 3)","default":3},"threshold":{"type":"number","description":"Quality threshold 0-1 (default 0.7)","default":0.7}},"required":["prompt"]}`),
-		evaluateTool(evalFn))
+		GroupOrchestration, RiskSensitive, "builtin", evaluateTool(evalFn))
 }
 
 func evaluateTool(evalFn EvalFunc) ToolFunc {

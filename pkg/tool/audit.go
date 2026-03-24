@@ -12,13 +12,13 @@ import (
 
 // RegisterAudit registers audit query tools.
 func RegisterAudit(reg *Registry, db *sql.DB) {
-	reg.Register("audit_search", "Search the audit log",
+	reg.RegisterWithGroup("audit_search", "Search the audit log",
 		json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string"},"agent_id":{"type":"string"},"event_type":{"type":"string"},"since":{"type":"string","description":"ISO timestamp"},"limit":{"type":"integer","default":20}}}`),
-		auditSearch(db))
+		GroupAudit, RiskSafe, "builtin", auditSearch(db))
 
-	reg.Register("audit_stats", "Get audit statistics",
+	reg.RegisterWithGroup("audit_stats", "Get audit statistics",
 		json.RawMessage(`{"type":"object","properties":{"since":{"type":"string","description":"ISO timestamp"}}}`),
-		auditStats(db))
+		GroupAudit, RiskSafe, "builtin", auditStats(db))
 }
 
 func auditSearch(db *sql.DB) ToolFunc {

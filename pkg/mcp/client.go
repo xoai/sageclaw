@@ -1,97 +1,101 @@
 package mcp
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"os/exec"
-	"sync"
-	"sync/atomic"
+	"time"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/tool"
 )
 
-// Client connects to an external MCP server (stdio transport) and imports its tools.
+// Client connects to an external MCP server via any Transport and imports its tools.
 type Client struct {
-	command string   // e.g. "npx" or "python"
-	args    []string // e.g. ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
-	name    string   // Human-friendly name for this MCP server.
-
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	reader *bufio.Scanner
-
-	mu     sync.Mutex
-	nextID atomic.Int64
-	pending map[int64]chan JSONRPCResponse
-
-	tools []ToolDef
+	name      string
+	transport Transport
+	prefix    string // Tool name prefix (default: name + "_").
+	trust     string // "trusted" or "untrusted" (default).
+	tools     []ToolDef
 }
 
-// ClientConfig defines how to connect to an MCP server.
-type ClientConfig struct {
-	Name    string   `json:"name" yaml:"name"`       // Display name.
-	Command string   `json:"command" yaml:"command"` // Command to run.
-	Args    []string `json:"args" yaml:"args"`       // Arguments.
-}
-
-// NewClient creates a new MCP client for an external server.
-func NewClient(config ClientConfig) *Client {
+// NewClient creates a new MCP client with the given transport.
+func NewClient(name string, transport Transport) *Client {
 	return &Client{
-		command: config.Command,
-		args:    config.Args,
-		name:    config.Name,
-		pending: make(map[int64]chan JSONRPCResponse),
+		name:      name,
+		transport: transport,
+		prefix:    name + "_",
+		trust:     "untrusted",
 	}
 }
 
-// Start launches the MCP server process and initializes the connection.
+// NewClientFromConfig creates a Client from an MCPServerConfig, selecting the right transport.
+func NewClientFromConfig(name string, cfg MCPServerConfig) (*Client, error) {
+	var t Transport
+	timeout := time.Duration(cfg.TimeoutSec) * time.Second
+
+	switch cfg.Transport {
+	case "stdio", "":
+		if cfg.Command == "" {
+			return nil, fmt.Errorf("mcp %s: stdio transport requires command", name)
+		}
+		t = NewStdioTransport(name, cfg.Command, cfg.Args, cfg.Env)
+	case "sse":
+		if cfg.URL == "" {
+			return nil, fmt.Errorf("mcp %s: sse transport requires url", name)
+		}
+		t = NewSSETransport(name, cfg.URL, cfg.Headers, timeout)
+	case "streamable-http", "http":
+		if cfg.URL == "" {
+			return nil, fmt.Errorf("mcp %s: http transport requires url", name)
+		}
+		t = NewHTTPTransport(name, cfg.URL, cfg.Headers, timeout)
+	default:
+		return nil, fmt.Errorf("mcp %s: unknown transport %q", name, cfg.Transport)
+	}
+
+	prefix := cfg.ToolPrefix
+	if prefix == "" {
+		prefix = name + "_"
+	}
+
+	trust := cfg.Trust
+	if trust == "" {
+		trust = "untrusted"
+	}
+
+	return &Client{
+		name:      name,
+		transport: t,
+		prefix:    prefix,
+		trust:     trust,
+	}, nil
+}
+
+// MCPServerConfig defines how to connect to an external MCP server.
+// Duplicated here for convenience — canonical definition in agentcfg/types.go.
+type MCPServerConfig = struct {
+	Transport  string            `json:"transport" yaml:"transport"`
+	Command    string            `json:"command,omitempty" yaml:"command"`
+	Args       []string          `json:"args,omitempty" yaml:"args"`
+	Env        map[string]string `json:"env,omitempty" yaml:"env"`
+	URL        string            `json:"url,omitempty" yaml:"url"`
+	Headers    map[string]string `json:"headers,omitempty" yaml:"headers"`
+	ToolPrefix string            `json:"tool_prefix,omitempty" yaml:"tool_prefix"`
+	TimeoutSec int               `json:"timeout_sec,omitempty" yaml:"timeout_sec"`
+	Trust      string            `json:"trust,omitempty" yaml:"trust"`
+	Enabled    *bool             `json:"enabled,omitempty" yaml:"enabled"`
+}
+
+// Start connects the transport and discovers tools.
 func (c *Client) Start(ctx context.Context) error {
-	c.cmd = exec.CommandContext(ctx, c.command, c.args...)
-
-	var err error
-	c.stdin, err = c.cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("mcp-client %s: stdin pipe: %w", c.name, err)
+	if err := c.transport.Connect(ctx); err != nil {
+		return err
 	}
-
-	c.stdout, err = c.cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("mcp-client %s: stdout pipe: %w", c.name, err)
-	}
-
-	if err := c.cmd.Start(); err != nil {
-		return fmt.Errorf("mcp-client %s: start: %w", c.name, err)
-	}
-
-	c.reader = bufio.NewScanner(c.stdout)
-	c.reader.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	// Start response reader.
-	go c.readResponses()
-
-	// Initialize.
-	initResp, err := c.call(ctx, "initialize", map[string]any{
-		"protocolVersion": "2024-11-05",
-		"clientInfo":      map[string]string{"name": "sageclaw", "version": "0.4.0"},
-		"capabilities":    map[string]any{},
-	})
-	if err != nil {
-		return fmt.Errorf("mcp-client %s: initialize: %w", c.name, err)
-	}
-
-	log.Printf("mcp-client %s: initialized (protocol: %v)", c.name, initResp.Result)
-
-	// Send initialized notification.
-	c.send(JSONRPCRequest{JSONRPC: "2.0", Method: "initialized"})
 
 	// List tools.
-	toolsResp, err := c.call(ctx, "tools/list", nil)
+	toolsResp, err := c.transport.Call(ctx, "tools/list", nil)
 	if err != nil {
 		return fmt.Errorf("mcp-client %s: tools/list: %w", c.name, err)
 	}
@@ -102,34 +106,53 @@ func (c *Client) Start(ctx context.Context) error {
 	c.tools = toolsList.Tools
 
 	log.Printf("mcp-client %s: %d tools available", c.name, len(c.tools))
-
 	return nil
 }
 
-// Stop shuts down the MCP server process.
+// Stop shuts down the transport.
 func (c *Client) Stop() {
-	if c.stdin != nil {
-		c.stdin.Close()
-	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		c.cmd.Process.Kill()
+	if c.transport != nil {
+		c.transport.Close()
 	}
 }
 
+// Healthy returns whether the transport connection is alive.
+func (c *Client) Healthy() bool {
+	if c.transport == nil {
+		return false
+	}
+	return c.transport.Healthy()
+}
+
+// Name returns the server name.
+func (c *Client) Name() string {
+	return c.name
+}
+
+// Trust returns the trust level.
+func (c *Client) Trust() string {
+	return c.trust
+}
+
 // RegisterTools registers the external MCP server's tools into the tool registry.
-// Each tool is prefixed with the server name to avoid collisions.
 func (c *Client) RegisterTools(reg *tool.Registry) {
 	for _, t := range c.tools {
 		mcpTool := t // Capture for closure.
-		prefix := c.name + "_"
-		name := prefix + mcpTool.Name
+		name := c.prefix + mcpTool.Name
 
-		reg.Register(name, fmt.Sprintf("[MCP:%s] %s", c.name, mcpTool.Description),
+		reg.RegisterWithGroup(name, fmt.Sprintf("[MCP:%s] %s", c.name, mcpTool.Description),
 			mcpTool.InputSchema,
+			tool.GroupMCP, tool.RiskSensitive, "mcp:"+c.name,
 			func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 				result, err := c.CallTool(ctx, mcpTool.Name, input)
 				if err != nil {
 					return &canonical.ToolResult{Content: err.Error(), IsError: true}, nil
+				}
+				// Scrub credentials from all results.
+				result.Content = ScrubCredentials(result.Content)
+				// Wrap untrusted results with injection boundaries.
+				if !IsTrusted(c.trust) {
+					result.Content = WrapUntrustedResult(c.name, mcpTool.Name, result.Content)
 				}
 				return result, nil
 			})
@@ -138,7 +161,7 @@ func (c *Client) RegisterTools(reg *tool.Registry) {
 
 // CallTool invokes a tool on the external MCP server.
 func (c *Client) CallTool(ctx context.Context, name string, arguments json.RawMessage) (*canonical.ToolResult, error) {
-	resp, err := c.call(ctx, "tools/call", map[string]any{
+	resp, err := c.transport.Call(ctx, "tools/call", map[string]any{
 		"name":      name,
 		"arguments": json.RawMessage(arguments),
 	})
@@ -167,82 +190,4 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments json.RawMe
 // Tools returns the list of tools from the external server.
 func (c *Client) Tools() []ToolDef {
 	return c.tools
-}
-
-func (c *Client) call(ctx context.Context, method string, params any) (*JSONRPCResponse, error) {
-	id := c.nextID.Add(1)
-
-	var paramsData json.RawMessage
-	if params != nil {
-		paramsData, _ = json.Marshal(params)
-	}
-
-	req := JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      id,
-		Method:  method,
-		Params:  paramsData,
-	}
-
-	respCh := make(chan JSONRPCResponse, 1)
-	c.mu.Lock()
-	c.pending[id] = respCh
-	c.mu.Unlock()
-
-	if err := c.send(req); err != nil {
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
-		return nil, err
-	}
-
-	select {
-	case resp := <-respCh:
-		return &resp, nil
-	case <-ctx.Done():
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
-		return nil, ctx.Err()
-	}
-}
-
-func (c *Client) send(req JSONRPCRequest) error {
-	data, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(c.stdin, "%s\n", data)
-	return err
-}
-
-func (c *Client) readResponses() {
-	for c.reader.Scan() {
-		var resp JSONRPCResponse
-		if err := json.Unmarshal(c.reader.Bytes(), &resp); err != nil {
-			continue
-		}
-
-		// Match response to pending request.
-		if resp.ID != nil {
-			var id int64
-			switch v := resp.ID.(type) {
-			case float64:
-				id = int64(v)
-			case int64:
-				id = v
-			}
-
-			c.mu.Lock()
-			ch, ok := c.pending[id]
-			if ok {
-				delete(c.pending, id)
-			}
-			c.mu.Unlock()
-
-			if ok {
-				ch <- resp
-			}
-		}
-	}
 }
