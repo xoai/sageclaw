@@ -232,12 +232,12 @@ export default function AgentCreator({ id }) {
 
       {/* Config panel modal — opens when a node is clicked */}
       {activeNode && activeSchema && !isMobile && (
-        <div class="modal-overlay" onClick={() => setActiveNode(null)}>
+        <div class="modal-overlay" onClick={() => setActiveNode(null)} role="dialog" aria-modal="true" aria-labelledby="node-editor-title">
           <div class="modal-content" onClick={e => e.stopPropagation()} style="width:720px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden">
             {/* Fixed header with close button — outside scroll */}
             <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid var(--border);margin-bottom:12px;flex-shrink:0">
               <div>
-                <h2 style="font-size:16px;margin-bottom:2px">{activeSchema.title}</h2>
+                <h2 id="node-editor-title" style="font-size:16px;margin-bottom:2px">{activeSchema.title}</h2>
                 <p style="color:var(--text-muted);font-size:12px">{activeSchema.subtitle}</p>
               </div>
               <button class="btn-small" onClick={() => setActiveNode(null)}>{'\u2715'}</button>
@@ -260,9 +260,9 @@ export default function AgentCreator({ id }) {
 
       {/* Preset selector modal */}
       {showPresets && (
-        <div class="modal-overlay" onClick={() => setShowPresets(false)}>
+        <div class="modal-overlay" onClick={() => setShowPresets(false)} role="dialog" aria-modal="true" aria-labelledby="presets-title">
           <div class="modal-content" onClick={e => e.stopPropagation()} style="width:640px">
-            <h2>Choose a Preset</h2>
+            <h2 id="presets-title">Choose a Preset</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
               Start from a pre-configured agent template. You can customize everything after.
             </p>
@@ -287,9 +287,9 @@ export default function AgentCreator({ id }) {
 
       {/* Magic generator modal */}
       {showMagic && (
-        <div class="modal-overlay" onClick={() => setShowMagic(false)}>
+        <div class="modal-overlay" onClick={() => setShowMagic(false)} role="dialog" aria-modal="true" aria-labelledby="magic-title">
           <div class="modal-content" onClick={e => e.stopPropagation()} style="width:560px">
-            <h2>{'\u2728'} Describe Your Agent</h2>
+            <h2 id="magic-title">{'\u2728'} Describe Your Agent</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
               Tell us what you need in a few sentences. We'll generate a complete agent configuration using AI.
             </p>
@@ -315,9 +315,9 @@ export default function AgentCreator({ id }) {
 
       {/* Avatar modal — shown when Save is clicked */}
       {showAvatar && (
-        <div class="modal-overlay" onClick={() => setShowAvatar(false)}>
+        <div class="modal-overlay" onClick={() => setShowAvatar(false)} role="dialog" aria-modal="true" aria-labelledby="avatar-title">
           <div class="modal-content" onClick={e => e.stopPropagation()} style="width:480px;text-align:center">
-            <h2>Agent Avatar</h2>
+            <h2 id="avatar-title">Agent Avatar</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
               Generate an avatar for your agent, or skip to save without one.
             </p>

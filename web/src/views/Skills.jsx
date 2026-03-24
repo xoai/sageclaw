@@ -58,11 +58,11 @@ export function Skills() {
         </div>
       </div>
 
-      {msg && <div class="card" style="padding:0.75rem;margin-bottom:1rem;color:#17bf63">{msg}</div>}
+      {msg && <div class="card" style="padding:0.75rem;margin-bottom:1rem;color:var(--success)">{msg}</div>}
 
       {skills.length === 0 ? (
-        <p style="color:#8899a6;text-align:center;margin-top:3rem">
-          No skills installed. Click "Install Skill" to add one from a git repository.
+        <p style="color:var(--text-muted);text-align:center;margin-top:3rem">
+          No skills installed yet. Skills extend what your agents can do — install one from a git repository.
         </p>
       ) : (
         <div class="card-list">
@@ -82,9 +82,9 @@ export function Skills() {
       )}
 
       {showInstall && (
-        <div class="modal-overlay" onClick={() => setShowInstall(false)}>
+        <div class="modal-overlay" onClick={() => setShowInstall(false)} role="dialog" aria-modal="true" aria-labelledby="install-skill-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>Install Skill</h2>
+            <h2 id="install-skill-title">Install Skill</h2>
             <div class="form-group">
               <label>Git Repository URL</label>
               <input type="text" placeholder="https://github.com/user/skill-name"

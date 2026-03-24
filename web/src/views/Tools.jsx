@@ -96,7 +96,7 @@ export default function Tools() {
       )}
 
       {filtered.length === 0 && (
-        <p style="text-align:center;color:var(--text-muted);margin-top:2rem">No tools match your search.</p>
+        <p style="text-align:center;color:var(--text-muted);margin-top:2rem">No tools match your search. Try different keywords.</p>
       )}
     </div>
   );

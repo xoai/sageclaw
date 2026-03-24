@@ -97,8 +97,8 @@ export default function Onboarding() {
               <span style={`
                 display:inline-flex;align-items:center;justify-content:center;
                 width:28px;height:28px;border-radius:50%;font-size:12px;font-weight:700;
-                ${i < step ? 'background:var(--success);color:#fff' :
-                  i === step ? 'background:var(--primary);color:#fff' :
+                ${i < step ? 'background:var(--success);color:var(--text-on-primary)' :
+                  i === step ? 'background:var(--primary);color:var(--text-on-primary)' :
                   'background:var(--surface);color:var(--text-muted);border:1px solid var(--border)'}
               `}>
                 {i < step ? '\u2713' : i + 1}

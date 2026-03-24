@@ -83,7 +83,7 @@ export function Sessions() {
   };
 
   const deleteSelected = async () => {
-    if (!confirm(`Delete ${selected.size} session(s)?`)) return;
+    if (!confirm(`Delete ${selected.size} session(s)? This removes all conversation history and cannot be undone.`)) return;
     for (const id of selected) {
       await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
     }
@@ -102,7 +102,7 @@ export function Sessions() {
   // Unique channels from sessions for filter.
   const channels = [...new Set(sessions.map(s => s.channel))].sort();
 
-  if (loading) return <div class="empty">Loading sessions...</div>;
+  if (loading) return <div class="empty" role="status">Loading sessions...</div>;
 
   return (
     <div>
@@ -148,30 +148,31 @@ export function Sessions() {
         <table class="data-table">
           <thead>
             <tr>
-              <th style="width:30px">
+              <th scope="col" style="width:30px">
                 <input type="checkbox" checked={selected.size === sessions.length && sessions.length > 0}
-                  onChange={toggleAll} />
+                  onChange={toggleAll} aria-label="Select all sessions" />
               </th>
-              <th>Session</th>
-              <th>Agent</th>
-              <th>Channel</th>
-              <th>Messages</th>
-              <th>Tokens</th>
-              <th>Status</th>
-              <th>Updated</th>
-              <th></th>
+              <th scope="col">Session</th>
+              <th scope="col">Agent</th>
+              <th scope="col">Channel</th>
+              <th scope="col">Messages</th>
+              <th scope="col">Tokens</th>
+              <th scope="col">Status</th>
+              <th scope="col">Updated</th>
+              <th scope="col"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
             {sessions.map(s => (
-              <tr key={s.id} onClick={() => route(`/sessions/${s.id}`)} class="clickable">
+              <tr key={s.id} onClick={() => route(`/sessions/${s.id}`)} class="clickable" tabIndex={0}
+                onKeyDown={(e) => { if (e.key === 'Enter') route(`/sessions/${s.id}`); }}>
                 <td onClick={e => e.stopPropagation()}>
                   <input type="checkbox" checked={selected.has(s.id)}
-                    onChange={e => toggle(s.id, e)} />
+                    onChange={e => toggle(s.id, e)} aria-label={`Select session ${s.label || s.id?.slice(0, 8)}`} />
                 </td>
                 <td>
                   <div style="font-weight:600;font-size:13px">{s.label || s.id?.slice(0, 8)}</div>
-                  <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">{s.id?.slice(0, 8)}</div>
+                  <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)" title={s.id}>{s.id?.slice(0, 8)}</div>
                 </td>
                 <td>{s.agent_name || s.agent_id}</td>
                 <td>
@@ -200,7 +201,7 @@ export function Sessions() {
                 <td style="color:var(--text-muted);font-size:12px;white-space:nowrap">{s.updated_at?.slice(0, 16)?.replace('T', ' ')}</td>
                 <td onClick={e => e.stopPropagation()}>
                   <button class="btn-small btn-danger" onClick={async () => {
-                    if (!confirm('Delete this session?')) return;
+                    if (!confirm('Delete this session? All messages and history will be removed.')) return;
                     await fetch(`/api/sessions/${s.id}`, { method: 'DELETE' });
                     load();
                   }}>Delete</button>

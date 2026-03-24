@@ -14,9 +14,9 @@ const nodes = [
 ];
 
 const stateColors = {
-  complete: '#3fb950',
-  partial: '#d29922',
-  empty: '#30363d',
+  complete: 'var(--success)',
+  partial: 'var(--warning)',
+  empty: 'var(--border)',
 };
 
 export default function BodyDiagram({ activeNode, onNodeClick, getState }) {
@@ -25,7 +25,7 @@ export default function BodyDiagram({ activeNode, onNodeClick, getState }) {
   return (
     <div style="position:relative;width:100%;max-width:520px;aspect-ratio:3/4;overflow:visible">
       {/* Body image — centered */}
-      <img src="/body-small.png" alt=""
+      <img src="/body-small.png" alt="Agent body diagram"
         style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;opacity:0.55" />
 
       {/* SVG — lines from circles to body anchor points */}
@@ -59,7 +59,9 @@ export default function BodyDiagram({ activeNode, onNodeClick, getState }) {
             : 'transparent';
 
           return (
-            <div key={node.id} onClick={() => onNodeClick(node.id)}
+            <div key={node.id} role="button" tabIndex={0} aria-label={`${node.label}: ${node.subtitle}`}
+              onClick={() => onNodeClick(node.id)}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNodeClick(node.id); } }}
               style={[
                 'position:absolute',
                 `left:${node.x}%;top:${node.y}%`,
@@ -74,10 +76,10 @@ export default function BodyDiagram({ activeNode, onNodeClick, getState }) {
                 'display:flex;flex-direction:column;align-items:center;justify-content:center',
                 'cursor:pointer;user-select:none',
               ].filter(Boolean).join(';')}>
-              <span style={`color:${isActive ? '#fff' : '#c9d1d9'};font-size:13px;font-weight:600;font-family:var(--sans);line-height:1.2;text-align:center`}>
+              <span style={`color:${isActive ? 'var(--text-on-primary)' : 'var(--text)'};font-size:13px;font-weight:600;font-family:var(--sans);line-height:1.2;text-align:center`}>
                 {node.label}
               </span>
-              <span style={`color:${isActive ? 'rgba(255,255,255,0.7)' : '#8b949e'};font-size:10px;font-family:var(--sans);line-height:1.2;text-align:center`}>
+              <span style={`color:var(--text-muted);font-size:10px;font-family:var(--sans);line-height:1.2;text-align:center${isActive ? ';opacity:0.7' : ''}`}>
                 {node.subtitle}
               </span>
 

@@ -154,7 +154,7 @@ export default function Budget() {
               <h3 style="margin-bottom:12px">Top Models (This Month)</h3>
               <table class="data-table">
                 <thead>
-                  <tr><th>Model</th><th>Provider</th><th>Cost</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th></tr>
+                  <tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col">Cost</th><th scope="col">Requests</th><th scope="col">Input Tokens</th><th scope="col">Output Tokens</th></tr>
                 </thead>
                 <tbody>
                   {topModels.map((m, i) => (
@@ -221,7 +221,7 @@ export default function Budget() {
               {/* Table below chart */}
               <table class="data-table" style="margin-top:16px">
                 <thead>
-                  <tr><th>Date</th><th>Cost</th><th>Saved</th><th>Requests</th></tr>
+                  <tr><th scope="col">Date</th><th scope="col">Cost</th><th scope="col">Saved</th><th scope="col">Requests</th></tr>
                 </thead>
                 <tbody>
                   {[...history].reverse().map((d, i) => (

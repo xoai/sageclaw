@@ -124,7 +124,7 @@ export function Teams() {
 
             {(tasks[team.id] || []).length > 0 && (
               <table class="data-table" style="margin-top:4px">
-                <thead><tr><th>Status</th><th>Title</th><th>Assigned</th><th>Created By</th></tr></thead>
+                <thead><tr><th scope="col">Status</th><th scope="col">Title</th><th scope="col">Assigned</th><th scope="col">Created By</th></tr></thead>
                 <tbody>
                   {(tasks[team.id] || []).map(task => (
                     <tr key={task.id}>
@@ -142,9 +142,9 @@ export function Teams() {
       )}
 
       {showModal && (
-        <div class="modal-overlay" onClick={() => setShowModal(false)}>
+        <div class="modal-overlay" onClick={() => setShowModal(false)} role="dialog" aria-modal="true" aria-labelledby="create-team-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>{editing ? 'Edit Team' : 'Create Team'}</h2>
+            <h2 id="create-team-title">{editing ? 'Edit Team' : 'Create Team'}</h2>
 
             <div class="form-group">
               <Label text="Team Name" tip="A descriptive name for this agent team." />

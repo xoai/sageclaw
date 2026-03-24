@@ -97,7 +97,7 @@ export default function MCPServers() {
     setAddPrefix('');
   };
 
-  if (loading) return <div class="empty">Loading...</div>;
+  if (loading) return <div class="empty">Loading MCP servers...</div>;
 
   return (
     <div>
@@ -118,7 +118,7 @@ export default function MCPServers() {
       {servers.length === 0 && (
         <div class="empty">
           <p>No MCP servers connected.</p>
-          <p style="color:var(--text-muted)">Add servers via the dashboard or in agent tools.yaml config.</p>
+          <p style="color:var(--text-muted)">Click "Add Server" above, or configure servers in your agent's tools.yaml.</p>
         </div>
       )}
 
@@ -144,9 +144,9 @@ export default function MCPServers() {
       </div>
 
       {showAdd && (
-        <div class="modal-overlay" onClick={() => setShowAdd(false)}>
+        <div class="modal-overlay" onClick={() => setShowAdd(false)} role="dialog" aria-modal="true" aria-labelledby="add-mcp-title">
           <div class="modal-content" onClick={e => e.stopPropagation()} style="max-width:500px">
-            <h2 style="margin-top:0">Add MCP Server</h2>
+            <h2 id="add-mcp-title" style="margin-top:0">Add MCP Server</h2>
 
             <label style="display:block;margin-bottom:12px">
               <span style="color:var(--text-muted);font-size:0.85rem">Name</span>

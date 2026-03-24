@@ -50,17 +50,17 @@ export default function Cron() {
       </div>
 
       {jobs.length === 0 ? (
-        <p style="color:#8899a6;text-align:center;margin-top:3rem">No cron jobs scheduled.</p>
+        <p style="color:var(--text-muted);text-align:center;margin-top:3rem">No cron jobs yet. Schedule agents to run on a recurring basis.</p>
       ) : (
         <table class="data-table">
           <thead>
             <tr>
-              <th>Schedule</th>
-              <th>Prompt</th>
-              <th>Agent</th>
-              <th>Last Run</th>
-              <th>Status</th>
-              <th>Actions</th>
+              <th scope="col">Schedule</th>
+              <th scope="col">Prompt</th>
+              <th scope="col">Agent</th>
+              <th scope="col">Last Run</th>
+              <th scope="col">Status</th>
+              <th scope="col">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -82,9 +82,9 @@ export default function Cron() {
       )}
 
       {showModal && (
-        <div class="modal-overlay" onClick={() => setShowModal(false)}>
+        <div class="modal-overlay" onClick={() => setShowModal(false)} role="dialog" aria-modal="true" aria-labelledby="cron-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>New Cron Job</h2>
+            <h2 id="cron-title">New Cron Job</h2>
             <div class="form-group">
               <label>Schedule</label>
               <select onChange={e => { if (e.target.value) setForm({ ...form, schedule: e.target.value }); }}>

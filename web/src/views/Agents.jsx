@@ -106,9 +106,9 @@ export function Agents() {
 
       {/* Quick Create Modal */}
       {showCreate && (
-        <div class="modal-overlay" onClick={() => setShowCreate(false)}>
+        <div class="modal-overlay" onClick={() => setShowCreate(false)} role="dialog" aria-modal="true" aria-labelledby="create-agent-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>New Agent</h2>
+            <h2 id="create-agent-title">New Agent</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
               Set up the basics here. You'll configure personality, tools, and more in the full editor.
             </p>

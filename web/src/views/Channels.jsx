@@ -198,7 +198,7 @@ export function Channels() {
         <div>
           <h1>Channels</h1>
           <p style="color:var(--text-muted);font-size:13px;margin-top:4px">
-            Manage bot connections across messaging platforms.
+            Telegram, Discord, WhatsApp, Zalo, and other platform connections.
           </p>
         </div>
         <button class="btn-primary" onClick={() => setShowAdd(true)}>Add Connection</button>
@@ -304,7 +304,7 @@ export function Channels() {
           <h2 style="font-size:16px;margin-bottom:12px">Paired Devices</h2>
           <table class="data-table">
             <thead>
-              <tr><th>Channel</th><th>Chat ID</th><th>Paired At</th><th></th></tr>
+              <tr><th scope="col">Channel</th><th scope="col">Chat ID</th><th scope="col">Paired At</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
             </thead>
             <tbody>
               {pairedDevices.map(d => (
@@ -322,11 +322,11 @@ export function Channels() {
 
       {/* Add Connection modal */}
       {showAdd && (
-        <div class="modal-overlay" onClick={() => setShowAdd(false)}>
+        <div class="modal-overlay" onClick={() => setShowAdd(false)} role="dialog" aria-modal="true" aria-labelledby="add-conn-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>Add Connection</h2>
+            <h2 id="add-conn-title">Add Connection</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
-              Connect a bot to SageClaw. The platform will be queried to fetch bot info.
+              Paste your bot credentials. SageClaw will verify them with the platform.
             </p>
             <div class="form-group">
               <label>Platform</label>
@@ -374,9 +374,9 @@ export function Channels() {
 
       {/* Bind Agent modal */}
       {bindConn && (
-        <div class="modal-overlay" onClick={() => setBindConn(null)}>
+        <div class="modal-overlay" onClick={() => setBindConn(null)} role="dialog" aria-modal="true" aria-labelledby="bind-agent-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>Bind Agent to {bindConn.label || bindConn.id}</h2>
+            <h2 id="bind-agent-title">Bind Agent to {bindConn.label || bindConn.id}</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
               Messages from this connection will be routed to the selected agent.
             </p>
@@ -399,9 +399,9 @@ export function Channels() {
 
       {/* Pairing code modal */}
       {pairingCode && (
-        <div class="modal-overlay" onClick={() => { setPairingCode(null); setPairingChannel(null); }}>
+        <div class="modal-overlay" onClick={() => { setPairingCode(null); setPairingChannel(null); }} role="dialog" aria-modal="true" aria-labelledby="pairing-title">
           <div class="modal-content" onClick={e => e.stopPropagation()} style="text-align:center">
-            <h2>Pairing Code</h2>
+            <h2 id="pairing-title">Pairing Code</h2>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
               Send this code to your bot on {pairingChannel} to pair your device.
             </p>

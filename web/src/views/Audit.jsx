@@ -37,7 +37,7 @@ export default function Audit() {
             <div style="color:var(--text-muted);font-size:0.85rem">Unique Tools</div>
           </div>
           <div class="card" style="text-align:center;padding:1rem">
-            <div style="font-size:2rem;font-weight:700;color:{stats.error_rate > 5 ? '#e0245e' : '#17bf63'}">{stats.error_rate?.toFixed(1)}%</div>
+            <div style={`font-size:2rem;font-weight:700;color:${stats.error_rate > 5 ? 'var(--error)' : 'var(--success)'}`}>{stats.error_rate?.toFixed(1)}%</div>
             <div style="color:var(--text-muted);font-size:0.85rem">Error Rate</div>
           </div>
           <div class="card" style="text-align:center;padding:1rem">
@@ -77,7 +77,7 @@ export default function Audit() {
       {/* Results table */}
       <table class="data-table">
         <thead>
-          <tr><th>Time</th><th>Agent</th><th>Event</th><th>Details</th></tr>
+          <tr><th scope="col">Time</th><th scope="col">Agent</th><th scope="col">Event</th><th scope="col">Details</th></tr>
         </thead>
         <tbody>
           {entries.map(e => (
@@ -94,7 +94,7 @@ export default function Audit() {
             </tr>
           ))}
           {entries.length === 0 && (
-            <tr><td colspan="4" style="text-align:center;color:var(--text-muted)">No audit entries found.</td></tr>
+            <tr><td colspan="4" style="text-align:center;color:var(--text-muted)">No audit events yet. Agent activity will appear here automatically.</td></tr>
           )}
         </tbody>
       </table>

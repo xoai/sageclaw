@@ -38,7 +38,7 @@ export function Providers() {
     if (data.error) { setMsg(data.error); return; }
     setShowAddProvider(false);
     setProviderForm({ type: 'anthropic', name: '', api_key: '', base_url: '' });
-    setMsg('Provider added. Restart SageClaw to activate.');
+    setMsg('Provider added. Restart the SageClaw server to activate.');
     setTimeout(() => setMsg(''), 5000);
     loadProviders();
   };
@@ -201,9 +201,9 @@ export function Providers() {
 
       {/* Add Provider Modal */}
       {showAddProvider && (
-        <div class="modal-overlay" onClick={() => setShowAddProvider(false)}>
+        <div class="modal-overlay" onClick={() => setShowAddProvider(false)} role="dialog" aria-modal="true" aria-labelledby="add-provider-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>Add Provider</h2>
+            <h2 id="add-provider-title">Add Provider</h2>
             <div class="form-group">
               <Label text="Provider Type" tip="The AI service to connect. Each provider offers different models and pricing." />
               <select value={providerForm.type} onChange={e => {
@@ -286,9 +286,9 @@ export function Providers() {
         };
 
         return (
-          <div class="modal-overlay" onClick={() => setShowAddCombo(false)}>
+          <div class="modal-overlay" onClick={() => setShowAddCombo(false)} role="dialog" aria-modal="true" aria-labelledby="add-combo-title">
             <div class="modal-content" style="width:560px" onClick={e => e.stopPropagation()}>
-              <h2>Create Combo</h2>
+              <h2 id="add-combo-title">Create Combo</h2>
               <div class="form-group">
                 <Label text="Name" tip="A short name for this routing combo." />
                 <input type="text" placeholder="e.g. Budget Friendly"

@@ -66,7 +66,7 @@ export default function Graph() {
                 onClick={() => loadGraph(m.id)}
                 style="margin-bottom:0.5rem;padding:0.75rem;cursor:pointer">
                 <div style="font-weight:600;font-size:0.9rem">{m.title || 'Untitled'}</div>
-                <div style="font-size:0.8rem;color:#8899a6;margin-top:0.25rem">
+                <div style="font-size:0.8rem;color:var(--text-muted);margin-top:0.25rem">
                   {m.content?.slice(0, 60)}...
                 </div>
               </div>
@@ -77,7 +77,7 @@ export default function Graph() {
         {/* Graph view */}
         <div>
           {!selectedNode ? (
-            <div style="text-align:center;color:#8899a6;margin-top:3rem">
+            <div style="text-align:center;color:var(--text-muted);margin-top:3rem">
               Select a memory to explore its connections.
             </div>
           ) : (
@@ -85,16 +85,16 @@ export default function Graph() {
               <h3 style="margin-bottom:1rem">Connections</h3>
 
               {graphData.edges?.length === 0 ? (
-                <p style="color:#8899a6">No connections found. Use "Link Memories" to create relationships.</p>
+                <p style="color:var(--text-muted)">No connections found. Use "Link Memories" to create relationships.</p>
               ) : (
                 <div class="card-list">
                   {graphData.edges?.map((edge, i) => (
                     <div class="card" key={i} style="padding:0.75rem">
                       <div style="display:flex;justify-content:space-between;align-items:center">
                         <div>
-                          <span style="color:#8899a6">{edge.source_id?.slice(0, 8)}</span>
-                          <span style="margin:0 0.5rem;color:#1da1f2">--{edge.relation}--&gt;</span>
-                          <span style="color:#8899a6">{edge.target_id?.slice(0, 8)}</span>
+                          <span style="color:var(--text-muted)">{edge.source_id?.slice(0, 8)}</span>
+                          <span style="margin:0 0.5rem;color:var(--primary)">--{edge.relation}--&gt;</span>
+                          <span style="color:var(--text-muted)">{edge.target_id?.slice(0, 8)}</span>
                         </div>
                         <button class="btn-small btn-danger"
                           onClick={() => removeLink(edge.source_id, edge.target_id, edge.relation)}>
@@ -113,7 +113,7 @@ export default function Graph() {
                     <div key={n.id} class="card clickable" onClick={() => loadGraph(n.id)}
                       style="margin-top:0.5rem;padding:0.75rem;cursor:pointer">
                       <strong>{n.title || 'Untitled'}</strong>
-                      <div style="font-size:0.85rem;color:#8899a6;margin-top:0.25rem">
+                      <div style="font-size:0.85rem;color:var(--text-muted);margin-top:0.25rem">
                         {n.content?.slice(0, 100)}
                       </div>
                     </div>
@@ -126,9 +126,9 @@ export default function Graph() {
       </div>
 
       {showLinkModal && (
-        <div class="modal-overlay" onClick={() => setShowLinkModal(false)}>
+        <div class="modal-overlay" onClick={() => setShowLinkModal(false)} role="dialog" aria-modal="true" aria-labelledby="link-modal-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>Link Memories</h2>
+            <h2 id="link-modal-title">Link Memories</h2>
             <div class="form-group">
               <label>Source Memory ID</label>
               <input type="text" value={linkForm.source_id}

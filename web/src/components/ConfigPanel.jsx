@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useState, useRef } from 'preact/hooks';
 
 export default function ConfigPanel({ schema, values, onChange, onClose, inline }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -25,7 +25,7 @@ export default function ConfigPanel({ schema, values, onChange, onClose, inline 
             <h2 style="font-size:16px;margin-bottom:2px">{schema.title}</h2>
             <p style="color:var(--text-muted);font-size:12px">{schema.subtitle}</p>
           </div>
-          <button class="btn-small" onClick={onClose}>{'\u2715'}</button>
+          <button class="btn-small" onClick={onClose} aria-label="Close panel">{'\u2715'}</button>
         </div>
       )}
 
@@ -70,15 +70,25 @@ export default function ConfigPanel({ schema, values, onChange, onClose, inline 
   );
 }
 
+let _keyCounter = 0;
+
 function SchemaField({ field, value, onChange }) {
   const val = value !== undefined ? value : field.default;
+  const fieldId = `field-${field.key}`;
+  // Stable keys for repeating list items (avoids index-as-key issues on delete)
+  const keysRef = useRef([]);
+  const ensureKeys = (count) => {
+    while (keysRef.current.length < count) keysRef.current.push(++_keyCounter);
+    if (keysRef.current.length > count) keysRef.current.length = count;
+    return keysRef.current;
+  };
 
   switch (field.type) {
     case 'text':
       return (
         <div class="form-group">
-          <label>{field.label} {field.required && <span style="color:var(--error)">*</span>}</label>
-          <input type="text" value={val || ''} placeholder={field.placeholder || ''}
+          <label htmlFor={fieldId}>{field.label} {field.required && <span style="color:var(--error)">*</span>}</label>
+          <input id={fieldId} type="text" value={val || ''} placeholder={field.placeholder || ''}
             onInput={(e) => onChange(e.target.value)} />
           {field.help && <div style="font-size:11px;color:var(--text-muted);margin-top:2px">{field.help}</div>}
         </div>
@@ -87,8 +97,8 @@ function SchemaField({ field, value, onChange }) {
     case 'textarea':
       return (
         <div class="form-group">
-          <label>{field.label}</label>
-          <textarea rows={field.rows || 4} value={val || ''} placeholder={field.placeholder || ''}
+          <label htmlFor={fieldId}>{field.label}</label>
+          <textarea id={fieldId} rows={field.rows || 4} value={val || ''} placeholder={field.placeholder || ''}
             onInput={(e) => onChange(e.target.value)} />
           {field.help && <div style="font-size:11px;color:var(--text-muted);margin-top:2px">{field.help}</div>}
         </div>
@@ -97,8 +107,8 @@ function SchemaField({ field, value, onChange }) {
     case 'dropdown':
       return (
         <div class="form-group">
-          <label>{field.label}</label>
-          <select value={val || field.default || ''} onChange={(e) => onChange(e.target.value)}>
+          <label htmlFor={fieldId}>{field.label}</label>
+          <select id={fieldId} value={val || field.default || ''} onChange={(e) => onChange(e.target.value)}>
             {(field.options || []).map(opt => (
               <option key={opt} value={opt}>{opt}</option>
             ))}
@@ -110,11 +120,11 @@ function SchemaField({ field, value, onChange }) {
     case 'toggle':
       return (
         <div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px">
-          <input type="checkbox" checked={val !== undefined ? val : field.default}
+          <input id={fieldId} type="checkbox" checked={val !== undefined ? val : field.default}
             onChange={(e) => onChange(e.target.checked)}
             style="margin-top:2px;flex-shrink:0" />
           <div style="flex:1">
-            <label style="margin-bottom:0;font-size:13px;color:var(--text);display:inline">{field.label}</label>
+            <label htmlFor={fieldId} style="margin-bottom:0;font-size:13px;color:var(--text);display:inline">{field.label}</label>
             {field.help && (
               <span class="info-tip">
                 <span class="info-tip-icon">?</span>
@@ -129,7 +139,7 @@ function SchemaField({ field, value, onChange }) {
       const selected = Array.isArray(val) ? val : (field.default || []);
       return (
         <div class="form-group">
-          <label>{field.label}</label>
+          <label id={`${fieldId}-label`}>{field.label}</label>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
             {(field.options || []).map(opt => {
               const isSelected = selected.includes(opt);
@@ -154,7 +164,7 @@ function SchemaField({ field, value, onChange }) {
       const enabledTools = Array.isArray(val) ? val : (field.default || []);
       return (
         <div class="form-group">
-          <label>{field.label}</label>
+          <label id={`${fieldId}-label`}>{field.label}</label>
           {field.categories && Object.entries(field.categories).map(([cat, tools]) => {
             const allSelected = tools.every(t => enabledTools.includes(t));
             const someSelected = tools.some(t => enabledTools.includes(t));
@@ -195,11 +205,12 @@ function SchemaField({ field, value, onChange }) {
     case 'repeating':
     case 'repeating-text':
       const items = Array.isArray(val) ? val : (field.default || []);
+      const itemKeys = ensureKeys(items.length);
       return (
         <div class="form-group">
-          <label>{field.label}</label>
+          <label id={`${fieldId}-label`}>{field.label}</label>
           {items.map((item, i) => (
-            <div key={i} style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+            <div key={itemKeys[i]} style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
               {field.type === 'repeating-text' ? (
                 <input type="text" value={item || ''} placeholder={field.placeholder}
                   style="flex:1"
@@ -223,8 +234,11 @@ function SchemaField({ field, value, onChange }) {
                   ))}
                 </div>
               )}
-              <button class="btn-small btn-danger" type="button"
-                onClick={() => onChange(items.filter((_, j) => j !== i))}>
+              <button class="btn-small btn-danger" type="button" aria-label={`Remove item ${i + 1}`}
+                onClick={() => {
+                  keysRef.current.splice(i, 1);
+                  onChange(items.filter((_, j) => j !== i));
+                }}>
                 {'\u2715'}
               </button>
             </div>
@@ -240,8 +254,8 @@ function SchemaField({ field, value, onChange }) {
     default:
       return (
         <div class="form-group">
-          <label>{field.label}</label>
-          <input type="text" value={val || ''} onInput={(e) => onChange(e.target.value)} />
+          <label htmlFor={fieldId}>{field.label}</label>
+          <input id={fieldId} type="text" value={val || ''} onInput={(e) => onChange(e.target.value)} />
         </div>
       );
   }

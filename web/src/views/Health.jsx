@@ -19,12 +19,12 @@ export default function Health() {
   };
 
   const providerColor = (status) => {
-    if (status === 'connected') return '#17bf63';
-    if (status === 'not configured') return '#8899a6';
-    return '#e0245e';
+    if (status === 'connected') return 'var(--success)';
+    if (status === 'not configured') return 'var(--text-muted)';
+    return 'var(--error)';
   };
 
-  if (!health) return <div><h1>Health</h1><p style="color:#8899a6">Loading...</p></div>;
+  if (!health) return <div><h1>Health</h1><p style="color:var(--text-muted)">Loading...</p></div>;
 
   return (
     <div>
@@ -33,27 +33,27 @@ export default function Health() {
       {/* Status cards */}
       <div class="health-row-3" style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:2rem">
         <div class="card" style="text-align:center;padding:1.5rem">
-          <div style="font-size:1.5rem;font-weight:700;color:#17bf63">{health.pipeline}</div>
-          <div style="color:#8899a6;margin-top:0.5rem">Pipeline</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--success)">{health.pipeline}</div>
+          <div style="color:var(--text-muted);margin-top:0.5rem">Pipeline</div>
         </div>
         <div class="card" style="text-align:center;padding:1.5rem">
-          <div style="font-size:1.5rem;font-weight:700;color:#1da1f2">{formatUptime(health.uptime_seconds)}</div>
-          <div style="color:#8899a6;margin-top:0.5rem">Uptime</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--primary)">{formatUptime(health.uptime_seconds)}</div>
+          <div style="color:var(--text-muted);margin-top:0.5rem">Uptime</div>
         </div>
         <div class="card" style="text-align:center;padding:1.5rem">
-          <div style="font-size:1.5rem;font-weight:700;color:#1da1f2">{health.sessions_active}</div>
-          <div style="color:#8899a6;margin-top:0.5rem">Sessions</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--primary)">{health.sessions_active}</div>
+          <div style="color:var(--text-muted);margin-top:0.5rem">Sessions</div>
         </div>
       </div>
 
       <div class="health-row-2" style="display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin-bottom:2rem">
         <div class="card" style="text-align:center;padding:1.5rem">
-          <div style="font-size:1.5rem;font-weight:700;color:#1da1f2">{health.memories_count}</div>
-          <div style="color:#8899a6;margin-top:0.5rem">Memories</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--primary)">{health.memories_count}</div>
+          <div style="color:var(--text-muted);margin-top:0.5rem">Memories</div>
         </div>
         <div class="card" style="text-align:center;padding:1.5rem">
-          <div style="font-size:1.5rem;font-weight:700;color:#1da1f2">{health.cron_jobs}</div>
-          <div style="color:#8899a6;margin-top:0.5rem">Active Cron Jobs</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--primary)">{health.cron_jobs}</div>
+          <div style="color:var(--text-muted);margin-top:0.5rem">Active Cron Jobs</div>
         </div>
       </div>
 
@@ -70,7 +70,7 @@ export default function Health() {
                 backgroundColor: providerColor(status),
               }} />
             </div>
-            <div style="color:#8899a6;font-size:0.85rem;margin-top:0.5rem">{status}</div>
+            <div style="color:var(--text-muted);font-size:0.85rem;margin-top:0.5rem">{status}</div>
           </div>
         ))}
       </div>

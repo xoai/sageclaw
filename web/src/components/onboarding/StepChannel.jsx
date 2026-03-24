@@ -96,7 +96,7 @@ export default function StepChannel({ progress, onComplete, onBack }) {
       <div class="card" style="padding:24px">
         <h2 style="font-size:16px;margin-bottom:4px">Connect a Channel</h2>
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
-          Where should <strong>{progress.agentName || 'your agent'}</strong> live? Pick a messaging platform or use web chat.
+          Where should <strong>{progress.agentName || 'your agent'}</strong> be available? Pick a messaging platform or start with web chat.
         </p>
 
         <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
@@ -117,7 +117,7 @@ export default function StepChannel({ progress, onComplete, onBack }) {
             <span style="font-size:20px">{'\uD83C\uDF10'}</span>
             <div>
               <div style="font-weight:600;font-size:13px">Web Only</div>
-              <div style="font-size:12px;color:var(--text-muted)">Skip — use the built-in web chat. Add channels later.</div>
+              <div style="font-size:12px;color:var(--text-muted)">Start with web chat only. Add other platforms later.</div>
             </div>
           </div>
         </div>

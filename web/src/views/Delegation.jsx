@@ -51,7 +51,7 @@ export default function Delegation() {
             <button class="btn-primary" onClick={() => setShowModal(true)}>+ Add Link</button>
           </div>
           {links.length === 0 ? (
-            <p style="color:#8899a6;text-align:center">No delegation links configured.</p>
+            <p style="color:var(--text-muted);text-align:center">No delegation links yet. Link agents together to enable task handoff.</p>
           ) : (
             <div class="card-list">
               {links.map(l => (
@@ -59,12 +59,12 @@ export default function Delegation() {
                   <div style="display:flex;justify-content:space-between;align-items:center">
                     <div>
                       <strong>{l.source_id}</strong>
-                      <span style="margin:0 0.5rem;color:#8899a6">{l.direction === 'async' ? '⇢' : '→'}</span>
+                      <span style="margin:0 0.5rem;color:var(--text-muted)">{l.direction === 'async' ? '⇢' : '→'}</span>
                       <strong>{l.target_id}</strong>
                     </div>
                     <button class="btn-small btn-danger" onClick={() => deleteLink(l.id)}>Delete</button>
                   </div>
-                  <div style="margin-top:0.5rem;font-size:0.85rem;color:#8899a6">
+                  <div style="margin-top:0.5rem;font-size:0.85rem;color:var(--text-muted)">
                     {l.direction} | Max: {l.max_concurrent} | Active: {l.active_count}
                   </div>
                 </div>
@@ -77,7 +77,7 @@ export default function Delegation() {
       {tab === 'history' && (
         <table class="data-table">
           <thead>
-            <tr><th>Source</th><th>Target</th><th>Status</th><th>Prompt</th><th>Started</th></tr>
+            <tr><th scope="col">Source</th><th scope="col">Target</th><th scope="col">Status</th><th scope="col">Prompt</th><th scope="col">Started</th></tr>
           </thead>
           <tbody>
             {history.map(h => (
@@ -89,15 +89,15 @@ export default function Delegation() {
                 <td>{h.started_at}</td>
               </tr>
             ))}
-            {history.length === 0 && <tr><td colspan="5" style="text-align:center;color:#8899a6">No delegation history.</td></tr>}
+            {history.length === 0 && <tr><td colspan="5" style="text-align:center;color:var(--text-muted)">No delegation history.</td></tr>}
           </tbody>
         </table>
       )}
 
       {showModal && (
-        <div class="modal-overlay" onClick={() => setShowModal(false)}>
+        <div class="modal-overlay" onClick={() => setShowModal(false)} role="dialog" aria-modal="true" aria-labelledby="delegation-title">
           <div class="modal-content" onClick={e => e.stopPropagation()}>
-            <h2>New Delegation Link</h2>
+            <h2 id="delegation-title">New Delegation Link</h2>
             <div class="form-group">
               <label>Source Agent ID</label>
               <input type="text" value={form.source} onInput={e => setForm({ ...form, source: e.target.value })} />

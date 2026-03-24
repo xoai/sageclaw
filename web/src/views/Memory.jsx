@@ -74,7 +74,7 @@ export function Memory() {
         value={query} onInput={e => setQuery(e.target.value)} />
 
       {loading && <div class="empty">Searching...</div>}
-      {!loading && memories.length === 0 && <div class="empty">No memories stored yet.</div>}
+      {!loading && memories.length === 0 && <div class="empty">No memories yet. Agents store learnings here automatically during conversations.</div>}
 
       {memories.map(mem => (
         <div key={mem.id} class="memory-card">
@@ -133,7 +133,7 @@ export function Memory() {
               </div>
               <p>{expanded === mem.id ? mem.content : (mem.content?.length > 200 ? mem.content.slice(0, 200) + '...' : mem.content)}</p>
               {expanded === mem.id && (
-                <div style="font-size:0.8rem;color:#8899a6;margin-top:0.5rem">
+                <div style="font-size:0.8rem;color:var(--text-muted);margin-top:0.5rem">
                   ID: {mem.id}
                 </div>
               )}

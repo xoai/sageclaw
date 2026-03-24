@@ -32,7 +32,7 @@ export default function StepComplete({ progress, onDone }) {
     <div class="card" style="padding:24px;text-align:center">
       {/* Success icon */}
       <div style="font-size:48px;margin-bottom:12px">{'\u2705'}</div>
-      <h2 style="font-size:18px;margin-bottom:4px">You're Live!</h2>
+      <h2 style="font-size:18px;margin-bottom:4px">Setup Complete</h2>
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:24px">
         Your agent is set up and ready to go.
       </p>

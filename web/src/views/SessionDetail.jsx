@@ -50,7 +50,7 @@ export function SessionDetail({ id }) {
     setContinuing(false);
   };
 
-  if (loading) return <div class="empty">Loading...</div>;
+  if (loading) return <div class="empty">Loading session...</div>;
 
   const formatTime = (ts) => {
     if (!ts) return '';

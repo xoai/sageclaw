@@ -46,7 +46,7 @@ function PasswordSection() {
         value={newPw} onInput={e => setNewPw(e.target.value)} style="margin-bottom:12px" />
       {error && <div style="color:var(--error);font-size:13px;margin-bottom:8px">{error}</div>}
       {msg && <div style="color:var(--success);font-size:13px;margin-bottom:8px">{msg}</div>}
-      <button class="chat-send" onClick={change}>Change Password</button>
+      <button class="btn-primary" onClick={change}>Change Password</button>
     </div>
   );
 }
@@ -88,9 +88,8 @@ function ConfigSection() {
       </p>
       <input type="file" accept=".json" ref={fileRef} onChange={handleFileSelected} style="display:none" />
       <div style="display:flex;gap:8px">
-        <button class="chat-send" onClick={exportConfig}>Export Config</button>
-        <button class="chat-send" onClick={() => fileRef.current.click()}
-          style="background:var(--surface);border:1px solid var(--border);color:var(--text)">Import Config</button>
+        <button class="btn-primary" onClick={exportConfig}>Export Config</button>
+        <button class="btn-secondary" onClick={() => fileRef.current.click()}>Import Config</button>
       </div>
       {importError && <div style="color:var(--error);font-size:13px;margin-top:8px">{importError}</div>}
       {importMsg && <div style="color:var(--success);font-size:13px;margin-top:8px">{importMsg}</div>}
@@ -155,7 +154,7 @@ function CredentialsSection() {
         <p style="color:var(--text-muted);font-size:13px">No credentials stored.</p>
       ) : (
         <table class="table" style="margin-top:8px">
-          <thead><tr><th>Name</th><th>Value</th><th>Updated</th><th></th></tr></thead>
+          <thead><tr><th scope="col">Name</th><th scope="col">Value</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>
             {creds.map(c => (
               <tr key={c.name}>

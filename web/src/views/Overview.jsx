@@ -78,7 +78,7 @@ export function Overview() {
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
         <div>
           <h1 style="margin-bottom:2px">Dashboard</h1>
-          <p style="color:var(--text-muted);font-size:13px">Overview and system status</p>
+          <p style="color:var(--text-muted);font-size:13px">Health, activity, and agent metrics</p>
         </div>
         {hasProvider && (
           <span class="badge badge-green" style="font-size:12px;padding:4px 12px">Connected</span>
@@ -155,7 +155,7 @@ export function Overview() {
         <div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="font-size:15px">Recent Sessions</h2>
-            <a href="/sessions" style="font-size:12px">View all</a>
+            <a href="/sessions" style="font-size:12px" aria-label="View all sessions">View all</a>
           </div>
           {recentSessions.length === 0 ? (
             <div class="card" style="padding:16px;text-align:center;color:var(--text-muted);font-size:13px">No sessions yet.</div>
@@ -183,7 +183,7 @@ export function Overview() {
         <div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="font-size:15px">Live Activity</h2>
-            <a href="/activity" style="font-size:12px">Full view</a>
+            <a href="/activity" style="font-size:12px" aria-label="View full activity log">Full view</a>
           </div>
           {recentEvents.length === 0 ? (
             <div class="card" style="padding:16px;text-align:center;color:var(--text-muted);font-size:13px">

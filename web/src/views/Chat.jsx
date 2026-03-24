@@ -310,7 +310,7 @@ export function Chat() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
           <div>
             <h1 style="margin-bottom:2px">Chat</h1>
-            <p style="color:var(--text-muted);font-size:13px">Your web chat conversations.</p>
+            <p style="color:var(--text-muted);font-size:13px">Talk to your agents in real time.</p>
           </div>
           <button class="btn-primary" onClick={showAgentPicker}>+ New Chat</button>
         </div>
@@ -325,7 +325,7 @@ export function Chat() {
         )}
 
         {listLoading ? (
-          <div class="empty">Loading sessions...</div>
+          <div class="empty" role="status">Loading sessions...</div>
         ) : webSessions.length === 0 ? (
           <div class="card" style="padding:32px;text-align:center">
             <p style="color:var(--text-muted);font-size:15px;margin-bottom:12px">No chat sessions yet.</p>
@@ -334,7 +334,8 @@ export function Chat() {
         ) : (
           <div style="display:flex;flex-direction:column;gap:8px">
             {webSessions.map(s => (
-              <div key={s.id} class="card clickable" style="padding:14px;cursor:pointer" onClick={() => openSession(s)}>
+              <div key={s.id} class="card clickable" style="padding:14px;cursor:pointer" role="button" tabIndex={0}
+                onClick={() => openSession(s)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSession(s); } }}>
                 <div style="display:flex;justify-content:space-between;align-items:center">
                   <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
                     <div style="flex:1;min-width:0">
@@ -379,7 +380,7 @@ export function Chat() {
         </div>
 
         {agentsLoading ? (
-          <div class="empty">Loading agents...</div>
+          <div class="empty" role="status">Loading agents...</div>
         ) : agents.length === 0 ? (
           <div class="card" style="padding:24px;text-align:center">
             <p style="color:var(--text-muted);margin-bottom:12px">No agents configured.</p>
@@ -389,7 +390,8 @@ export function Chat() {
           <div style="display:flex;flex-direction:column;gap:8px">
             {agents.map(a => (
               <div key={a.id} class="card clickable" style="padding:14px;cursor:pointer;display:flex;align-items:center;gap:12px"
-                onClick={() => startNewChat(a)}>
+                role="button" tabIndex={0}
+                onClick={() => startNewChat(a)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startNewChat(a); } }}>
                 {a.avatar && <span style="font-size:24px">{a.avatar}</span>}
                 <div style="flex:1">
                   <div style="font-weight:600;font-size:14px">{a.name || a.id}</div>
@@ -408,7 +410,7 @@ export function Chat() {
   return (
     <div class="chat-container" style="height:calc(100vh - 48px)">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-        <button class="btn-secondary" onClick={backToList} style="padding:6px 12px;flex-shrink:0">
+        <button class="btn-secondary" onClick={backToList} style="padding:6px 12px;flex-shrink:0" aria-label="Back to chat list">
           {'\u2190'}
         </button>
         <div style="flex:1;min-width:0">
@@ -425,7 +427,7 @@ export function Chat() {
         </div>
       )}
 
-      <div class="chat-messages">
+      <div class="chat-messages" aria-live="polite" aria-relevant="additions">
         {messages.length === 0 && !sending && (
           <div class="empty">Send a message to start chatting with {selectedAgentName}.</div>
         )}
@@ -457,9 +459,10 @@ export function Chat() {
 
       {/* Consent modal */}
       {consentPrompt && (
-        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100">
+        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100"
+          role="dialog" aria-modal="true" aria-labelledby="consent-title">
           <div class="card" style="padding:24px;max-width:420px;width:100%">
-            <h3 style="margin-top:0">Permission Required</h3>
+            <h3 id="consent-title" style="margin-top:0">Permission Required</h3>
             <p>The agent wants to use a tool that requires your approval:</p>
             <div style="background:var(--bg);padding:12px;border-radius:6px;margin:12px 0">
               <div><strong>{consentPrompt.tool_name}</strong></div>
