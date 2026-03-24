@@ -12,8 +12,11 @@ import (
 type SessionStore interface {
 	CreateSession(ctx context.Context, channel, chatID, agentID string) (*Session, error)
 	CreateSessionWithKind(ctx context.Context, channel, chatID, agentID, kind string) (*Session, error)
+	CreateSessionWithThread(ctx context.Context, channel, chatID, agentID, threadID string) (*Session, error)
 	GetSession(ctx context.Context, id string) (*Session, error)
 	FindSession(ctx context.Context, channel, chatID string) (*Session, error)
+	FindSessionWithKind(ctx context.Context, channel, chatID, kind string) (*Session, error)
+	FindSessionWithThread(ctx context.Context, channel, chatID, threadID string) (*Session, error)
 	FindSessionByKey(ctx context.Context, key string) (*Session, error)
 	UpdateSessionTokens(ctx context.Context, sessionID string, inputTokens, outputTokens int64, model, provider string) error
 	AppendMessages(ctx context.Context, sessionID string, msgs []canonical.Message) error

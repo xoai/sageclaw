@@ -65,34 +65,81 @@ func New(
 	return p
 }
 
-// channelKey encodes channel, chatID, and optional agentID into a single key for the debouncer.
-func channelKey(channel, chatID, agentID string) string {
+// channelKey encodes channel, kind, chatID, threadID, and optional agentID into a single key for the debouncer.
+// Kind and threadID are included so DM and group messages debounce independently.
+func channelKey(channel, kind, chatID, threadID, agentID string) string {
 	if channel == "" {
 		channel = "_unknown"
 	}
-	if agentID == "" {
-		return channel + "|" + chatID
+	if kind == "" {
+		kind = "dm"
 	}
-	return channel + "|" + chatID + "|" + agentID
+	key := channel + "|" + kind + "|" + chatID
+	if threadID != "" {
+		key += "|" + threadID
+	}
+	if agentID != "" {
+		key += "|@" + agentID
+	}
+	return key
 }
 
-// parseChannelKey splits the composite key back into channel, chatID, and agentID.
-func parseChannelKey(key string) (channel, chatID, agentID string) {
-	parts := strings.SplitN(key, "|", 3)
-	switch len(parts) {
-	case 3:
-		return parts[0], parts[1], parts[2]
-	case 2:
-		return parts[0], parts[1], ""
-	default:
-		return "", key, ""
+// parseChannelKey splits the composite key back into channel, kind, chatID, threadID, and agentID.
+func parseChannelKey(key string) (channel, kind, chatID, threadID, agentID string) {
+	parts := strings.Split(key, "|")
+	if len(parts) < 3 {
+		return "", "dm", key, "", ""
 	}
+	channel = parts[0]
+	kind = parts[1]
+	chatID = parts[2]
+	for _, p := range parts[3:] {
+		if strings.HasPrefix(p, "@") {
+			agentID = p[1:]
+		} else if threadID == "" {
+			threadID = p
+		}
+	}
+	return
+}
+
+// checkPolicy validates whether a message should be processed based on connection policies.
+// Returns true if the message should be processed, false if it should be dropped.
+func (p *Pipeline) checkPolicy(ctx context.Context, env bus.Envelope) bool {
+	conn, err := p.store.GetConnection(ctx, env.Channel)
+	if err != nil {
+		return true // Unknown connection → allow (legacy compat)
+	}
+
+	switch env.Kind {
+	case "dm":
+		if !conn.DmEnabled {
+			log.Printf("policy: DM disabled for connection %s, dropping", env.Channel)
+			return false
+		}
+	case "group":
+		if !conn.GroupEnabled {
+			log.Printf("policy: groups disabled for connection %s, dropping", env.Channel)
+			return false
+		}
+		if !env.Mentioned {
+			log.Printf("policy: not mentioned in group %s/%s, dropping", env.Channel, env.ChatID)
+			return false
+		}
+	}
+
+	return true
 }
 
 // Start subscribes to inbound messages and begins processing.
 func (p *Pipeline) Start(ctx context.Context) error {
 	return p.bus.SubscribeInbound(ctx, func(env bus.Envelope) {
-		// S0: Channel pairing check.
+		// S0a: Policy check (dm/group enabled, mention required).
+		if !p.checkPolicy(context.Background(), env) {
+			return
+		}
+
+		// S0b: Channel pairing check.
 		if p.pairing != nil {
 			pairCtx := context.Background()
 
@@ -133,7 +180,11 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		}
 
 		// S1: Channel ingestion — messages already normalized by channel adapter.
-		key := channelKey(env.Channel, env.ChatID, env.AgentID)
+		kind := env.Kind
+		if kind == "" {
+			kind = "dm"
+		}
+		key := channelKey(env.Channel, kind, env.ChatID, env.ThreadID, env.AgentID)
 		for _, msg := range env.Messages {
 			// S2: Debouncer.
 			p.debouncer.Add(key, msg)
@@ -143,7 +194,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 // onDebounced is called when the debouncer flushes a batch.
 func (p *Pipeline) onDebounced(compositeKey string, msgs []canonical.Message) {
-	channel, chatID, agentID := parseChannelKey(compositeKey)
+	channel, kind, chatID, threadID, agentID := parseChannelKey(compositeKey)
 	ctx := context.Background()
 
 	// S3: Intent classification.
@@ -151,13 +202,13 @@ func (p *Pipeline) onDebounced(compositeKey string, msgs []canonical.Message) {
 
 	switch intent.Type {
 	case IntentCommand:
-		p.handleCommand(ctx, channel, chatID, intent.Command)
+		p.handleCommand(ctx, channel, chatID, kind, intent.Command)
 	case IntentAgent:
-		p.routeToAgent(ctx, channel, chatID, agentID, msgs)
+		p.routeToAgent(ctx, channel, chatID, kind, threadID, agentID, msgs)
 	}
 }
 
-func (p *Pipeline) handleCommand(ctx context.Context, channel, chatID string, command string) {
+func (p *Pipeline) handleCommand(ctx context.Context, channel, chatID, kind string, command string) {
 	var response string
 	switch command {
 	case "start":
@@ -175,13 +226,18 @@ func (p *Pipeline) handleCommand(ctx context.Context, channel, chatID string, co
 	p.bus.PublishOutbound(ctx, bus.Envelope{
 		Channel: channel,
 		ChatID:  chatID,
+		Kind:    kind,
 		Messages: []canonical.Message{
 			{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: response}}},
 		},
 	})
 }
 
-func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, requestAgentID string, msgs []canonical.Message) {
+func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, threadID, requestAgentID string, msgs []canonical.Message) {
+	if kind == "" {
+		kind = "dm"
+	}
+
 	// Determine which agent to use: envelope override > connection binding > pipeline default.
 	agentID := p.agentID
 	if requestAgentID != "" {
@@ -211,14 +267,33 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, requestAge
 		}
 	}
 
-	// Find or create session.
-	sess, err := p.store.FindSession(ctx, channel, chatID)
-	if err != nil {
-		// Create new session.
-		sess, err = p.store.CreateSession(ctx, channel, chatID, agentID)
+	// Find or create session with kind and thread awareness.
+	var sess *store.Session
+	var err error
+
+	if threadID != "" {
+		sess, err = p.store.FindSessionWithThread(ctx, channel, chatID, threadID)
 		if err != nil {
-			log.Printf("failed to create session: %v", err)
-			return
+			// Create thread sub-session linked to parent group session.
+			sess, err = p.store.CreateSessionWithThread(ctx, channel, chatID, agentID, threadID)
+			if err != nil {
+				log.Printf("failed to create thread session: %v", err)
+				return
+			}
+		}
+	} else {
+		sess, err = p.store.FindSessionWithKind(ctx, channel, chatID, kind)
+		if err != nil {
+			// Try legacy FindSession as fallback for old sessions without kind.
+			sess, err = p.store.FindSession(ctx, channel, chatID)
+		}
+		if err != nil {
+			// Create new kind-aware session.
+			sess, err = p.store.CreateSessionWithKind(ctx, channel, chatID, agentID, kind)
+			if err != nil {
+				log.Printf("failed to create session: %v", err)
+				return
+			}
 		}
 	}
 
@@ -319,14 +394,19 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 				sess, _ := p.store.GetSession(ctx, req.SessionID)
 				chatID := ""
 				channel := ""
+				kind := "dm"
 				if sess != nil {
 					chatID = sess.ChatID
 					channel = sess.Channel
+					if sess.Kind != "" {
+						kind = sess.Kind
+					}
 				}
 				p.bus.PublishOutbound(ctx, bus.Envelope{
 					SessionID: req.SessionID,
 					Channel:   channel,
 					ChatID:    chatID,
+					Kind:      kind,
 					Messages:  []canonical.Message{result.Messages[i]},
 				})
 				break

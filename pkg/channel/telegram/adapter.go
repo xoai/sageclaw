@@ -24,12 +24,14 @@ const (
 
 // Adapter implements the Channel interface for Telegram.
 type Adapter struct {
-	connID   string // Connection ID: "tg_abc123"
-	token    string
-	client   *http.Client
-	msgBus   bus.MessageBus
-	cancel   context.CancelFunc
-	baseURL  string // For testing.
+	connID      string // Connection ID: "tg_abc123"
+	token       string
+	client      *http.Client
+	msgBus      bus.MessageBus
+	cancel      context.CancelFunc
+	baseURL     string // For testing.
+	botID       int64  // Bot user ID (from getMe).
+	botUsername string // Bot username without @ (from getMe).
 }
 
 // New creates a new Telegram adapter.
@@ -60,6 +62,17 @@ func (a *Adapter) Platform() string  { return "telegram" }
 // Start begins long polling for updates.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	a.msgBus = msgBus
+
+	// Fetch bot info for mention matching.
+	botUser, err := a.GetMe(ctx)
+	if err != nil {
+		log.Printf("telegram: warning: could not get bot info: %v", err)
+	} else {
+		a.botID = botUser.ID
+		a.botUsername = botUser.Username
+		log.Printf("telegram: connected as @%s (connection %s)", a.botUsername, a.connID)
+	}
+
 	adapterCtx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 
@@ -177,10 +190,42 @@ func (a *Adapter) getUpdates(ctx context.Context, offset int) ([]Update, error) 
 func (a *Adapter) handleMessage(ctx context.Context, msg *TelegramMessage) {
 	canonicalMsg := normalizeMessage(msg)
 
+	// Detect kind.
+	kind := "dm"
+	if msg.Chat.Type != "private" {
+		kind = "group"
+	}
+
+	// Detect mention (only relevant for groups).
+	mentioned := kind == "dm" // DMs are always "mentioned".
+	if kind == "group" && a.botUsername != "" {
+		for _, entity := range msg.Entities {
+			if entity.Type == "mention" && entity.Offset+entity.Length <= len(msg.Text) {
+				mentionText := msg.Text[entity.Offset : entity.Offset+entity.Length]
+				if strings.EqualFold(mentionText, "@"+a.botUsername) {
+					mentioned = true
+				}
+			}
+		}
+		// Also check reply to bot's message.
+		if !mentioned && msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.ID == a.botID {
+			mentioned = true
+		}
+	}
+
+	// Detect thread/topic.
+	threadID := ""
+	if msg.MessageThreadID != 0 {
+		threadID = strconv.Itoa(msg.MessageThreadID)
+	}
+
 	a.msgBus.PublishInbound(ctx, bus.Envelope{
-		Channel:  a.connID,
-		ChatID:   strconv.FormatInt(msg.Chat.ID, 10),
-		Messages: []canonical.Message{canonicalMsg},
+		Channel:   a.connID,
+		ChatID:    strconv.FormatInt(msg.Chat.ID, 10),
+		Kind:      kind,
+		ThreadID:  threadID,
+		Mentioned: mentioned,
+		Messages:  []canonical.Message{canonicalMsg},
 		Metadata: map[string]string{
 			"telegram_message_id": strconv.Itoa(msg.MessageID),
 			"telegram_user_id":    strconv.FormatInt(msg.From.ID, 10),
@@ -301,12 +346,21 @@ type Update struct {
 }
 
 type TelegramMessage struct {
-	MessageID int           `json:"message_id"`
-	From      *TelegramUser `json:"from"`
-	Chat      TelegramChat  `json:"chat"`
-	Text      string        `json:"text"`
-	Caption   string        `json:"caption"`
-	Photo     []PhotoSize   `json:"photo"`
+	MessageID       int               `json:"message_id"`
+	MessageThreadID int               `json:"message_thread_id"`
+	From            *TelegramUser     `json:"from"`
+	Chat            TelegramChat      `json:"chat"`
+	Text            string            `json:"text"`
+	Caption         string            `json:"caption"`
+	Photo           []PhotoSize       `json:"photo"`
+	Entities        []MessageEntity   `json:"entities"`
+	ReplyToMessage  *TelegramMessage  `json:"reply_to_message"`
+}
+
+type MessageEntity struct {
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
 }
 
 type TelegramUser struct {

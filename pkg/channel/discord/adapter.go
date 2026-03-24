@@ -181,11 +181,31 @@ type DiscordUser struct {
 }
 
 type DiscordMessage struct {
-	ID        string       `json:"id"`
-	ChannelID string       `json:"channel_id"`
-	Author    DiscordUser  `json:"author"`
-	Content   string       `json:"content"`
-	Timestamp string       `json:"timestamp"`
+	ID        string          `json:"id"`
+	ChannelID string          `json:"channel_id"`
+	GuildID   string          `json:"guild_id"`
+	Author    DiscordUser     `json:"author"`
+	Content   string          `json:"content"`
+	Timestamp string          `json:"timestamp"`
+	Mentions  []DiscordUser   `json:"mentions"`
+}
+
+// DetectKind returns "dm" for DM channels or "group" for guild channels.
+func DetectKind(msg DiscordMessage) string {
+	if msg.GuildID == "" {
+		return "dm"
+	}
+	return "group"
+}
+
+// DetectMentioned returns true if the bot is mentioned in the message.
+func DetectMentioned(msg DiscordMessage, botID string) bool {
+	for _, m := range msg.Mentions {
+		if m.ID == botID {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeMessage converts a Discord message to canonical form.
@@ -193,5 +213,26 @@ func NormalizeMessage(msg DiscordMessage) canonical.Message {
 	return canonical.Message{
 		Role:    "user",
 		Content: []canonical.Content{{Type: "text", Text: msg.Content}},
+	}
+}
+
+// ToEnvelope converts a Discord message to a bus Envelope with kind/mention detection.
+func (a *Adapter) ToEnvelope(msg DiscordMessage) bus.Envelope {
+	kind := DetectKind(msg)
+	mentioned := kind == "dm"
+	if kind == "group" {
+		mentioned = DetectMentioned(msg, a.botID)
+	}
+
+	return bus.Envelope{
+		Channel:   a.connID,
+		ChatID:    msg.ChannelID,
+		Kind:      kind,
+		Mentioned: mentioned,
+		Messages:  []canonical.Message{NormalizeMessage(msg)},
+		Metadata: map[string]string{
+			"discord_message_id": msg.ID,
+			"discord_author_id":  msg.Author.ID,
+		},
 	}
 }

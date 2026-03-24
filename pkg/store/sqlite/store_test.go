@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
+	"github.com/xoai/sageclaw/pkg/store"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -109,6 +110,166 @@ func TestStore_AppendAndGetMessages(t *testing.T) {
 	}
 	if got[1].Content[0].Text != "hi there" {
 		t.Fatalf("expected second message text 'hi there', got %s", got[1].Content[0].Text)
+	}
+}
+
+func TestStore_CreateSession_DefaultKindIsDm(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	sess, err := s.CreateSession(ctx, "tg_abc", "chat1", "agent1")
+	if err != nil {
+		t.Fatalf("creating session: %v", err)
+	}
+	if sess.Kind != "dm" {
+		t.Fatalf("expected default kind 'dm', got %s", sess.Kind)
+	}
+}
+
+func TestStore_DmAndGroupSeparateSessions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	dm, err := s.CreateSessionWithKind(ctx, "tg_abc", "chat1", "agent1", "dm")
+	if err != nil {
+		t.Fatalf("creating dm session: %v", err)
+	}
+
+	group, err := s.CreateSessionWithKind(ctx, "tg_abc", "chat1", "agent1", "group")
+	if err != nil {
+		t.Fatalf("creating group session: %v", err)
+	}
+
+	if dm.ID == group.ID {
+		t.Fatal("dm and group sessions should have different IDs")
+	}
+	if dm.Key == group.Key {
+		t.Fatal("dm and group sessions should have different keys")
+	}
+}
+
+func TestStore_FindSessionWithKind(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateSessionWithKind(ctx, "tg_abc", "chat1", "agent1", "dm")
+	s.CreateSessionWithKind(ctx, "tg_abc", "chat1", "agent1", "group")
+
+	dm, err := s.FindSessionWithKind(ctx, "tg_abc", "chat1", "dm")
+	if err != nil {
+		t.Fatalf("finding dm session: %v", err)
+	}
+	if dm.Kind != "dm" {
+		t.Fatalf("expected kind 'dm', got %s", dm.Kind)
+	}
+
+	group, err := s.FindSessionWithKind(ctx, "tg_abc", "chat1", "group")
+	if err != nil {
+		t.Fatalf("finding group session: %v", err)
+	}
+	if group.Kind != "group" {
+		t.Fatalf("expected kind 'group', got %s", group.Kind)
+	}
+}
+
+func TestStore_ThreadSession(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Create parent group session.
+	parent, err := s.CreateSessionWithKind(ctx, "tg_abc", "-100123", "agent1", "group")
+	if err != nil {
+		t.Fatalf("creating parent: %v", err)
+	}
+
+	// Create thread sub-session.
+	thread, err := s.CreateSessionWithThread(ctx, "tg_abc", "-100123", "agent1", "99")
+	if err != nil {
+		t.Fatalf("creating thread session: %v", err)
+	}
+
+	if thread.SpawnedBy != parent.ID {
+		t.Fatalf("expected SpawnedBy=%s, got %s", parent.ID, thread.SpawnedBy)
+	}
+
+	// Find by thread.
+	found, err := s.FindSessionWithThread(ctx, "tg_abc", "-100123", "99")
+	if err != nil {
+		t.Fatalf("finding thread session: %v", err)
+	}
+	if found.ID != thread.ID {
+		t.Fatalf("expected thread session ID %s, got %s", thread.ID, found.ID)
+	}
+}
+
+func TestStore_ConnectionWithCredentials(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	key, _ := GenerateKey()
+
+	creds := map[string]string{"token": "bot123", "secret": "s3c"}
+	blob, _ := EncryptCredentials(creds, key)
+
+	conn := store.Connection{
+		ID:           "tg_test1",
+		Platform:     "telegram",
+		Label:        "@testbot",
+		Metadata:     "{}",
+		Credentials:  blob,
+		DmEnabled:    true,
+		GroupEnabled: false,
+		Status:       "active",
+	}
+	if err := s.CreateConnection(ctx, conn); err != nil {
+		t.Fatalf("creating connection: %v", err)
+	}
+
+	got, err := s.GetConnection(ctx, "tg_test1")
+	if err != nil {
+		t.Fatalf("getting connection: %v", err)
+	}
+	if !got.DmEnabled {
+		t.Fatal("expected DmEnabled=true")
+	}
+	if got.GroupEnabled {
+		t.Fatal("expected GroupEnabled=false")
+	}
+
+	// Decrypt credentials.
+	gotCreds, err := DecryptCredentials(got.Credentials, key)
+	if err != nil {
+		t.Fatalf("decrypting: %v", err)
+	}
+	if gotCreds["token"] != "bot123" {
+		t.Fatalf("expected token=bot123, got %s", gotCreds["token"])
+	}
+	if gotCreds["secret"] != "s3c" {
+		t.Fatalf("expected secret=s3c, got %s", gotCreds["secret"])
+	}
+}
+
+func TestStore_UpdateConnectionPolicies(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	conn := store.Connection{
+		ID: "tg_pol1", Platform: "telegram", Label: "test",
+		Metadata: "{}", DmEnabled: true, GroupEnabled: true, Status: "active",
+	}
+	s.CreateConnection(ctx, conn)
+
+	// Disable groups.
+	err := s.UpdateConnection(ctx, "tg_pol1", map[string]any{"group_enabled": 0})
+	if err != nil {
+		t.Fatalf("updating: %v", err)
+	}
+
+	got, _ := s.GetConnection(ctx, "tg_pol1")
+	if got.GroupEnabled {
+		t.Fatal("expected GroupEnabled=false after update")
+	}
+	if !got.DmEnabled {
+		t.Fatal("DmEnabled should still be true")
 	}
 }
 

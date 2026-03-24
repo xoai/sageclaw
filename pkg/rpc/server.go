@@ -309,6 +309,11 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("POST /rpc", srv.authGuard(srv.handleRPC))
 	mux.HandleFunc("GET /events", srv.authGuard(srv.handleSSE))
 
+	// Register webhook routes for channel adapters (Zalo, WhatsApp, etc.).
+	if srv.chanMgr != nil {
+		srv.chanMgr.SetWebhookMux(mux)
+	}
+
 	// Serve embedded dashboard.
 	distFS, err := fs.Sub(web.DistFS, "dist")
 	if err == nil {

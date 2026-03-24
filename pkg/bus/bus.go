@@ -12,6 +12,9 @@ type Envelope struct {
 	AgentID   string
 	Channel   string
 	ChatID    string
+	Kind      string // "dm" or "group"
+	ThreadID  string // Thread/topic ID (empty = none)
+	Mentioned bool   // Was bot @mentioned? (relevant for groups)
 	Messages  []canonical.Message
 	Metadata  map[string]string
 }

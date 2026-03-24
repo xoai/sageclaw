@@ -25,8 +25,6 @@ type Adapter struct {
 	oaID        string
 	secretKey   string
 	accessToken string
-	listenAddr  string
-	server      *http.Server
 	msgBus      bus.MessageBus
 	client      *http.Client
 	cancel      context.CancelFunc
@@ -35,11 +33,6 @@ type Adapter struct {
 // Option configures the Zalo adapter.
 type Option func(*Adapter)
 
-// WithListenAddr sets the webhook listen address.
-func WithListenAddr(addr string) Option {
-	return func(a *Adapter) { a.listenAddr = addr }
-}
-
 // New creates a new Zalo OA adapter.
 func New(connID, oaID, secretKey, accessToken string, opts ...Option) *Adapter {
 	a := &Adapter{
@@ -47,7 +40,6 @@ func New(connID, oaID, secretKey, accessToken string, opts ...Option) *Adapter {
 		oaID:        oaID,
 		secretKey:   secretKey,
 		accessToken: accessToken,
-		listenAddr:  ":8080",
 		client:      &http.Client{Timeout: 30 * time.Second},
 	}
 	for _, opt := range opts {
@@ -56,10 +48,23 @@ func New(connID, oaID, secretKey, accessToken string, opts ...Option) *Adapter {
 	return a
 }
 
+// NewFromCredentials creates a Zalo adapter from a credential map.
+// Expected keys: "oa_id", "secret_key", "access_token".
+func NewFromCredentials(connID string, creds map[string]string, opts ...Option) *Adapter {
+	return New(connID, creds["oa_id"], creds["secret_key"], creds["access_token"], opts...)
+}
+
 func (a *Adapter) ID() string       { return a.connID }
 func (a *Adapter) Platform() string  { return "zalo" }
 
-// Start begins the webhook HTTP server.
+// RegisterWebhook registers Zalo webhook routes on the shared HTTP mux.
+func (a *Adapter) RegisterWebhook(mux *http.ServeMux) {
+	mux.HandleFunc("POST /webhook/zalo", a.handleWebhook)
+	mux.HandleFunc("GET /webhook/zalo", a.handleVerify)
+	log.Printf("zalo: webhook routes registered (connection %s)", a.connID)
+}
+
+// Start subscribes to the message bus for outbound delivery.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	a.msgBus = msgBus
 	adapterCtx, cancel := context.WithCancel(ctx)
@@ -72,31 +77,12 @@ func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 		}
 	})
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /webhook/zalo", a.handleWebhook)
-	mux.HandleFunc("GET /webhook/zalo", a.handleVerify)
-
-	a.server = &http.Server{
-		Addr:    a.listenAddr,
-		Handler: mux,
-	}
-
-	go func() {
-		log.Printf("zalo: webhook listening on %s/webhook/zalo (connection %s)", a.listenAddr, a.connID)
-		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("zalo: server error: %v", err)
-		}
-	}()
-
 	return nil
 }
 
 func (a *Adapter) Stop(ctx context.Context) error {
 	if a.cancel != nil {
 		a.cancel()
-	}
-	if a.server != nil {
-		return a.server.Shutdown(ctx)
 	}
 	return nil
 }
@@ -129,8 +115,10 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	if event.EventName == "user_send_text" && event.Message.Text != "" {
 		a.msgBus.PublishInbound(r.Context(), bus.Envelope{
-			Channel: a.connID,
-			ChatID:  event.Sender.ID,
+			Channel:   a.connID,
+			ChatID:    event.Sender.ID,
+			Kind:      "dm", // Zalo OA only supports DM.
+			Mentioned: true,
 			Messages: []canonical.Message{
 				{Role: "user", Content: []canonical.Content{{Type: "text", Text: event.Message.Text}}},
 			},

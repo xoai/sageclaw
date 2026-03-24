@@ -37,10 +37,10 @@ func newID() string {
 
 // CreateSession creates a new session or returns an existing one with the same key.
 func (s *Store) CreateSession(ctx context.Context, channel, chatID, agentID string) (*Session, error) {
-	return s.CreateSessionWithKind(ctx, channel, chatID, agentID, "direct")
+	return s.CreateSessionWithKind(ctx, channel, chatID, agentID, "dm")
 }
 
-// CreateSessionWithKind creates a session with a specific kind (direct, subagent, cron).
+// CreateSessionWithKind creates a session with a specific kind (dm, group, subagent, cron).
 func (s *Store) CreateSessionWithKind(ctx context.Context, channel, chatID, agentID, kind string) (*Session, error) {
 	key := store.SessionKey(agentID, channel, kind, chatID)
 
@@ -158,9 +158,119 @@ func (s *Store) GetSession(ctx context.Context, id string) (*Session, error) {
 	return sess, nil
 }
 
-// FindSession finds an active session by channel and chat ID.
+// CreateSessionWithThread creates a thread sub-session linked to a parent group session.
+func (s *Store) CreateSessionWithThread(ctx context.Context, channel, chatID, agentID, threadID string) (*Session, error) {
+	key := store.SessionKeyWithThread(agentID, channel, "group", chatID, threadID)
+
+	// Check for existing.
+	existing, err := s.FindSessionByKey(ctx, key)
+	if err == nil && existing != nil {
+		s.db.ExecContext(ctx, `UPDATE sessions SET updated_at = datetime('now') WHERE id = ?`, existing.ID)
+		existing.UpdatedAt = time.Now().UTC()
+		return existing, nil
+	}
+
+	sess := &Session{
+		ID:        newID(),
+		Key:       key,
+		Channel:   channel,
+		ChatID:    chatID,
+		AgentID:   agentID,
+		Kind:      "group",
+		Label:     agentID + " thread on " + channel,
+		Status:    "active",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Metadata:  map[string]string{"thread_id": threadID},
+	}
+
+	// Link to parent group session if it exists.
+	parent, parentErr := s.FindSessionWithKind(ctx, channel, chatID, "group")
+	if parentErr == nil && parent != nil {
+		sess.SpawnedBy = parent.ID
+	}
+
+	metaJSON, _ := json.Marshal(sess.Metadata)
+	now := sess.CreatedAt.Format(time.RFC3339)
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO sessions (id, key, channel, chat_id, agent_id, kind, label, status, spawned_by, thread_id, created_at, updated_at, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.ID, sess.Key, sess.Channel, sess.ChatID, sess.AgentID,
+		sess.Kind, sess.Label, sess.Status, sess.SpawnedBy, threadID, now, now, string(metaJSON),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("inserting thread session: %w", err)
+	}
+	return sess, nil
+}
+
+// FindSession finds an active session by channel and chat ID (backward compat — searches any kind).
 func (s *Store) FindSession(ctx context.Context, channel, chatID string) (*Session, error) {
 	return s.getSessionByChat(ctx, channel, chatID)
+}
+
+// FindSessionWithKind finds an active session by channel, chat ID, and kind.
+func (s *Store) FindSessionWithKind(ctx context.Context, channel, chatID, kind string) (*Session, error) {
+	sess := &Session{}
+	var metaJSON, createdAt, updatedAt string
+	var key, label, status, model, provider, spawnedBy *string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, COALESCE(key,''), channel, chat_id, agent_id, kind, label, status, model, provider,
+			spawned_by, input_tokens, output_tokens, compaction_count, message_count,
+			created_at, updated_at, metadata
+		 FROM sessions WHERE channel = ? AND chat_id = ? AND kind = ? AND status = 'active'
+		 ORDER BY updated_at DESC LIMIT 1`,
+		channel, chatID, kind,
+	).Scan(&sess.ID, &key, &sess.Channel, &sess.ChatID, &sess.AgentID,
+		&sess.Kind, &label, &status, &model, &provider,
+		&spawnedBy, &sess.InputTokens, &sess.OutputTokens, &sess.CompactionCount, &sess.MessageCount,
+		&createdAt, &updatedAt, &metaJSON)
+	if err != nil {
+		return nil, fmt.Errorf("querying session by chat+kind: %w", err)
+	}
+
+	sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	if key != nil { sess.Key = *key }
+	if label != nil { sess.Label = *label }
+	if status != nil { sess.Status = *status }
+	if model != nil { sess.Model = *model }
+	if provider != nil { sess.Provider = *provider }
+	if spawnedBy != nil { sess.SpawnedBy = *spawnedBy }
+	json.Unmarshal([]byte(metaJSON), &sess.Metadata)
+	return sess, nil
+}
+
+// FindSessionWithThread finds a thread sub-session.
+func (s *Store) FindSessionWithThread(ctx context.Context, channel, chatID, threadID string) (*Session, error) {
+	sess := &Session{}
+	var metaJSON, createdAt, updatedAt string
+	var key, label, status, model, provider, spawnedBy *string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, COALESCE(key,''), channel, chat_id, agent_id, kind, label, status, model, provider,
+			spawned_by, input_tokens, output_tokens, compaction_count, message_count,
+			created_at, updated_at, metadata
+		 FROM sessions WHERE channel = ? AND chat_id = ? AND thread_id = ? AND status = 'active'
+		 ORDER BY updated_at DESC LIMIT 1`,
+		channel, chatID, threadID,
+	).Scan(&sess.ID, &key, &sess.Channel, &sess.ChatID, &sess.AgentID,
+		&sess.Kind, &label, &status, &model, &provider,
+		&spawnedBy, &sess.InputTokens, &sess.OutputTokens, &sess.CompactionCount, &sess.MessageCount,
+		&createdAt, &updatedAt, &metaJSON)
+	if err != nil {
+		return nil, fmt.Errorf("querying thread session: %w", err)
+	}
+
+	sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	if key != nil { sess.Key = *key }
+	if label != nil { sess.Label = *label }
+	if status != nil { sess.Status = *status }
+	if model != nil { sess.Model = *model }
+	if provider != nil { sess.Provider = *provider }
+	if spawnedBy != nil { sess.SpawnedBy = *spawnedBy }
+	json.Unmarshal([]byte(metaJSON), &sess.Metadata)
+	return sess, nil
 }
 
 func (s *Store) getSessionByChat(ctx context.Context, channel, chatID string) (*Session, error) {

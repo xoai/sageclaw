@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -54,6 +55,54 @@ func GenerateKey() ([]byte, error) {
 		return nil, err
 	}
 	return key, nil
+}
+
+// EncryptCredentials encrypts a credential map as JSON.
+func EncryptCredentials(creds map[string]string, encKey []byte) ([]byte, error) {
+	data, err := json.Marshal(creds)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling credentials: %w", err)
+	}
+	return Encrypt(data, encKey)
+}
+
+// DecryptCredentials decrypts an encrypted credential blob to a map.
+func DecryptCredentials(blob []byte, encKey []byte) (map[string]string, error) {
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	data, err := Decrypt(blob, encKey)
+	if err != nil {
+		return nil, err
+	}
+	var creds map[string]string
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return nil, fmt.Errorf("unmarshaling credentials: %w", err)
+	}
+	return creds, nil
+}
+
+// MergeCredentials decrypts existing credentials, merges new keys, and re-encrypts.
+func MergeCredentials(existing []byte, update map[string]string, encKey []byte) ([]byte, error) {
+	merged := make(map[string]string)
+
+	// Decrypt existing if present.
+	if len(existing) > 0 {
+		old, err := DecryptCredentials(existing, encKey)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting existing credentials: %w", err)
+		}
+		for k, v := range old {
+			merged[k] = v
+		}
+	}
+
+	// Merge new keys.
+	for k, v := range update {
+		merged[k] = v
+	}
+
+	return EncryptCredentials(merged, encKey)
 }
 
 // StoreCredential encrypts and stores a credential.

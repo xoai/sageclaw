@@ -12,6 +12,7 @@ import (
 	"github.com/xoai/sageclaw/pkg/channel/discord"
 	"github.com/xoai/sageclaw/pkg/channel/telegram"
 	"github.com/xoai/sageclaw/pkg/store"
+	"github.com/xoai/sageclaw/pkg/store/sqlite"
 )
 
 // handleConnectionsList returns all connections with optional filters.
@@ -31,14 +32,17 @@ func (s *Server) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 	var result []map[string]any
 	for _, c := range conns {
 		item := map[string]any{
-			"id":         c.ID,
-			"platform":   c.Platform,
-			"agent_id":   c.AgentID,
-			"label":      c.Label,
-			"metadata":   json.RawMessage(c.Metadata),
-			"status":     c.Status,
-			"created_at": c.CreatedAt.Format("2006-01-02 15:04:05"),
-			"updated_at": c.UpdatedAt.Format("2006-01-02 15:04:05"),
+			"id":              c.ID,
+			"platform":        c.Platform,
+			"agent_id":        c.AgentID,
+			"label":           c.Label,
+			"metadata":        json.RawMessage(c.Metadata),
+			"status":          c.Status,
+			"has_credentials": len(c.Credentials) > 0 || c.CredentialKey != "",
+			"dm_enabled":      c.DmEnabled,
+			"group_enabled":   c.GroupEnabled,
+			"created_at":      c.CreatedAt.Format("2006-01-02 15:04:05"),
+			"updated_at":      c.UpdatedAt.Format("2006-01-02 15:04:05"),
 		}
 
 		// If agent_id is set, look up agent name for display.
@@ -66,39 +70,62 @@ func (s *Server) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 
 // handleConnectionCreate creates a new connection.
 // Request: { platform: "telegram", token: "bot123:ABC..." }
+//   or:   { platform: "zalo", credentials: { "oa_id": "...", "secret_key": "...", "access_token": "..." } }
 func (s *Server) handleConnectionCreate(w http.ResponseWriter, r *http.Request) {
 	var p struct {
-		Platform string `json:"platform"`
-		Token    string `json:"token"`
+		Platform    string            `json:"platform"`
+		Token       string            `json:"token"`       // Legacy single-token.
+		Credentials map[string]string `json:"credentials"` // Multi-field credentials.
 	}
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid request"})
 		return
 	}
-	if p.Platform == "" || p.Token == "" {
+	if p.Platform == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "platform and token required"})
+		writeJSON(w, map[string]string{"error": "platform required"})
+		return
+	}
+
+	// Normalize: if legacy token provided, wrap as credentials map.
+	creds := p.Credentials
+	if creds == nil && p.Token != "" {
+		creds = map[string]string{"token": p.Token}
+	}
+	if len(creds) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "token or credentials required"})
 		return
 	}
 
 	// Generate connection ID.
 	connID := generateConnID(p.Platform)
 
-	// Fetch metadata from platform API.
-	metadata, label, err := fetchPlatformMetadata(r.Context(), p.Platform, connID, p.Token)
+	// Fetch metadata from platform API (uses token field for Telegram/Discord).
+	token := creds["token"]
+	if token == "" {
+		token = creds["access_token"] // fallback for platforms like Zalo.
+	}
+	metadata, label, err := fetchPlatformMetadata(r.Context(), p.Platform, connID, token)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "failed to connect: " + err.Error()})
 		return
 	}
 
-	// Store credential.
-	credKey := "conn_" + connID + "_token"
-	if err := s.store.StoreCredential(r.Context(), credKey, []byte(p.Token), s.encKey); err != nil {
+	// Encrypt credentials as inline JSON blob.
+	credBlob, err := sqlite.EncryptCredentials(creds, s.encKey)
+	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]string{"error": "storing credential: " + err.Error()})
+		writeJSON(w, map[string]string{"error": "encrypting credentials: " + err.Error()})
 		return
+	}
+
+	// Also store legacy credential for backward compat.
+	credKey := "conn_" + connID + "_token"
+	if legacyToken := creds["token"]; legacyToken != "" {
+		s.store.StoreCredential(r.Context(), credKey, []byte(legacyToken), s.encKey)
 	}
 
 	// Create connection record.
@@ -109,6 +136,9 @@ func (s *Server) handleConnectionCreate(w http.ResponseWriter, r *http.Request) 
 		Label:         label,
 		Metadata:      string(metadataJSON),
 		CredentialKey: credKey,
+		Credentials:   credBlob,
+		DmEnabled:     true,
+		GroupEnabled:  true,
 		Status:        "active",
 	}
 	if err := s.store.CreateConnection(r.Context(), conn); err != nil {
@@ -121,15 +151,18 @@ func (s *Server) handleConnectionCreate(w http.ResponseWriter, r *http.Request) 
 	connStatus := "active"
 	if s.chanMgr != nil {
 		cfg := map[string]string{"__conn_id": connID}
+		for k, v := range creds {
+			cfg[k] = v
+		}
+		// Legacy keys for backward compat.
 		switch p.Platform {
 		case "telegram":
-			cfg["TELEGRAM_BOT_TOKEN"] = p.Token
+			cfg["TELEGRAM_BOT_TOKEN"] = creds["token"]
 		case "discord":
-			cfg["DISCORD_BOT_TOKEN"] = p.Token
+			cfg["DISCORD_BOT_TOKEN"] = creds["token"]
 		}
 		if err := s.chanMgr.StartConnection(connID, p.Platform, cfg); err != nil {
 			log.Printf("connection %s: adapter start failed: %v", connID, err)
-			// Don't fail the creation — connection is saved, just not running.
 			connStatus = "error"
 			s.store.UpdateConnection(r.Context(), connID, map[string]any{"status": "error"})
 		}
@@ -186,6 +219,31 @@ func (s *Server) handleConnectionUpdate(w http.ResponseWriter, r *http.Request) 
 	if v, ok := p["label"]; ok {
 		fields["label"] = v
 	}
+	if v, ok := p["dm_enabled"]; ok {
+		fields["dm_enabled"] = v
+	}
+	if v, ok := p["group_enabled"]; ok {
+		fields["group_enabled"] = v
+	}
+
+	// Handle credential merge: decrypt existing → merge new keys → re-encrypt.
+	if credUpdate, ok := p["credentials"]; ok {
+		if credMap, isMap := credUpdate.(map[string]any); isMap {
+			update := make(map[string]string)
+			for k, v := range credMap {
+				update[k] = fmt.Sprintf("%v", v)
+			}
+			conn, err := s.store.GetConnection(r.Context(), id)
+			if err == nil {
+				merged, mergeErr := sqlite.MergeCredentials(conn.Credentials, update, s.encKey)
+				if mergeErr == nil {
+					fields["credentials"] = merged
+				} else {
+					log.Printf("connection %s: credential merge failed: %v", id, mergeErr)
+				}
+			}
+		}
+	}
 
 	if err := s.store.UpdateConnection(r.Context(), id, fields); err != nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -239,18 +297,40 @@ func (s *Server) restartConnection(ctx context.Context, connID string) {
 		return
 	}
 
-	token, err := s.store.GetCredential(ctx, conn.CredentialKey, s.encKey)
-	if err != nil || len(token) == 0 {
-		log.Printf("restart %s: credential not found", connID)
-		return
-	}
-
 	cfg := map[string]string{"__conn_id": connID}
-	switch conn.Platform {
-	case "telegram":
-		cfg["TELEGRAM_BOT_TOKEN"] = string(token)
-	case "discord":
-		cfg["DISCORD_BOT_TOKEN"] = string(token)
+
+	// Try inline credentials first, fall back to legacy credential_key.
+	if len(conn.Credentials) > 0 {
+		creds, err := sqlite.DecryptCredentials(conn.Credentials, s.encKey)
+		if err != nil {
+			log.Printf("restart %s: decrypt credentials failed: %v", connID, err)
+			return
+		}
+		for k, v := range creds {
+			cfg[k] = v
+		}
+		// Set legacy keys for backward compat.
+		switch conn.Platform {
+		case "telegram":
+			cfg["TELEGRAM_BOT_TOKEN"] = creds["token"]
+		case "discord":
+			cfg["DISCORD_BOT_TOKEN"] = creds["token"]
+		}
+	} else if conn.CredentialKey != "" {
+		token, err := s.store.GetCredential(ctx, conn.CredentialKey, s.encKey)
+		if err != nil || len(token) == 0 {
+			log.Printf("restart %s: credential not found", connID)
+			return
+		}
+		switch conn.Platform {
+		case "telegram":
+			cfg["TELEGRAM_BOT_TOKEN"] = string(token)
+		case "discord":
+			cfg["DISCORD_BOT_TOKEN"] = string(token)
+		}
+	} else {
+		log.Printf("restart %s: no credentials", connID)
+		return
 	}
 
 	if err := s.chanMgr.StartConnection(connID, conn.Platform, cfg); err != nil {

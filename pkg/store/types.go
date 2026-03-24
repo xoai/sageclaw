@@ -33,6 +33,15 @@ func SessionKey(agentID, channel, kind, chatID string) string {
 	return agentID + ":" + channel + ":" + kind + ":" + chatID
 }
 
+// SessionKeyWithThread builds a session key that includes thread context.
+func SessionKeyWithThread(agentID, channel, kind, chatID, threadID string) string {
+	key := SessionKey(agentID, channel, kind, chatID)
+	if threadID != "" {
+		return key + ":" + threadID
+	}
+	return key
+}
+
 // Memory represents a stored memory entry.
 type Memory struct {
 	ID          string
@@ -106,12 +115,15 @@ type TeamMessage struct {
 // Connection represents a channel connection (e.g., a Telegram bot).
 type Connection struct {
 	ID            string
-	Platform      string // "telegram", "discord", "zalo", "whatsapp"
-	AgentID       string // Bound agent (empty = unbound)
-	Label         string // Auto from metadata: "@botname"
-	Metadata      string // JSON: {username, first_name, ...}
-	CredentialKey string // Key in credentials table
-	Status        string // "active", "stopped", "error"
+	Platform      string    // "telegram", "discord", "zalo", "whatsapp"
+	AgentID       string    // Bound agent (empty = unbound)
+	Label         string    // Auto from metadata: "@botname"
+	Metadata      string    // JSON: {username, first_name, ...}
+	CredentialKey string    // Legacy: key in credentials table
+	Credentials   []byte    // Encrypted JSON blob: {"token": "...", ...}
+	DmEnabled     bool      // Allow DM messages
+	GroupEnabled  bool      // Allow group messages
+	Status        string    // "active", "stopped", "error"
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

@@ -674,14 +674,27 @@ Key behaviors:
 		if connID == "" {
 			connID = "zalo"
 		}
-		return zalo.New(connID, cfg["ZALO_OA_ID"], cfg["ZALO_SECRET_KEY"], cfg["ZALO_ACCESS_TOKEN"]), nil
+		// Support both credential map keys and legacy env-var keys.
+		creds := map[string]string{
+			"oa_id":        firstNonEmpty(cfg["oa_id"], cfg["ZALO_OA_ID"]),
+			"secret_key":   firstNonEmpty(cfg["secret_key"], cfg["ZALO_SECRET_KEY"]),
+			"access_token": firstNonEmpty(cfg["access_token"], cfg["ZALO_ACCESS_TOKEN"]),
+		}
+		return zalo.NewFromCredentials(connID, creds), nil
 	})
 	chanMgr.RegisterFactory("whatsapp", func(cfg map[string]string) (channel.Channel, error) {
 		connID := cfg["__conn_id"]
 		if connID == "" {
 			connID = "whatsapp"
 		}
-		return whatsapp.New(connID, cfg["WHATSAPP_PHONE_NUMBER_ID"], cfg["WHATSAPP_ACCESS_TOKEN"], cfg["WHATSAPP_VERIFY_TOKEN"]), nil
+		// Support both credential map keys and legacy env-var keys.
+		creds := map[string]string{
+			"phone_number_id": firstNonEmpty(cfg["phone_number_id"], cfg["WHATSAPP_PHONE_NUMBER_ID"]),
+			"access_token":    firstNonEmpty(cfg["access_token"], cfg["WHATSAPP_ACCESS_TOKEN"]),
+			"verify_token":    firstNonEmpty(cfg["verify_token"], cfg["WHATSAPP_VERIFY_TOKEN"]),
+			"app_secret":      firstNonEmpty(cfg["app_secret"], cfg["WHATSAPP_APP_SECRET"]),
+		}
+		return whatsapp.NewFromCredentials(connID, creds), nil
 	})
 
 	var p *pipeline.Pipeline
@@ -832,6 +845,7 @@ Key behaviors:
 		if err := zc.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting zalo: %w", err)
 		}
+		chanMgr.Register(zc)
 		log.Println("channel: zalo OA (legacy)")
 		defer zc.Stop(startCtx)
 	}
@@ -841,8 +855,26 @@ Key behaviors:
 		if err := wa.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting whatsapp: %w", err)
 		}
+		chanMgr.Register(wa)
 		log.Println("channel: whatsapp (legacy)")
 		defer wa.Stop(startCtx)
+	}
+
+	// --- Backfill inline credentials (migration from credential_key → credentials blob) ---
+	allConns, _ := appStore.ListConnections(startCtx, store.ConnectionFilter{})
+	for _, conn := range allConns {
+		if len(conn.Credentials) == 0 && conn.CredentialKey != "" {
+			// Migrate: read from credentials table → encrypt as JSON → save inline.
+			oldVal, err := appStore.GetCredential(startCtx, conn.CredentialKey, encKey)
+			if err == nil && len(oldVal) > 0 {
+				creds := map[string]string{"token": string(oldVal)}
+				blob, err := sqlite.EncryptCredentials(creds, encKey)
+				if err == nil {
+					appStore.UpdateConnection(startCtx, conn.ID, map[string]any{"credentials": blob})
+					log.Printf("connection %s: backfilled inline credentials", conn.ID)
+				}
+			}
+		}
 	}
 
 	// --- Start connections from DB ---
@@ -853,22 +885,67 @@ Key behaviors:
 			if chanMgr.IsRunning(conn.ID) {
 				continue
 			}
-			token, err := appStore.GetCredential(startCtx, conn.CredentialKey, encKey)
-			if err != nil || len(token) == 0 {
-				log.Printf("connection %s: credential not found, skipping", conn.ID)
+
+			// Load credentials: prefer inline blob, fall back to legacy credential_key.
+			var creds map[string]string
+			if len(conn.Credentials) > 0 {
+				creds, err = sqlite.DecryptCredentials(conn.Credentials, encKey)
+				if err != nil {
+					log.Printf("connection %s: failed to decrypt credentials, skipping", conn.ID)
+					continue
+				}
+			} else if conn.CredentialKey != "" {
+				token, err := appStore.GetCredential(startCtx, conn.CredentialKey, encKey)
+				if err != nil || len(token) == 0 {
+					log.Printf("connection %s: credential not found, skipping", conn.ID)
+					continue
+				}
+				creds = map[string]string{"token": string(token)}
+			} else {
+				log.Printf("connection %s: no credentials, skipping", conn.ID)
 				continue
 			}
+
 			cfg := map[string]string{"__conn_id": conn.ID}
+			// Copy all credential fields into config for the factory.
+			for k, v := range creds {
+				cfg[k] = v
+			}
+			// Also set legacy config keys for backward compat.
 			switch conn.Platform {
 			case "telegram":
-				cfg["TELEGRAM_BOT_TOKEN"] = string(token)
+				if t, ok := creds["token"]; ok {
+					cfg["TELEGRAM_BOT_TOKEN"] = t
+				}
 			case "discord":
-				cfg["DISCORD_BOT_TOKEN"] = string(token)
+				if t, ok := creds["token"]; ok {
+					cfg["DISCORD_BOT_TOKEN"] = t
+				}
 			case "zalo":
-				cfg["ZALO_OA_ID"] = string(token) // Simplified — full multi-field support later.
+				if v, ok := creds["oa_id"]; ok {
+					cfg["ZALO_OA_ID"] = v
+				}
+				if v, ok := creds["secret_key"]; ok {
+					cfg["ZALO_SECRET_KEY"] = v
+				}
+				if v, ok := creds["access_token"]; ok {
+					cfg["ZALO_ACCESS_TOKEN"] = v
+				}
 			case "whatsapp":
-				cfg["WHATSAPP_PHONE_NUMBER_ID"] = string(token)
+				if v, ok := creds["phone_number_id"]; ok {
+					cfg["WHATSAPP_PHONE_NUMBER_ID"] = v
+				}
+				if v, ok := creds["access_token"]; ok {
+					cfg["WHATSAPP_ACCESS_TOKEN"] = v
+				}
+				if v, ok := creds["verify_token"]; ok {
+					cfg["WHATSAPP_VERIFY_TOKEN"] = v
+				}
+				if v, ok := creds["app_secret"]; ok {
+					cfg["WHATSAPP_APP_SECRET"] = v
+				}
 			}
+
 			if err := chanMgr.StartConnection(conn.ID, conn.Platform, cfg); err != nil {
 				log.Printf("connection %s (%s): start failed: %v", conn.ID, conn.Platform, err)
 				appStore.UpdateConnection(startCtx, conn.ID, map[string]any{"status": "error"})
@@ -967,6 +1044,15 @@ func defaultDBPath() string {
 		return "sageclaw.db"
 	}
 	return filepath.Join(home, ".sageclaw", "sageclaw.db")
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // --- Generic store wrappers for non-SQLite backends ---

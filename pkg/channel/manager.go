@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 
 	"github.com/xoai/sageclaw/pkg/bus"
@@ -20,6 +21,7 @@ type Manager struct {
 	factories map[string]Factory // platform type → factory function
 	msgBus    bus.MessageBus
 	ctx       context.Context
+	mux       *http.ServeMux // shared webhook mux (set by RPC server)
 }
 
 // NewManager creates a channel manager.
@@ -29,6 +31,21 @@ func NewManager(ctx context.Context, msgBus bus.MessageBus) *Manager {
 		factories: make(map[string]Factory),
 		msgBus:    msgBus,
 		ctx:       ctx,
+	}
+}
+
+// SetWebhookMux sets the shared HTTP mux for webhook registration.
+// Called by the RPC server after creating its mux. Channels started after
+// this call will have their webhooks registered automatically.
+func (m *Manager) SetWebhookMux(mux *http.ServeMux) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mux = mux
+	// Register webhooks for already-running channels.
+	for _, ch := range m.channels {
+		if wr, ok := ch.(WebhookRegistrar); ok {
+			wr.RegisterWebhook(mux)
+		}
 	}
 }
 
@@ -69,6 +86,11 @@ func (m *Manager) StartConnection(connID, platformType string, config map[string
 
 	if err := ch.Start(m.ctx, m.msgBus); err != nil {
 		return fmt.Errorf("starting %s connection %s: %w", platformType, connID, err)
+	}
+
+	// Register webhook routes if the channel needs them.
+	if wr, ok := ch.(WebhookRegistrar); ok && m.mux != nil {
+		wr.RegisterWebhook(m.mux)
 	}
 
 	m.channels[connID] = ch
@@ -143,5 +165,8 @@ func (m *Manager) Running() []string {
 func (m *Manager) Register(ch Channel) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if wr, ok := ch.(WebhookRegistrar); ok && m.mux != nil {
+		wr.RegisterWebhook(m.mux)
+	}
 	m.channels[ch.ID()] = ch
 }

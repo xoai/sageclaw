@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/xoai/sageclaw/pkg/bus"
 )
@@ -12,4 +13,10 @@ type Channel interface {
 	Platform() string // Platform type: "telegram", "discord", etc.
 	Start(ctx context.Context, msgBus bus.MessageBus) error
 	Stop(ctx context.Context) error
+}
+
+// WebhookRegistrar is implemented by adapters that need HTTP webhook routes
+// registered on the shared server mux (e.g. Zalo, WhatsApp).
+type WebhookRegistrar interface {
+	RegisterWebhook(mux *http.ServeMux)
 }

@@ -2,10 +2,19 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 
 const PLATFORMS = [
-  { id: 'telegram', label: 'Telegram', icon: '✈' },
-  { id: 'discord', label: 'Discord', icon: '🎮' },
-  { id: 'zalo', label: 'Zalo', icon: '💬' },
-  { id: 'whatsapp', label: 'WhatsApp', icon: '📱' },
+  { id: 'telegram', label: 'Telegram', icon: '✈', fields: [{ key: 'token', label: 'Bot Token', hint: 'Get from @BotFather on Telegram' }] },
+  { id: 'discord', label: 'Discord', icon: '🎮', fields: [{ key: 'token', label: 'Bot Token', hint: 'Get from Discord Developer Portal' }] },
+  { id: 'zalo', label: 'Zalo', icon: '💬', fields: [
+    { key: 'oa_id', label: 'OA ID' },
+    { key: 'secret_key', label: 'Secret Key' },
+    { key: 'access_token', label: 'Access Token' },
+  ]},
+  { id: 'whatsapp', label: 'WhatsApp', icon: '📱', fields: [
+    { key: 'phone_number_id', label: 'Phone Number ID' },
+    { key: 'access_token', label: 'Access Token' },
+    { key: 'verify_token', label: 'Verify Token' },
+    { key: 'app_secret', label: 'App Secret' },
+  ]},
 ];
 
 export function Channels() {
@@ -23,6 +32,7 @@ export function Channels() {
   const [showAdd, setShowAdd] = useState(false);
   const [addPlatform, setAddPlatform] = useState('telegram');
   const [addToken, setAddToken] = useState('');
+  const [addCreds, setAddCreds] = useState({});
   const [addLoading, setAddLoading] = useState(false);
   const [addPreview, setAddPreview] = useState(null);
 
@@ -64,20 +74,34 @@ export function Channels() {
   useEffect(() => { loadConnections(); loadAgents(); loadPaired(); }, [filterPlatform, filterStatus]);
 
   // --- Add Connection ---
+  const currentPlatform = PLATFORMS.find(p => p.id === addPlatform);
+  const isMultiField = currentPlatform && currentPlatform.fields.length > 1;
+
   const handleAdd = async () => {
-    if (!addToken.trim()) return;
+    let body;
+    if (isMultiField) {
+      // Multi-field credentials (Zalo, WhatsApp).
+      const hasValues = Object.values(addCreds).some(v => v && v.trim());
+      if (!hasValues) return;
+      body = { platform: addPlatform, credentials: addCreds };
+    } else {
+      // Single token (Telegram, Discord).
+      if (!addToken.trim()) return;
+      body = { platform: addPlatform, token: addToken };
+    }
     setAddLoading(true);
     try {
       const res = await fetch('/api/v2/connections', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ platform: addPlatform, token: addToken }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (res.ok) {
         flash(`Connection created: ${data.label || data.id}`);
         setShowAdd(false);
         setAddToken('');
+        setAddCreds({});
         setAddPreview(null);
         loadConnections();
       } else {
@@ -87,6 +111,16 @@ export function Channels() {
       flash('Failed: ' + e.message, 'error');
     }
     setAddLoading(false);
+  };
+
+  // --- Toggle DM/Group policy ---
+  const togglePolicy = async (connId, field, currentValue) => {
+    await fetch(`/api/v2/connections/${connId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: !currentValue }),
+    });
+    loadConnections();
   };
 
   // --- Delete ---
@@ -225,11 +259,23 @@ export function Channels() {
                           </span>
                         )}
                       </div>
-                      <div style="font-size:12px;color:var(--text-muted);margin-top:2px;display:flex;gap:12px">
+                      <div style="font-size:12px;color:var(--text-muted);margin-top:2px;display:flex;gap:12px;align-items:center">
                         <span>{plat.label}</span>
                         {meta.username && <span>@{meta.username}</span>}
                         {agentName && <span>Agent: {agentName}</span>}
                         <span style="font-family:var(--mono)">{conn.id}</span>
+                        <span style="display:flex;gap:6px;margin-left:4px">
+                          <label style="display:flex;align-items:center;gap:3px;cursor:pointer" title="Allow DM messages">
+                            <input type="checkbox" checked={conn.dm_enabled !== false}
+                              onChange={() => togglePolicy(conn.id, 'dm_enabled', conn.dm_enabled !== false)} />
+                            <span style="font-size:11px">DM</span>
+                          </label>
+                          <label style="display:flex;align-items:center;gap:3px;cursor:pointer" title="Allow group messages (requires @mention)">
+                            <input type="checkbox" checked={conn.group_enabled !== false}
+                              onChange={() => togglePolicy(conn.id, 'group_enabled', conn.group_enabled !== false)} />
+                            <span style="font-size:11px">Group</span>
+                          </label>
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -283,19 +329,29 @@ export function Channels() {
             </p>
             <div class="form-group">
               <label>Platform</label>
-              <select value={addPlatform} onChange={e => setAddPlatform(e.target.value)}>
+              <select value={addPlatform} onChange={e => { setAddPlatform(e.target.value); setAddToken(''); setAddCreds({}); }}>
                 {PLATFORMS.map(p => <option key={p.id} value={p.id}>{p.icon} {p.label}</option>)}
               </select>
             </div>
-            <div class="form-group">
-              <label>Bot Token</label>
-              <input type="password" placeholder="Paste your bot token here"
-                value={addToken} onInput={e => setAddToken(e.target.value)} />
-              <small style="color:var(--text-muted)">
-                {addPlatform === 'telegram' && 'Get from @BotFather on Telegram'}
-                {addPlatform === 'discord' && 'Get from Discord Developer Portal'}
-              </small>
-            </div>
+            {isMultiField ? (
+              currentPlatform.fields.map(f => (
+                <div class="form-group" key={f.key}>
+                  <label>{f.label}</label>
+                  <input type="password" placeholder={f.label}
+                    value={addCreds[f.key] || ''} onInput={e => setAddCreds({ ...addCreds, [f.key]: e.target.value })} />
+                  {f.hint && <small style="color:var(--text-muted)">{f.hint}</small>}
+                </div>
+              ))
+            ) : (
+              <div class="form-group">
+                <label>{currentPlatform?.fields[0]?.label || 'Bot Token'}</label>
+                <input type="password" placeholder="Paste your bot token here"
+                  value={addToken} onInput={e => setAddToken(e.target.value)} />
+                {currentPlatform?.fields[0]?.hint && (
+                  <small style="color:var(--text-muted)">{currentPlatform.fields[0].hint}</small>
+                )}
+              </div>
+            )}
 
             {addPreview && (
               <div class="card" style="padding:12px;margin-bottom:12px">
@@ -304,10 +360,10 @@ export function Channels() {
             )}
 
             <div style="display:flex;gap:0.5rem;margin-top:1rem">
-              <button class="btn-primary" onClick={handleAdd} disabled={addLoading || !addToken.trim()}>
+              <button class="btn-primary" onClick={handleAdd} disabled={addLoading || (isMultiField ? !Object.values(addCreds).some(v => v && v.trim()) : !addToken.trim())}>
                 {addLoading ? 'Connecting...' : 'Connect'}
               </button>
-              <button class="btn-secondary" onClick={() => { setShowAdd(false); setAddToken(''); setAddPreview(null); }}>
+              <button class="btn-secondary" onClick={() => { setShowAdd(false); setAddToken(''); setAddCreds({}); setAddPreview(null); }}>
                 Cancel
               </button>
             </div>

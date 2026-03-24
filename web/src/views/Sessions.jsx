@@ -10,9 +10,17 @@ const channelIcons = {
 };
 
 const kindBadge = (kind) => {
-  if (kind === 'subagent') return 'badge-blue';
+  if (kind === 'dm') return 'badge-blue';
+  if (kind === 'group') return 'badge-green';
+  if (kind === 'subagent') return 'badge-purple';
   if (kind === 'cron') return 'badge-gray';
   return '';
+};
+
+const kindLabel = (kind) => {
+  if (kind === 'dm') return 'DM';
+  if (kind === 'group') return 'Group';
+  return kind;
 };
 
 const statusBadge = (status) => {
@@ -39,12 +47,14 @@ export function Sessions() {
   const [filterAgent, setFilterAgent] = useState('');
   const [filterChannel, setFilterChannel] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
+  const [filterKind, setFilterKind] = useState('');
 
   const load = () => {
     const params = { limit: 100 };
     if (filterAgent) params.agent_id = filterAgent;
     if (filterChannel) params.channel = filterChannel;
     if (filterStatus) params.status = filterStatus;
+    if (filterKind) params.kind = filterKind;
     rpc('sessions.list', params)
       .then(data => setSessions(data || []))
       .catch(() => {})
@@ -58,7 +68,7 @@ export function Sessions() {
   }, []);
 
   // Re-load when filters change.
-  useEffect(load, [filterAgent, filterChannel, filterStatus]);
+  useEffect(load, [filterAgent, filterChannel, filterStatus, filterKind]);
 
   const toggle = (id, e) => {
     e.stopPropagation();
@@ -116,6 +126,13 @@ export function Sessions() {
           <option value="">All channels</option>
           {channels.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
+        <select value={filterKind} onChange={e => setFilterKind(e.target.value)} style="width:110px">
+          <option value="">All kinds</option>
+          <option value="dm">DM</option>
+          <option value="group">Group</option>
+          <option value="subagent">Subagent</option>
+          <option value="cron">Cron</option>
+        </select>
         <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style="width:130px">
           <option value="">All status</option>
           <option value="active">Active</option>
@@ -160,8 +177,14 @@ export function Sessions() {
                 <td>
                   <span style="margin-right:4px">{channelIcons[s.channel] || ''}</span>
                   {s.channel}
-                  {s.kind && s.kind !== 'direct' && (
-                    <span class={`badge ${kindBadge(s.kind)}`} style="margin-left:6px">{s.kind}</span>
+                  {s.kind && (
+                    <span class={`badge ${kindBadge(s.kind)}`} style="margin-left:6px">{kindLabel(s.kind)}</span>
+                  )}
+                  {s.thread_id && (
+                    <span class="badge badge-gray" style="margin-left:4px" title={`Thread ${s.thread_id}`}>Thread</span>
+                  )}
+                  {s.spawned_by && !s.thread_id && s.kind !== 'subagent' && s.kind !== 'cron' && (
+                    <span style="font-size:10px;color:var(--text-muted);margin-left:4px" title={`Parent: ${s.spawned_by}`}>&#8627;</span>
                   )}
                 </td>
                 <td style="font-family:var(--mono);font-size:12px">{s.message_count || 0}</td>

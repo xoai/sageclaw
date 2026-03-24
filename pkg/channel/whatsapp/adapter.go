@@ -26,8 +26,6 @@ type Adapter struct {
 	accessToken   string
 	verifyToken   string
 	appSecret     string
-	listenAddr    string
-	server        *http.Server
 	msgBus        bus.MessageBus
 	client        *http.Client
 	cancel        context.CancelFunc
@@ -36,11 +34,6 @@ type Adapter struct {
 // Option configures the WhatsApp adapter.
 type Option func(*Adapter)
 
-// WithListenAddr sets the webhook listen address.
-func WithListenAddr(addr string) Option {
-	return func(a *Adapter) { a.listenAddr = addr }
-}
-
 // New creates a new WhatsApp adapter.
 func New(connID, phoneNumberID, accessToken, verifyToken string, opts ...Option) *Adapter {
 	a := &Adapter{
@@ -48,7 +41,6 @@ func New(connID, phoneNumberID, accessToken, verifyToken string, opts ...Option)
 		phoneNumberID: phoneNumberID,
 		accessToken:   accessToken,
 		verifyToken:   verifyToken,
-		listenAddr:    ":8080",
 		client:        &http.Client{Timeout: 30 * time.Second},
 	}
 	for _, opt := range opts {
@@ -57,9 +49,33 @@ func New(connID, phoneNumberID, accessToken, verifyToken string, opts ...Option)
 	return a
 }
 
+// NewFromCredentials creates a WhatsApp adapter from a credential map.
+// Expected keys: "phone_number_id", "access_token", "verify_token", "app_secret".
+func NewFromCredentials(connID string, creds map[string]string, opts ...Option) *Adapter {
+	a := New(connID, creds["phone_number_id"], creds["access_token"], creds["verify_token"], opts...)
+	a.appSecret = creds["app_secret"]
+	return a
+}
+
+// DetectKind returns "dm" or "group" based on WhatsApp chat ID suffix.
+func DetectKind(chatID string) string {
+	if strings.HasSuffix(chatID, "@g.us") {
+		return "group"
+	}
+	return "dm"
+}
+
 func (a *Adapter) ID() string       { return a.connID }
 func (a *Adapter) Platform() string  { return "whatsapp" }
 
+// RegisterWebhook registers WhatsApp webhook routes on the shared HTTP mux.
+func (a *Adapter) RegisterWebhook(mux *http.ServeMux) {
+	mux.HandleFunc("POST /webhook/whatsapp", a.handleWebhook)
+	mux.HandleFunc("GET /webhook/whatsapp", a.handleVerify)
+	log.Printf("whatsapp: webhook routes registered (connection %s)", a.connID)
+}
+
+// Start subscribes to the message bus for outbound delivery.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 	a.msgBus = msgBus
 	adapterCtx, cancel := context.WithCancel(ctx)
@@ -72,28 +88,12 @@ func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
 		}
 	})
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /webhook/whatsapp", a.handleWebhook)
-	mux.HandleFunc("GET /webhook/whatsapp", a.handleVerify)
-
-	a.server = &http.Server{Addr: a.listenAddr, Handler: mux}
-
-	go func() {
-		log.Printf("whatsapp: webhook listening on %s/webhook/whatsapp (connection %s)", a.listenAddr, a.connID)
-		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("whatsapp: server error: %v", err)
-		}
-	}()
-
 	return nil
 }
 
 func (a *Adapter) Stop(ctx context.Context) error {
 	if a.cancel != nil {
 		a.cancel()
-	}
-	if a.server != nil {
-		return a.server.Shutdown(ctx)
 	}
 	return nil
 }
@@ -139,9 +139,12 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, msg := range change.Value.Messages {
 				if msg.Type == "text" && msg.Text.Body != "" {
+					kind := DetectKind(msg.From)
 					a.msgBus.PublishInbound(r.Context(), bus.Envelope{
-						Channel: a.connID,
-						ChatID:  msg.From,
+						Channel:   a.connID,
+						ChatID:    msg.From,
+						Kind:      kind,
+						Mentioned: kind == "dm", // DMs always "mentioned"; groups need future detection.
 						Messages: []canonical.Message{
 							{Role: "user", Content: []canonical.Content{{Type: "text", Text: msg.Text.Body}}},
 						},

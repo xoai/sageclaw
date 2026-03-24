@@ -84,3 +84,81 @@ func TestStoreCredential_Update(t *testing.T) {
 		t.Fatalf("expected v2, got %s", got)
 	}
 }
+
+func TestEncryptDecryptCredentials_RoundTrip(t *testing.T) {
+	key, _ := GenerateKey()
+
+	creds := map[string]string{
+		"token":      "bot123:ABC",
+		"app_token":  "xapp-456",
+		"secret_key": "s3cret",
+	}
+
+	blob, err := EncryptCredentials(creds, key)
+	if err != nil {
+		t.Fatalf("encrypting credentials: %v", err)
+	}
+	if len(blob) == 0 {
+		t.Fatal("expected non-empty blob")
+	}
+
+	got, err := DecryptCredentials(blob, key)
+	if err != nil {
+		t.Fatalf("decrypting credentials: %v", err)
+	}
+
+	for k, v := range creds {
+		if got[k] != v {
+			t.Fatalf("key %s: expected %s, got %s", k, v, got[k])
+		}
+	}
+}
+
+func TestDecryptCredentials_EmptyBlob(t *testing.T) {
+	key, _ := GenerateKey()
+	got, err := DecryptCredentials(nil, key)
+	if err != nil {
+		t.Fatalf("expected nil error for empty blob, got: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil map for empty blob, got: %v", got)
+	}
+}
+
+func TestMergeCredentials(t *testing.T) {
+	key, _ := GenerateKey()
+
+	// Start with one field.
+	initial := map[string]string{"token": "old-token"}
+	blob, _ := EncryptCredentials(initial, key)
+
+	// Merge: add a new field, update existing.
+	update := map[string]string{"token": "new-token", "secret": "s3cret"}
+	merged, err := MergeCredentials(blob, update, key)
+	if err != nil {
+		t.Fatalf("merging: %v", err)
+	}
+
+	got, _ := DecryptCredentials(merged, key)
+	if got["token"] != "new-token" {
+		t.Fatalf("expected token=new-token, got %s", got["token"])
+	}
+	if got["secret"] != "s3cret" {
+		t.Fatalf("expected secret=s3cret, got %s", got["secret"])
+	}
+}
+
+func TestMergeCredentials_EmptyExisting(t *testing.T) {
+	key, _ := GenerateKey()
+
+	update := map[string]string{"token": "fresh"}
+	merged, err := MergeCredentials(nil, update, key)
+	if err != nil {
+		t.Fatalf("merging with nil existing: %v", err)
+	}
+
+	got, _ := DecryptCredentials(merged, key)
+	if got["token"] != "fresh" {
+		t.Fatalf("expected token=fresh, got %s", got["token"])
+	}
+}

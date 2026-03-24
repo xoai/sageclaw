@@ -116,8 +116,10 @@ func (a *Adapter) readLoop(ctx context.Context) {
 
 		// Publish to inbound bus.
 		a.msgBus.PublishInbound(ctx, bus.Envelope{
-			Channel: a.connID,
-			ChatID:  chatID,
+			Channel:   a.connID,
+			ChatID:    chatID,
+			Kind:      "dm",
+			Mentioned: true,
 			Messages: []canonical.Message{
 				{Role: "user", Content: []canonical.Content{{Type: "text", Text: input}}},
 			},
