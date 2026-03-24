@@ -75,7 +75,7 @@ export function Overview() {
 
   return (
     <div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
         <div>
           <h1 style="margin-bottom:2px">Dashboard</h1>
           <p style="color:var(--text-muted);font-size:13px">Health, activity, and agent metrics</p>
@@ -87,7 +87,7 @@ export function Overview() {
 
       {/* Setup wizard — redirect to guided onboarding */}
       {dataReady && showSetup && (
-        <div class="card" style="padding:24px;margin-bottom:24px;border-color:var(--primary);border-width:2px;text-align:center">
+        <div class="card" style="padding:24px;margin-bottom:32px;border-color:var(--primary);border-width:2px;text-align:center">
           <h2 style="font-size:16px;margin-bottom:4px">Welcome to SageClaw</h2>
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
             Set up your first agent in a few guided steps.
@@ -98,8 +98,8 @@ export function Overview() {
         </div>
       )}
 
-      {/* Top stats — GoClaw style */}
-      <div class="overview-stats" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:24px">
+      {/* Top stats — monospace metrics with clear hierarchy */}
+      <div class="overview-stats" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:32px">
         <StatCard label="Requests" value={cache?.total_requests ?? 0} sub="total" />
         <StatCard label="Tokens" value={formatTokens(cache?.total_input, cache?.total_output)} sub={`${formatNum(cache?.total_input || 0)} in / ${formatNum(cache?.total_output || 0)} out`} />
         <StatCard label="Est. Cost" value={`$${(cache?.est_cost_usd || 0).toFixed(2)}`} sub={cache?.est_saved_usd > 0 ? `$${cache.est_saved_usd.toFixed(2)} saved` : 'no cache savings yet'} color={cache?.est_cost_usd > 0 ? 'var(--warning)' : undefined} />
@@ -107,54 +107,54 @@ export function Overview() {
         <StatCard label="Channels" value={`${connectedProviders}/${totalProviders}`} sub="providers active" />
       </div>
 
-      {/* System Health */}
-      <div class="card" style="padding:16px;margin-bottom:24px">
-        <h2 style="font-size:15px;margin-bottom:12px">System Health</h2>
-        <div class="overview-cols" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
-          <HealthItem label="Uptime" value={formatUptime(health?.uptime_seconds)} ok={true} />
-          <HealthItem label="Database" value="Connected" ok={true} />
-          <HealthItem label="Providers" value={`${connectedProviders} active`} ok={connectedProviders > 0} />
-        </div>
-        <div class="overview-cols" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
-          <HealthItem label="Tools" value={`27+`} ok={true} />
-          <HealthItem label="Sessions" value={`${status?.sessions ?? 0}`} ok={true} />
-          <HealthItem label="Memories" value={`${status?.memories ?? 0}`} ok={true} />
-        </div>
-
-        {/* Channels status */}
-        {health?.providers && (
-          <div style="margin-top:8px">
-            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:8px">Providers</div>
-            <div style="display:flex;gap:12px;flex-wrap:wrap">
-              {Object.entries(health.providers).map(([name, pStatus]) => (
-                <span key={name} style="display:flex;align-items:center;gap:4px;font-size:13px">
-                  <span style={`width:8px;height:8px;border-radius:50%;background:${pStatus === 'connected' ? 'var(--success)' : 'var(--text-muted)'}`} />
-                  <span style="text-transform:capitalize">{name}</span>
-                </span>
-              ))}
-            </div>
+      {/* System Health — flat rows, no nested cards */}
+      <div style="margin-bottom:32px">
+        <div class="section-label" style="margin-bottom:12px">System Health</div>
+        <div class="card" style="padding:16px 20px">
+          <div class="overview-cols" style="display:grid;grid-template-columns:repeat(3,1fr);gap:0 24px">
+            <HealthItem label="Uptime" value={formatUptime(health?.uptime_seconds)} ok={true} />
+            <HealthItem label="Database" value="Connected" ok={true} />
+            <HealthItem label="Providers" value={`${connectedProviders} active`} ok={connectedProviders > 0} />
+            <HealthItem label="Tools" value={`27+`} ok={true} />
+            <HealthItem label="Sessions" value={`${status?.sessions ?? 0}`} ok={true} />
+            <HealthItem label="Memories" value={`${status?.memories ?? 0}`} ok={true} />
           </div>
-        )}
 
-        {/* Cache stats */}
-        {cache && cache.total_requests > 0 && (
-          <div style="margin-top:12px">
-            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:8px">Prompt Cache</div>
-            <div style="display:flex;gap:24px;font-size:13px">
-              <span>Hit rate: <strong>{(cache.hit_rate || 0).toFixed(1)}%</strong></span>
-              <span>Savings: <strong>{(cache.cost_savings_pct || 0).toFixed(1)}%</strong></span>
-              <span>Cached reads: <strong>{formatNum(cache.cache_read || 0)}</strong> tokens</span>
+          {/* Providers inline */}
+          {health?.providers && (
+            <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+              <div class="section-label" style="margin-bottom:8px">Providers</div>
+              <div style="display:flex;gap:16px;flex-wrap:wrap">
+                {Object.entries(health.providers).map(([name, pStatus]) => (
+                  <span key={name} style="display:flex;align-items:center;gap:6px;font-size:13px">
+                    <span class={`health-dot ${pStatus === 'connected' ? 'ok' : 'err'}`} />
+                    <span style="text-transform:capitalize">{name}</span>
+                  </span>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+
+          {/* Cache stats */}
+          {cache && cache.total_requests > 0 && (
+            <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+              <div class="section-label" style="margin-bottom:8px">Prompt Cache</div>
+              <div style="display:flex;gap:24px;font-size:13px">
+                <span>Hit rate: <strong style="font-family:var(--mono)">{(cache.hit_rate || 0).toFixed(1)}%</strong></span>
+                <span>Savings: <strong style="font-family:var(--mono)">{(cache.cost_savings_pct || 0).toFixed(1)}%</strong></span>
+                <span>Cached: <strong style="font-family:var(--mono)">{formatNum(cache.cache_read || 0)}</strong> tokens</span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Two-column: Sessions + Activity */}
-      <div class="overview-cols" style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px">
+      <div class="overview-cols" style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px">
         {/* Recent Sessions */}
         <div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-            <h2 style="font-size:15px">Recent Sessions</h2>
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
+            <div class="section-label">Recent Sessions</div>
             <a href="/sessions" style="font-size:12px" aria-label="View all sessions">View all</a>
           </div>
           {recentSessions.length === 0 ? (
@@ -181,8 +181,8 @@ export function Overview() {
 
         {/* Live Activity */}
         <div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-            <h2 style="font-size:15px">Live Activity</h2>
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
+            <div class="section-label">Live Activity</div>
             <a href="/activity" style="font-size:12px" aria-label="View full activity log">Full view</a>
           </div>
           {recentEvents.length === 0 ? (
@@ -205,8 +205,8 @@ export function Overview() {
 
       {/* Quick Actions */}
       <div>
-        <h2 style="font-size:15px;margin-bottom:12px">Quick Actions</h2>
-        <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <div class="section-label" style="margin-bottom:12px">Quick Actions</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
           <a href="/chat" class="btn-primary" style="text-decoration:none">Open Chat</a>
           <a href="/onboarding" class="btn-secondary" style="text-decoration:none">Quick Setup</a>
           <a href="/agents" class="btn-secondary" style="text-decoration:none">Manage Agents</a>
@@ -221,22 +221,20 @@ export function Overview() {
 
 function StatCard({ label, value, sub, color }) {
   return (
-    <div class="card" style="text-align:center;padding:14px 10px">
-      <div style={`font-size:1.5rem;font-weight:700;color:${color || 'var(--primary)'}`}>{value}</div>
-      <div style="color:var(--text-muted);font-size:11px;margin-top:2px">{label}</div>
-      {sub && <div style="color:var(--text-muted);font-size:10px;margin-top:2px;opacity:0.7">{sub}</div>}
+    <div class="card" style="padding:16px 14px">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-weight:500">{label}</div>
+      <div class="stat-value" style={`color:${color || 'var(--text)'}`}>{value}</div>
+      {sub && <div style="color:var(--text-muted);font-size:11px;margin-top:4px;opacity:0.6">{sub}</div>}
     </div>
   );
 }
 
 function HealthItem({ label, value, ok }) {
   return (
-    <div class="card" style="padding:10px 14px;display:flex;align-items:center;gap:8px">
-      <span style={`width:8px;height:8px;border-radius:50%;background:${ok ? 'var(--success)' : 'var(--error)'};flex-shrink:0`} />
-      <div>
-        <div style="font-size:11px;color:var(--text-muted)">{label}</div>
-        <div style="font-size:13px;font-weight:500">{value}</div>
-      </div>
+    <div class="health-row">
+      <span class={`health-dot ${ok ? 'ok' : 'err'}`} />
+      <span style="font-size:12px;color:var(--text-muted);min-width:64px">{label}</span>
+      <span style="font-size:13px;font-weight:500">{value}</span>
     </div>
   );
 }

@@ -94,7 +94,7 @@ export default function StepChannel({ progress, onComplete, onBack }) {
   if (!selected) {
     return (
       <div class="card" style="padding:24px">
-        <h2 style="font-size:16px;margin-bottom:4px">Connect a Channel</h2>
+        <h2 style="font-size:18px;font-weight:700;margin-bottom:4px">Connect a Channel</h2>
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
           Where should <strong>{progress.agentName || 'your agent'}</strong> be available? Pick a messaging platform or start with web chat.
         </p>
@@ -130,7 +130,7 @@ export default function StepChannel({ progress, onComplete, onBack }) {
   // Credential entry.
   return (
     <div class="card" style="padding:24px">
-      <h2 style="font-size:16px;margin-bottom:4px">Connect {platform.label}</h2>
+      <h2 style="font-size:18px;font-weight:700;margin-bottom:4px">Connect {platform.label}</h2>
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
         Enter your bot credentials. We'll verify the connection with the platform.
       </p>

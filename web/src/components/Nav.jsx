@@ -63,27 +63,23 @@ export function Nav({ open, onNavigate }) {
       {link('/chat', 'Chat')}
       {link('/agents', 'Agents')}
 
-      <div style="border-top:1px solid var(--border);margin:8px 0" />
 
       <div class="nav-section-label">Conversations</div>
       {link('/sessions', 'Sessions')}
       {link('/activity', 'Activity')}
 
-      <div style="border-top:1px solid var(--border);margin:8px 0" />
 
       <div class="nav-section-label">Data</div>
       {link('/memory', 'Memory')}
       {link('/graph', 'Knowledge Graph')}
       {link('/audit', 'Audit')}
 
-      <div style="border-top:1px solid var(--border);margin:8px 0" />
 
       <div class="nav-section-label">Connectivity</div>
       {link('/providers', 'Providers')}
       {link('/channels', 'Channels')}
       {link('/tunnel', 'Tunnel')}
 
-      <div style="border-top:1px solid var(--border);margin:8px 0" />
 
       <div class="nav-section-label">Capabilities</div>
       {link('/skills', 'Skills')}
@@ -93,7 +89,6 @@ export function Nav({ open, onNavigate }) {
       {link('/teams', 'Teams')}
       {link('/delegation', 'Delegation')}
 
-      <div style="border-top:1px solid var(--border);margin:8px 0" />
 
       <div class="nav-section-label">System</div>
       {link('/budget', 'Budget')}

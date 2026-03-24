@@ -392,7 +392,13 @@ export function Chat() {
               <div key={a.id} class="card clickable" style="padding:14px;cursor:pointer;display:flex;align-items:center;gap:12px"
                 role="button" tabIndex={0}
                 onClick={() => startNewChat(a)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startNewChat(a); } }}>
-                {a.avatar && <span style="font-size:24px">{a.avatar}</span>}
+                {a.avatar ? (
+                  <span style="font-size:24px">{a.avatar}</span>
+                ) : (
+                  <span style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:color-mix(in srgb, var(--primary) 15%, transparent);color:var(--primary);font-weight:700;font-size:14px;font-family:var(--mono);flex-shrink:0">
+                    {(a.name || a.id || '?').charAt(0).toUpperCase()}
+                  </span>
+                )}
                 <div style="flex:1">
                   <div style="font-weight:600;font-size:14px">{a.name || a.id}</div>
                   <div style="font-size:12px;color:var(--text-muted)">{a.role || 'No role defined'}</div>
@@ -409,7 +415,7 @@ export function Chat() {
   // --- Chat View ---
   return (
     <div class="chat-container" style="height:calc(100vh - 48px)">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <div class="chat-header">
         <button class="btn-secondary" onClick={backToList} style="padding:6px 12px;flex-shrink:0" aria-label="Back to chat list">
           {'\u2190'}
         </button>
@@ -448,7 +454,7 @@ export function Chat() {
         {sending && !streaming && (
           <div class="message assistant">
             <div class="message-role">assistant</div>
-            <div class="message-text" style="opacity:0.5">
+            <div class="message-text" style="color:var(--text-muted)">
               <span class="thinking-dots">Thinking</span>
             </div>
           </div>
@@ -462,22 +468,22 @@ export function Chat() {
         <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100"
           role="dialog" aria-modal="true" aria-labelledby="consent-title">
           <div class="card" style="padding:24px;max-width:420px;width:100%">
-            <h3 id="consent-title" style="margin-top:0">Permission Required</h3>
-            <p>The agent wants to use a tool that requires your approval:</p>
-            <div style="background:var(--bg);padding:12px;border-radius:6px;margin:12px 0">
-              <div><strong>{consentPrompt.tool_name}</strong></div>
-              <div style="color:var(--text-muted);font-size:0.9rem;margin-top:4px">
-                Group: <span style="text-transform:capitalize">{consentPrompt.group}</span>
-                {' '}&middot;{' '}
-                Risk: <span class={`badge ${consentPrompt.risk_level === 'sensitive' ? 'badge-red' : 'badge-yellow'}`}>
+            <h3 id="consent-title" style="margin-top:0;font-size:16px;font-weight:700">Permission Required</h3>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">The agent wants to use a tool that requires your approval.</p>
+            <div style="background:var(--bg);padding:14px;border-radius:6px;margin-bottom:16px">
+              <div style="font-weight:700;font-family:var(--mono);font-size:13px;margin-bottom:6px">{consentPrompt.tool_name}</div>
+              <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text-muted)">
+                <span style="text-transform:capitalize">{consentPrompt.group}</span>
+                <span>&middot;</span>
+                <span class={`badge ${consentPrompt.risk_level === 'sensitive' ? 'badge-red' : 'badge-yellow'}`}>
                   {consentPrompt.risk_level}
                 </span>
               </div>
               {consentPrompt.explanation && (
-                <div style="color:var(--text-muted);font-size:0.85rem;margin-top:8px">{consentPrompt.explanation}</div>
+                <div style="color:var(--text-muted);font-size:12px;margin-top:8px;line-height:1.5">{consentPrompt.explanation}</div>
               )}
             </div>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+            <div style="display:flex;gap:8px;justify-content:flex-end">
               <button class="btn-secondary" onClick={() => respondConsent(false)}>Deny</button>
               <button class="btn-primary" onClick={() => respondConsent(true)}>Allow</button>
             </div>

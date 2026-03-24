@@ -90,25 +90,26 @@ export default function Onboarding() {
       </div>
 
       {/* Stepper */}
-      <div style="display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:32px">
+      <div style="display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:36px">
         {STEPS.map((s, i) => (
           <div key={s.key} style="display:flex;align-items:center">
-            <div style={`display:flex;align-items:center;gap:6px;${i <= step ? 'opacity:1' : 'opacity:0.4'}`}>
+            <div style={`display:flex;align-items:center;gap:8px;${i <= step ? 'opacity:1' : 'opacity:0.35'}`}>
               <span style={`
                 display:inline-flex;align-items:center;justify-content:center;
-                width:28px;height:28px;border-radius:50%;font-size:12px;font-weight:700;
+                width:32px;height:32px;border-radius:50%;font-size:13px;font-weight:700;
+                font-family:var(--mono);transition:all 0.2s;
                 ${i < step ? 'background:var(--success);color:var(--text-on-primary)' :
-                  i === step ? 'background:var(--primary);color:var(--text-on-primary)' :
+                  i === step ? 'background:var(--primary);color:var(--text-on-primary);box-shadow:0 0 0 4px color-mix(in srgb, var(--primary) 20%, transparent)' :
                   'background:var(--surface);color:var(--text-muted);border:1px solid var(--border)'}
               `}>
                 {i < step ? '\u2713' : i + 1}
               </span>
-              <span style={`font-size:12px;font-weight:500;${i === step ? 'color:var(--text)' : 'color:var(--text-muted)'}`}>
+              <span style={`font-size:12px;font-weight:${i === step ? '600' : '500'};${i === step ? 'color:var(--text)' : 'color:var(--text-muted)'}`}>
                 {s.label}
               </span>
             </div>
             {i < STEPS.length - 1 && (
-              <div style={`width:32px;height:1px;margin:0 8px;${i < step ? 'background:var(--success)' : 'background:var(--border)'}`} />
+              <div style={`width:36px;height:${i < step ? '2px' : '1px'};margin:0 6px;transition:all 0.2s;${i < step ? 'background:var(--success)' : 'background:var(--border)'}`} />
             )}
           </div>
         ))}

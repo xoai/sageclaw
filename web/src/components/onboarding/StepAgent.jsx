@@ -167,7 +167,7 @@ export default function StepAgent({ progress, onComplete, onBack }) {
   if (!mode) {
     return (
       <div class="card" style="padding:24px">
-        <h2 style="font-size:16px;margin-bottom:4px">
+        <h2 style="font-size:18px;font-weight:700;margin-bottom:4px">
           {existingAgents.length > 0 ? 'Choose an Agent' : 'Create Your Agent'}
         </h2>
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
@@ -228,7 +228,7 @@ export default function StepAgent({ progress, onComplete, onBack }) {
   if (mode === 'preset') {
     return (
       <div class="card" style="padding:24px">
-        <h2 style="font-size:16px;margin-bottom:4px">Choose a Preset</h2>
+        <h2 style="font-size:18px;font-weight:700;margin-bottom:4px">Choose a Preset</h2>
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
           Pick a template. You can customize everything later.
         </p>
@@ -255,7 +255,7 @@ export default function StepAgent({ progress, onComplete, onBack }) {
   if (mode === 'generate') {
     return (
       <div class="card" style="padding:24px">
-        <h2 style="font-size:16px;margin-bottom:4px">Describe Your Agent</h2>
+        <h2 style="font-size:18px;font-weight:700;margin-bottom:4px">Describe Your Agent</h2>
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
           Tell us about your agent and we'll generate the configuration.
         </p>
@@ -304,7 +304,7 @@ export default function StepAgent({ progress, onComplete, onBack }) {
   // Blank / manual mode.
   return (
     <div class="card" style="padding:24px">
-      <h2 style="font-size:16px;margin-bottom:4px">Create Your Agent</h2>
+      <h2 style="font-size:18px;font-weight:700;margin-bottom:4px">Create Your Agent</h2>
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
         Set up the basics. You can customize personality, tools, and more later.
       </p>
@@ -335,10 +335,10 @@ export default function StepAgent({ progress, onComplete, onBack }) {
             <div
               key={t.value}
               class={`card clickable ${model === t.value ? 'card-selected' : ''}`}
-              style="flex:1;padding:10px;text-align:center;cursor:pointer;margin-bottom:0"
+              style={`flex:1;padding:12px;text-align:center;cursor:pointer;margin-bottom:0`}
               onClick={() => setModel(t.value)}
             >
-              <div style="font-size:13px;font-weight:600">{t.label}</div>
+              <div style={`font-size:13px;font-weight:${model === t.value ? '700' : '600'}`}>{t.label}</div>
               <div style="font-size:11px;color:var(--text-muted)">{t.desc}</div>
             </div>
           ))}

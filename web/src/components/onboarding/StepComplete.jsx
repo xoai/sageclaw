@@ -29,29 +29,31 @@ export default function StepComplete({ progress, onDone }) {
   };
 
   return (
-    <div class="card" style="padding:24px;text-align:center">
+    <div class="card" style="padding:32px 24px;text-align:center">
       {/* Success icon */}
-      <div style="font-size:48px;margin-bottom:12px">{'\u2705'}</div>
-      <h2 style="font-size:18px;margin-bottom:4px">Setup Complete</h2>
-      <p style="color:var(--text-muted);font-size:13px;margin-bottom:24px">
-        Your agent is set up and ready to go.
+      <div style="width:48px;height:48px;border-radius:50%;background:color-mix(in srgb, var(--success) 15%, transparent);display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px">
+        <span style="color:var(--success);font-size:24px">{'\u2713'}</span>
+      </div>
+      <h2 style="font-size:20px;font-weight:700;margin-bottom:4px">Setup Complete</h2>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:28px">
+        Your agent is configured and ready to go.
       </p>
 
       {/* Setup summary */}
-      <div style="text-align:left;margin-bottom:24px">
-        <div class="card" style="padding:12px">
-          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-            <span style="color:var(--text-muted);font-size:12px">Provider</span>
-            <span style="font-size:13px;font-weight:500">{progress.providerName || progress.providerType || 'Configured'}</span>
+      <div style="text-align:left;margin-bottom:28px">
+        <div style="padding:0 4px">
+          <div class="health-row" style="padding:10px 0">
+            <span style="font-size:12px;color:var(--text-muted);min-width:72px">Provider</span>
+            <span style="font-size:13px;font-weight:600">{progress.providerName || progress.providerType || 'Configured'}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-            <span style="color:var(--text-muted);font-size:12px">Agent</span>
-            <span style="font-size:13px;font-weight:500">{progress.agentName || progress.agentId}</span>
+          <div class="health-row" style="padding:10px 0">
+            <span style="font-size:12px;color:var(--text-muted);min-width:72px">Agent</span>
+            <span style="font-size:13px;font-weight:600">{progress.agentName || progress.agentId}</span>
           </div>
-          <div style="display:flex;justify-content:space-between">
-            <span style="color:var(--text-muted);font-size:12px">Channel</span>
-            <span style="font-size:13px;font-weight:500">
-              {progress.skippedChannel ? 'Web Chat' : `${platformLabel[progress.connectionPlatform] || progress.connectionPlatform} (${progress.connectionLabel})`}
+          <div class="health-row" style="padding:10px 0">
+            <span style="font-size:12px;color:var(--text-muted);min-width:72px">Channel</span>
+            <span style="font-size:13px;font-weight:600">
+              {progress.skippedChannel ? 'Web Chat' : `${platformLabel[progress.connectionPlatform] || progress.connectionPlatform}`}
             </span>
           </div>
         </div>
@@ -80,7 +82,7 @@ export default function StepComplete({ progress, onDone }) {
 
       {/* Action buttons */}
       <div style="display:flex;flex-direction:column;gap:8px">
-        <a href="/chat" class="btn-primary" style="text-decoration:none;text-align:center;display:block;padding:12px">
+        <a href="/chat" class="btn-primary" style="text-decoration:none;text-align:center;display:block;padding:14px;font-size:14px">
           Open Chat
         </a>
         <div style="display:flex;gap:8px">

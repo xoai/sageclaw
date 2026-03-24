@@ -71,21 +71,21 @@ export default function StepProvider({ progress, onComplete }) {
 
   return (
     <div class="card" style="padding:24px">
-      <h2 style="font-size:16px;margin-bottom:4px">Connect an AI Provider</h2>
-      <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
+      <h2 style="font-size:18px;font-weight:700;margin-bottom:4px">Connect an AI Provider</h2>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:24px">
         Give your agent a brain. Pick a provider and paste your API key.
       </p>
 
       {/* Provider grid */}
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:20px">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:24px">
         {PROVIDERS.map(p => (
           <div
             key={p.type}
             class={`card clickable ${selected === p.type ? 'card-selected' : ''}`}
-            style="padding:12px;text-align:center;cursor:pointer;margin-bottom:0"
+            style={`padding:14px 12px;text-align:center;cursor:pointer;margin-bottom:0;${selected === p.type ? `border-color:${p.color}` : ''}`}
             onClick={() => { setSelected(p.type); setError(''); setSuccess(''); setApiKey(''); }}
           >
-            <span style={`display:inline-block;width:10px;height:10px;border-radius:50%;background:${p.color};margin-bottom:4px`} />
+            <span style={`display:inline-block;width:14px;height:14px;border-radius:50%;background:${p.color};margin-bottom:6px;${selected === p.type ? `box-shadow:0 0 0 3px color-mix(in srgb, ${p.color} 25%, transparent)` : ''}`} />
             <div style="font-size:13px;font-weight:600">{p.name}</div>
             <div style="font-size:11px;color:var(--text-muted)">{p.desc}</div>
           </div>
