@@ -26,9 +26,9 @@ func (s *Server) handleAvatarGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "invalid request"})
 		return
 	}
-	if p.AgentID == "" {
+	if !validateAgentID(p.AgentID) {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "agent_id required"})
+		writeJSON(w, map[string]string{"error": "invalid agent_id"})
 		return
 	}
 	if p.Style == "" {

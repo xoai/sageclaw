@@ -625,6 +625,13 @@ func (s *Server) handleSkillInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only allow https:// URLs to prevent git ext:: command injection.
+	if !strings.HasPrefix(p.URL, "https://") {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "only https:// URLs are allowed"})
+		return
+	}
+
 	skillsDir := os.Getenv("SAGECLAW_SKILLS_DIR")
 	if skillsDir == "" {
 		skillsDir = "skills"
@@ -632,6 +639,7 @@ func (s *Server) handleSkillInstall(w http.ResponseWriter, r *http.Request) {
 
 	// Git clone into skills dir.
 	cmd := exec.CommandContext(r.Context(), "git", "clone", "--depth=1", p.URL)
+	cmd.Env = append(os.Environ(), "GIT_PROTOCOL_WHITELIST=https")
 	cmd.Dir = skillsDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -738,8 +746,10 @@ func (s *Server) handleTemplatesApply(w http.ResponseWriter, r *http.Request) {
 		p.Dir = "."
 	}
 
-	// Prevent path traversal.
-	if strings.Contains(p.Template, "..") || strings.Contains(p.Dir, "..") {
+	// Prevent path traversal and absolute path escape.
+	if strings.Contains(p.Template, "..") || strings.Contains(p.Dir, "..") ||
+		strings.HasPrefix(p.Dir, "/") || strings.HasPrefix(p.Dir, "\\") ||
+		(len(p.Dir) >= 2 && p.Dir[1] == ':') {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "invalid path"})
 		return

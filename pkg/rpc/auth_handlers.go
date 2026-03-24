@@ -119,7 +119,9 @@ func setAuthCookie(w http.ResponseWriter, token string) {
 func (s *Server) authGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.auth == nil {
-			next(w, r) // No auth configured — allow all.
+			// Fail closed: if auth failed to initialize, reject all requests.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]string{"error": "auth not available"})
 			return
 		}
 

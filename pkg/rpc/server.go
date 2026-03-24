@@ -137,8 +137,11 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 		config.ListenAddr = ":9090"
 	}
 
-	// Initialize auth.
-	authMgr, _ := auth.New(s.DB())
+	// Initialize auth — fail closed if auth setup errors.
+	authMgr, authErr := auth.New(s.DB())
+	if authErr != nil {
+		log.Printf("WARNING: auth initialization failed: %v — all endpoints will require auth setup", authErr)
+	}
 
 	srv := &Server{
 		store:          s,
