@@ -315,9 +315,15 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 	log.Printf("pipeline: resolved agentID=%q for %s/%s", agentID, channel, chatID)
 
 	// Channel-type filtering: check if the agent is allowed to serve this channel.
-	if p.agentProvider != nil && platform != "" {
-		if !p.agentProvider.ServesChannel(agentID, platform) {
-			log.Printf("pipeline: agent %s does not serve channel type %s (connection %s), ignoring", agentID, platform, channel)
+	// Use platform from connection lookup, or fall back to the channel name itself
+	// (covers web/cli channels that don't use connections).
+	channelType := platform
+	if channelType == "" {
+		channelType = channel
+	}
+	if p.agentProvider != nil && channelType != "" {
+		if !p.agentProvider.ServesChannel(agentID, channelType) {
+			log.Printf("pipeline: agent %s does not serve channel type %s, ignoring", agentID, channelType)
 			return
 		}
 	}

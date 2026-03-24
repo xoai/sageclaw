@@ -39,6 +39,7 @@ func (s *Server) handleAgentsListV2(w http.ResponseWriter, r *http.Request) {
 			"has_bootstrap": cfg.Bootstrap != "",
 			"tools_count":  len(cfg.Tools.Enabled),
 			"heartbeat_count": len(cfg.Heartbeat.Schedules),
+			"channels_serve":  cfg.Channels.Serve,
 			"channels_count":  len(cfg.Channels.Serve),
 			"max_tokens":      cfg.Identity.MaxTokens,
 		})

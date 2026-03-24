@@ -196,8 +196,14 @@ func (s *Server) handleConnectionUpdate(w http.ResponseWriter, r *http.Request) 
 	if v, ok := p["agent_id"]; ok {
 		if v == nil {
 			fields["agent_id"] = ""
+		} else if str, ok := v.(string); ok && validateAgentID(str) {
+			fields["agent_id"] = str
+		} else if str, ok := v.(string); ok && str == "" {
+			fields["agent_id"] = ""
 		} else {
-			fields["agent_id"] = v
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "invalid agent_id"})
+			return
 		}
 	}
 	if v, ok := p["status"]; ok {

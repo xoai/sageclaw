@@ -726,6 +726,25 @@ func (s *Server) chatSend(ctx context.Context, params json.RawMessage) (any, err
 		p.Channel = "web"
 	}
 
+	// Pre-check: verify the agent serves this channel before publishing.
+	if p.AgentID != "" && s.agentsDir != "" && validateAgentID(p.AgentID) {
+		if cfg, err := agentcfg.LoadAgent(filepath.Join(s.agentsDir, p.AgentID)); err == nil {
+			serve := cfg.Channels.Serve
+			if len(serve) > 0 {
+				allowed := false
+				for _, ch := range serve {
+					if ch == p.Channel {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					return nil, fmt.Errorf("agent %q does not serve the %s channel", cfg.Identity.Name, p.Channel)
+				}
+			}
+		}
+	}
+
 	envelope := bus.Envelope{
 		Channel: p.Channel,
 		ChatID:  "web-client",
@@ -746,7 +765,7 @@ func (s *Server) chatSend(ctx context.Context, params json.RawMessage) (any, err
 // resolveAgentName looks up the display name for an agent ID.
 // Checks file-based configs first, then DB agents table, falls back to raw ID.
 func (s *Server) resolveAgentName(agentID string) string {
-	if s.agentsDir != "" {
+	if s.agentsDir != "" && validateAgentID(agentID) {
 		if cfg, err := agentcfg.LoadAgent(filepath.Join(s.agentsDir, agentID)); err == nil && cfg.Identity.Name != "" {
 			return cfg.Identity.Name
 		}

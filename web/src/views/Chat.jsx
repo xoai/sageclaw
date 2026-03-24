@@ -11,7 +11,7 @@ async function callRPC(method, params) {
       body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params: params || {} }),
     });
     if (res.status === 401) {
-      window.location.reload(); // Token expired — redirect to login.
+      window.location.reload();
       return { error: 'Session expired' };
     }
     const data = await res.json();
@@ -33,25 +33,42 @@ function extractText(content) {
 }
 
 export function Chat() {
+  // View state: 'list' | 'pick-agent' | 'chat'
+  const [view, setView] = useState('list');
+
+  // Session list state
+  const [webSessions, setWebSessions] = useState([]);
+  const [listLoading, setListLoading] = useState(true);
+
+  // Agent picker state
+  const [agents, setAgents] = useState([]);
+  const [agentsLoading, setAgentsLoading] = useState(false);
+
+  // Chat state
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [streaming, setStreaming] = useState('');
-  const [status, setStatus] = useState('loading');
-  const [sessions, setSessions] = useState([]);
-  const [agents, setAgents] = useState([]);
   const [selectedSession, setSelectedSession] = useState(null);
   const [selectedAgent, setSelectedAgent] = useState('');
+  const [selectedAgentName, setSelectedAgentName] = useState('');
   const [consentPrompt, setConsentPrompt] = useState(null);
+  const [noProvider, setNoProvider] = useState(false);
   const bottomRef = useRef(null);
   const timerRef = useRef(null);
   const sseRef = useRef(null);
 
-  const findWebSession = useCallback(async () => {
-    const { data: sessions } = await callRPC('sessions.list', { limit: 50 });
-    if (!sessions) return null;
-    const ws = sessions.find(s => s.channel === 'web' && s.chat_id === 'web-client');
-    return ws ? ws.id : null;
+  // Load web sessions for the list view.
+  const loadSessions = useCallback(async () => {
+    setListLoading(true);
+    const { data: allSess } = await callRPC('sessions.list', { limit: 50 });
+    if (allSess) {
+      const web = allSess
+        .filter(s => s.channel === 'web')
+        .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+      setWebSessions(web);
+    }
+    setListLoading(false);
   }, []);
 
   const loadMessages = useCallback(async (sessionId) => {
@@ -60,42 +77,25 @@ export function Chat() {
     return msgs.map(m => ({ role: m.role, text: extractText(m.content) })).filter(m => m.text);
   }, []);
 
-  // Init.
+  const findWebSession = useCallback(async (agentId) => {
+    const { data: sessions } = await callRPC('sessions.list', { limit: 50 });
+    if (!sessions) return null;
+    // Find a web session for this specific agent, or any web session.
+    const match = agentId
+      ? sessions.find(s => s.channel === 'web' && s.chat_id === 'web-client' && s.agent_id === agentId)
+      : sessions.find(s => s.channel === 'web' && s.chat_id === 'web-client');
+    return match ? match.id : null;
+  }, []);
+
+  // Init: load sessions + check provider status.
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('/api/health');
-        const h = await res.json();
-        if (h.providers) {
-          const hasProvider = Object.values(h.providers).some(s => s === 'connected');
-          if (!hasProvider) setStatus('no-provider');
-        }
-      } catch {}
-
-      // Load agents for picker.
-      try {
-        const agentRes = await fetch('/api/agents', { credentials: 'include' });
-        const agentData = await agentRes.json();
-        if (Array.isArray(agentData) && agentData.length > 0) {
-          setAgents(agentData);
-          // Default to the first agent.
-          if (!selectedAgent) setSelectedAgent(agentData[0].id);
-        }
-      } catch {}
-
-      // Load sessions for picker.
-      const { data: allSess } = await callRPC('sessions.list', { limit: 20 });
-      if (allSess) setSessions(allSess);
-
-      // Load current web chat.
-      const sid = await findWebSession();
-      if (sid) {
-        setSelectedSession(sid);
-        const msgs = await loadMessages(sid);
-        if (msgs.length > 0) setMessages(msgs);
+    loadSessions();
+    fetch('/api/health').then(r => r.json()).then(h => {
+      if (h.providers) {
+        const hasProvider = Object.values(h.providers).some(s => s === 'connected');
+        if (!hasProvider) setNoProvider(true);
       }
-      if (status === 'loading') setStatus('ready');
-    })();
+    }).catch(() => {});
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -105,8 +105,63 @@ export function Chat() {
 
   // Auto-scroll on messages or streaming update.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, streaming]);
+    if (view === 'chat') {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, streaming, view]);
+
+  // --- Session List Actions ---
+
+  const openSession = async (session) => {
+    setSelectedSession(session.id);
+    setSelectedAgent(session.agent_id);
+    setSelectedAgentName(session.agent_name || session.agent_id);
+    const msgs = await loadMessages(session.id);
+    setMessages(msgs);
+    setView('chat');
+  };
+
+  const showAgentPicker = async () => {
+    setAgentsLoading(true);
+    setView('pick-agent');
+    try {
+      const res = await fetch('/api/v2/agents', { credentials: 'include' });
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        // Only show agents that serve the web channel.
+        // Empty serve list = serves all channels (including web).
+        const webAgents = data.filter(a => {
+          const serve = a.channels_serve;
+          return !serve || serve.length === 0 || serve.includes('web');
+        });
+        setAgents(webAgents);
+      }
+    } catch {}
+    setAgentsLoading(false);
+  };
+
+  const startNewChat = (agent) => {
+    setSelectedSession(null);
+    setSelectedAgent(agent.id);
+    setSelectedAgentName(agent.name || agent.id);
+    setMessages([]);
+    setInput('');
+    setSending(false);
+    setStreaming('');
+    setView('chat');
+  };
+
+  const backToList = () => {
+    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setSending(false);
+    setStreaming('');
+    setConsentPrompt(null);
+    setView('list');
+    loadSessions();
+  };
+
+  // --- Chat Actions ---
 
   const send = async () => {
     const text = input.trim();
@@ -117,12 +172,10 @@ export function Chat() {
     setSending(true);
     setStreaming('');
 
-    // Connect SSE for streaming BEFORE sending, so we catch the first chunk.
     let streamText = '';
     let gotChunks = false;
     let completed = false;
 
-    // Close previous SSE if any.
     if (sseRef.current) sseRef.current.close();
 
     const es = new EventSource('/events', { withCredentials: true });
@@ -138,15 +191,11 @@ export function Chat() {
           setStreaming(streamText);
         }
 
-        // Tool activity means the agent is working — keep SSE alive.
         if (event.type === 'tool.call' || event.type === 'tool.result') {
-          gotChunks = true; // Prevents SSE timeout from firing.
-          if (event.type === 'tool.call') {
-            setStreaming('Using tools...');
-          }
+          gotChunks = true;
+          if (event.type === 'tool.call') setStreaming('Using tools...');
         }
 
-        // Consent prompt — agent needs permission to use a tool.
         if (event.type === 'consent.needed' && event.consent) {
           gotChunks = true;
           setConsentPrompt(event.consent);
@@ -159,12 +208,10 @@ export function Chat() {
           sseRef.current = null;
 
           if (gotChunks && streamText) {
-            // Finalize: replace streaming with completed message.
             setStreaming('');
             setMessages(prev => [...prev, { role: 'assistant', text: streamText }]);
             setSending(false);
           } else {
-            // No chunks received — fallback to DB poll.
             startPoll();
           }
         }
@@ -172,15 +219,11 @@ export function Chat() {
     };
 
     es.onerror = () => {
-      // SSE failed — rely on DB polling.
       es.close();
       sseRef.current = null;
-      if (!completed && !gotChunks) {
-        startPoll();
-      }
+      if (!completed && !gotChunks) startPoll();
     };
 
-    // Send the message with selected agent.
     const { error } = await callRPC('chat.send', { text, agent_id: selectedAgent || undefined });
     if (error) {
       es.close();
@@ -191,16 +234,14 @@ export function Chat() {
       return;
     }
 
-    // Also start a delayed DB poll as backup in case SSE doesn't deliver.
     const sseTimeout = setTimeout(() => {
       if (!gotChunks && !completed) {
         es.close();
         sseRef.current = null;
         startPoll();
       }
-    }, 120000); // 120s SSE grace period (tool calls need multiple LLM round-trips)
+    }, 120000);
 
-    // Cleanup timeout if SSE works.
     const origClose = es.close.bind(es);
     es.close = () => { clearTimeout(sseTimeout); origClose(); };
 
@@ -211,18 +252,20 @@ export function Chat() {
         if (attempts > 40) {
           setMessages(prev => [...prev, {
             role: 'assistant',
-            text: 'Timed out. The agent may still be processing — check Sessions.'
+            text: 'Timed out. The agent may still be processing \u2014 check Sessions.'
           }]);
           setSending(false);
           setStreaming('');
           return;
         }
 
-        const sid = await findWebSession();
+        const sid = await findWebSession(selectedAgent);
         if (!sid) {
           timerRef.current = setTimeout(poll, 1500);
           return;
         }
+
+        if (!selectedSession) setSelectedSession(sid);
 
         const msgs = await loadMessages(sid);
         if (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
@@ -246,18 +289,6 @@ export function Chat() {
     }
   };
 
-  const refresh = async () => {
-    const sid = await findWebSession();
-    if (sid) {
-      const msgs = await loadMessages(sid);
-      if (msgs.length > 0) {
-        setMessages(msgs);
-        setSending(false);
-        setStreaming('');
-      }
-    }
-  };
-
   const respondConsent = async (granted) => {
     if (!consentPrompt) return;
     await fetch('/api/consent', {
@@ -270,44 +301,122 @@ export function Chat() {
     setStreaming(granted ? 'Permission granted, continuing...' : 'Permission denied.');
   };
 
-  const switchSession = async (sid) => {
-    setSelectedSession(sid);
-    if (sid) {
-      const msgs = await loadMessages(sid);
-      setMessages(msgs.length > 0 ? msgs : []);
-    } else {
-      setMessages([]);
-    }
-    setSending(false);
-    setStreaming('');
-  };
+  // ==================== RENDER ====================
 
+  // --- Session List View ---
+  if (view === 'list') {
+    return (
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <div>
+            <h1 style="margin-bottom:2px">Chat</h1>
+            <p style="color:var(--text-muted);font-size:13px">Your web chat conversations.</p>
+          </div>
+          <button class="btn-primary" onClick={showAgentPicker}>+ New Chat</button>
+        </div>
+
+        {noProvider && (
+          <div class="card" style="padding:12px;margin-bottom:12px;border-color:var(--warning)">
+            <strong style="color:var(--warning)">No providers connected.</strong>
+            <span style="color:var(--text-muted);margin-left:8px">
+              Add a provider in <a href="/providers">Providers</a> and restart.
+            </span>
+          </div>
+        )}
+
+        {listLoading ? (
+          <div class="empty">Loading sessions...</div>
+        ) : webSessions.length === 0 ? (
+          <div class="card" style="padding:32px;text-align:center">
+            <p style="color:var(--text-muted);font-size:15px;margin-bottom:12px">No chat sessions yet.</p>
+            <button class="btn-primary" onClick={showAgentPicker}>Start Your First Chat</button>
+          </div>
+        ) : (
+          <div style="display:flex;flex-direction:column;gap:8px">
+            {webSessions.map(s => (
+              <div key={s.id} class="card clickable" style="padding:14px;cursor:pointer" onClick={() => openSession(s)}>
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+                    <div style="flex:1;min-width:0">
+                      <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
+                        <span style="font-weight:600;font-size:14px">{s.agent_name || s.agent_id}</span>
+                        <span class="badge badge-blue" style="font-size:10px">{s.kind || 'dm'}</span>
+                      </div>
+                      <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                        {s.label || s.id?.slice(0, 8)}
+                      </div>
+                    </div>
+                  </div>
+                  <div style="text-align:right;flex-shrink:0;margin-left:16px">
+                    <div style="font-size:12px;color:var(--text-muted)">
+                      {s.updated_at?.slice(0, 10)}
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted)">
+                      {s.message_count || 0} msgs
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // --- Agent Picker View ---
+  if (view === 'pick-agent') {
+    return (
+      <div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+          <button class="btn-secondary" onClick={() => setView('list')} style="padding:6px 12px">
+            {'\u2190'} Back
+          </button>
+          <div>
+            <h1 style="margin-bottom:2px">New Chat</h1>
+            <p style="color:var(--text-muted);font-size:13px">Choose an agent to chat with.</p>
+          </div>
+        </div>
+
+        {agentsLoading ? (
+          <div class="empty">Loading agents...</div>
+        ) : agents.length === 0 ? (
+          <div class="card" style="padding:24px;text-align:center">
+            <p style="color:var(--text-muted);margin-bottom:12px">No agents configured.</p>
+            <a href="/agents/create" class="btn-primary" style="text-decoration:none">Create an Agent</a>
+          </div>
+        ) : (
+          <div style="display:flex;flex-direction:column;gap:8px">
+            {agents.map(a => (
+              <div key={a.id} class="card clickable" style="padding:14px;cursor:pointer;display:flex;align-items:center;gap:12px"
+                onClick={() => startNewChat(a)}>
+                {a.avatar && <span style="font-size:24px">{a.avatar}</span>}
+                <div style="flex:1">
+                  <div style="font-weight:600;font-size:14px">{a.name || a.id}</div>
+                  <div style="font-size:12px;color:var(--text-muted)">{a.role || 'No role defined'}</div>
+                </div>
+                <span class="badge badge-blue">{a.model || 'strong'}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // --- Chat View ---
   return (
     <div class="chat-container" style="height:calc(100vh - 48px)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px">
-        <h1 style="margin-bottom:0;flex-shrink:0">Chat</h1>
-        <div style="display:flex;gap:8px;align-items:center;flex:1;justify-content:flex-end">
-          <select value={selectedAgent} onChange={e => setSelectedAgent(e.target.value)}
-            style="width:160px;flex-shrink:0">
-            {agents.map(a => (
-              <option key={a.id} value={a.id}>{a.name || a.id}</option>
-            ))}
-            {agents.length === 0 && <option value="">No agents</option>}
-          </select>
-          <select value={selectedSession || ''} onChange={e => switchSession(e.target.value || null)}
-            style="width:280px;flex-shrink:0">
-            <option value="">New conversation</option>
-            {sessions.map(s => (
-              <option key={s.id} value={s.id}>
-                {s.agent_id} — {s.id?.slice(0, 8)} ({s.updated_at?.slice(0, 10)})
-              </option>
-            ))}
-          </select>
-          <button class="btn-small" onClick={refresh} style="flex-shrink:0">Refresh</button>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <button class="btn-secondary" onClick={backToList} style="padding:6px 12px;flex-shrink:0">
+          {'\u2190'}
+        </button>
+        <div style="flex:1;min-width:0">
+          <h1 style="margin-bottom:0;font-size:18px">{selectedAgentName}</h1>
         </div>
       </div>
 
-      {status === 'no-provider' && (
+      {noProvider && (
         <div class="card" style="padding:12px;margin-bottom:12px;border-color:var(--warning)">
           <strong style="color:var(--warning)">No providers connected.</strong>
           <span style="color:var(--text-muted);margin-left:8px">
@@ -317,9 +426,8 @@ export function Chat() {
       )}
 
       <div class="chat-messages">
-        {status === 'loading' && <div class="empty">Loading...</div>}
-        {status !== 'loading' && messages.length === 0 && !sending && (
-          <div class="empty">Send a message to start chatting with SageClaw.</div>
+        {messages.length === 0 && !sending && (
+          <div class="empty">Send a message to start chatting with {selectedAgentName}.</div>
         )}
         {messages.map((msg, i) => (
           <div key={i} class={`message ${msg.role}`}>
@@ -328,7 +436,6 @@ export function Chat() {
           </div>
         ))}
 
-        {/* Streaming response — shows tokens as they arrive */}
         {streaming && (
           <div class="message assistant">
             <div class="message-role">assistant</div>
@@ -336,7 +443,6 @@ export function Chat() {
           </div>
         )}
 
-        {/* Waiting indicator — only if no streaming has started */}
         {sending && !streaming && (
           <div class="message assistant">
             <div class="message-role">assistant</div>

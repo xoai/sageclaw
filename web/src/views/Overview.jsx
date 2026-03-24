@@ -67,17 +67,10 @@ export function Overview() {
   const totalProviders = health?.providers ? Object.keys(health.providers).length : 0;
   const cache = health?.cache;
 
-  const steps = [
-    { done: hasProvider, label: 'Add a provider', desc: 'Connect an AI provider (Anthropic, OpenAI, Gemini, etc.)', href: '/providers' },
-    { done: hasAgent, label: 'Create an agent', desc: 'Define your agent\'s identity, personality, and tools', href: '/agents/new' },
-    { done: hasSession, label: 'Start chatting', desc: 'Send your first message', href: '/chat' },
-  ];
-
   // Active channels.
   const activeChannels = [];
   if (health?.providers) {
     activeChannels.push('web', 'cli');
-    // We'd need channel data here — approximate from health.
   }
 
   return (
@@ -92,28 +85,16 @@ export function Overview() {
         )}
       </div>
 
-      {/* Setup wizard — computed once before first render to prevent flash */}
+      {/* Setup wizard — redirect to guided onboarding */}
       {dataReady && showSetup && (
-        <div class="card" style="padding:20px;margin-bottom:24px;border-color:var(--primary);border-width:2px">
-          <h2 style="font-size:16px;margin-bottom:4px">Getting Started</h2>
+        <div class="card" style="padding:24px;margin-bottom:24px;border-color:var(--primary);border-width:2px;text-align:center">
+          <h2 style="font-size:16px;margin-bottom:4px">Welcome to SageClaw</h2>
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
-            Complete these steps to get your first agent running.
+            Set up your first agent in a few guided steps.
           </p>
-          {steps.map((step, i) => (
-            <a key={i} href={step.href} style="text-decoration:none;display:block">
-              <div style={`display:flex;align-items:center;gap:12px;padding:12px;border-radius:6px;margin-bottom:8px;background:${step.done ? 'rgba(63,185,80,0.05)' : 'var(--surface-hover)'};border:1px solid ${step.done ? 'rgba(63,185,80,0.2)' : 'var(--border)'}`}>
-                <span style={`font-size:18px;width:28px;text-align:center;${step.done ? 'color:var(--success)' : 'color:var(--text-muted)'}`}>
-                  {step.done ? '\u2713' : (i + 1)}
-                </span>
-                <div>
-                  <div style={`font-weight:600;font-size:14px;${step.done ? 'color:var(--success);text-decoration:line-through' : 'color:var(--text)'}`}>
-                    {step.label}
-                  </div>
-                  <div style="font-size:12px;color:var(--text-muted)">{step.desc}</div>
-                </div>
-              </div>
-            </a>
-          ))}
+          <a href="/onboarding" class="btn-primary" style="text-decoration:none;display:inline-block;padding:10px 24px;font-size:14px">
+            Get Started
+          </a>
         </div>
       )}
 
@@ -227,6 +208,7 @@ export function Overview() {
         <h2 style="font-size:15px;margin-bottom:12px">Quick Actions</h2>
         <div style="display:flex;gap:12px;flex-wrap:wrap">
           <a href="/chat" class="btn-primary" style="text-decoration:none">Open Chat</a>
+          <a href="/onboarding" class="btn-secondary" style="text-decoration:none">Quick Setup</a>
           <a href="/agents" class="btn-secondary" style="text-decoration:none">Manage Agents</a>
           <a href="/providers" class="btn-secondary" style="text-decoration:none">Providers</a>
           <a href="/memory" class="btn-secondary" style="text-decoration:none">Memory</a>

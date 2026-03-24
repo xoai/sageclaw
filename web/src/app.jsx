@@ -27,6 +27,7 @@ import AgentEditor from './views/AgentEditor';
 import AgentCreator from './views/AgentCreator';
 import Budget from './views/Budget';
 import MCPServers from './views/MCPServers';
+import Onboarding from './views/Onboarding';
 
 export function App() {
   const [authState, setAuthState] = useState('loading');
@@ -63,6 +64,7 @@ export function App() {
     <Layout>
       <Router>
         <Overview path="/" />
+        <Onboarding path="/onboarding" />
         <Activity path="/activity" />
         <Sessions path="/sessions" />
         <SessionDetail path="/sessions/:id" />

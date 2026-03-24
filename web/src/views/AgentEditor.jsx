@@ -62,7 +62,7 @@ export default function AgentEditor({ id }) {
     try {
       const method = isNew ? 'POST' : 'PUT';
       const url = isNew ? '/api/v2/agents' : `/api/v2/agents/${id}`;
-      const body = isNew ? { ...agent } : agent;
+      const body = isNew ? { ...agent } : { config: agent };
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
