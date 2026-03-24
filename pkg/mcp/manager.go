@@ -92,7 +92,7 @@ func (m *Manager) ListServers() []ServerStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var servers []ServerStatus
+	servers := make([]ServerStatus, 0)
 	for name, client := range m.clients {
 		cfg := m.configs[name]
 		servers = append(servers, ServerStatus{

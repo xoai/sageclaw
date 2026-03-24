@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -193,6 +194,11 @@ func TestManagerListServers_Empty(t *testing.T) {
 	servers := mgr.ListServers()
 	if len(servers) != 0 {
 		t.Errorf("expected 0 servers, got %d", len(servers))
+	}
+	// Must marshal to [] not null.
+	b, _ := json.Marshal(servers)
+	if string(b) != "[]" {
+		t.Errorf("expected JSON [], got %s", string(b))
 	}
 }
 
