@@ -26,6 +26,7 @@ import (
 	"github.com/xoai/sageclaw/pkg/channel/telegram"
 	"github.com/xoai/sageclaw/pkg/channel/whatsapp"
 	"github.com/xoai/sageclaw/pkg/channel/zalo"
+	"github.com/xoai/sageclaw/pkg/channel/zalobot"
 	"github.com/xoai/sageclaw/pkg/config"
 	"github.com/xoai/sageclaw/pkg/mcp"
 	"github.com/xoai/sageclaw/pkg/memory"
@@ -199,6 +200,7 @@ func run() error {
 	zaloOAID := os.Getenv("ZALO_OA_ID")
 	zaloSecret := os.Getenv("ZALO_SECRET_KEY")
 	zaloToken := os.Getenv("ZALO_ACCESS_TOKEN")
+	zaloBotToken := os.Getenv("ZALO_BOT_TOKEN")
 	waPhoneID := os.Getenv("WHATSAPP_PHONE_NUMBER_ID")
 	waAccessToken := os.Getenv("WHATSAPP_ACCESS_TOKEN")
 	waVerifyToken := os.Getenv("WHATSAPP_VERIFY_TOKEN")
@@ -439,6 +441,12 @@ func run() error {
 		log.Printf("agentcfg: %v (falling back to YAML/DB)", err)
 	}
 
+	// Agent config provider for runtime consumers (pipeline, handlers).
+	agentProvider := agentcfg.NewMapProvider(fileAgents)
+
+	// Forward-declare loopPool so the file watcher closure can reference it.
+	var loopPool *agent.LoopPool
+
 	if len(fileAgents) > 0 {
 		for id, ac := range fileAgents {
 			agentConfigs[id] = agentcfg.ToRuntimeConfig(ac)
@@ -454,6 +462,10 @@ func run() error {
 				return
 			}
 			agentConfigs[agentID] = agentcfg.ToRuntimeConfig(reloaded)
+			agentProvider.Update(agentID, reloaded)
+			if loopPool != nil {
+				loopPool.UpdateConfig(agentID, agentConfigs[agentID])
+			}
 			log.Printf("agentcfg: reloaded %s", agentID)
 		})
 		if watchErr == nil {
@@ -617,9 +629,8 @@ Key behaviors:
 	// Forward-reference for SSE broadcast (set after RPC server is created).
 	var sseBroadcast func(agent.Event)
 
-	var agentLoop *agent.Loop
 	if !noProviders {
-		agentLoop = agent.NewLoop(agentConfigs["default"], defaultProvider, toolReg, preCtx, postTool,
+		loopPool = agent.NewLoopPool(agentConfigs, defaultProvider, toolReg, preCtx, postTool,
 			func(e agent.Event) {
 				switch e.Type {
 				case agent.EventRunStarted:
@@ -696,6 +707,17 @@ Key behaviors:
 		}
 		return zalo.NewFromCredentials(connID, creds), nil
 	})
+	chanMgr.RegisterFactory("zalo_bot", func(cfg map[string]string) (channel.Channel, error) {
+		token := firstNonEmpty(cfg["token"], cfg["ZALO_BOT_TOKEN"])
+		if token == "" {
+			return nil, fmt.Errorf("ZALO_BOT_TOKEN required")
+		}
+		connID := cfg["__conn_id"]
+		if connID == "" {
+			connID = "zalo_bot"
+		}
+		return zalobot.New(connID, token), nil
+	})
 	chanMgr.RegisterFactory("whatsapp", func(cfg map[string]string) (channel.Channel, error) {
 		connID := cfg["__conn_id"]
 		if connID == "" {
@@ -717,10 +739,12 @@ Key behaviors:
 			p.RunAgent(ctx, req)
 		}
 	})
-	p = pipeline.New(msgBus, scheduler, appStore, agentLoop, pipeline.PipelineConfig{
-		AgentID:     "default",
-		PreResponse: middleware.PreResponseLog(),
-		Pairing:     pairingMgr,
+	p = pipeline.New(msgBus, scheduler, appStore, pipeline.PipelineConfig{
+		AgentID:       "default",
+		LoopPool:      loopPool,
+		PreResponse:   middleware.PreResponseLog(),
+		Pairing:       pairingMgr,
+		AgentProvider: agentProvider,
 		CostRecorder: func(ctx context.Context, sessionID, agentID, provName, model string, usage canonical.Usage) {
 			budgetEngine.RecordCost(ctx, provider.CostEntry{
 				SessionID:     sessionID,
@@ -756,7 +780,7 @@ Key behaviors:
 	startCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if agentLoop != nil {
+	if loopPool != nil {
 		if err := p.Start(startCtx); err != nil {
 			return fmt.Errorf("starting pipeline: %w", err)
 		}
@@ -885,6 +909,16 @@ Key behaviors:
 		chanMgr.Register(zc)
 		log.Println("channel: zalo OA (legacy)")
 		defer zc.Stop(startCtx)
+	}
+
+	if zaloBotToken != "" {
+		zb := zalobot.New("zalo_bot", zaloBotToken)
+		if err := zb.Start(startCtx, msgBus); err != nil {
+			return fmt.Errorf("starting zalo_bot: %w", err)
+		}
+		chanMgr.Register(zb)
+		log.Println("channel: zalo bot (legacy)")
+		defer zb.Stop(startCtx)
 	}
 
 	if waPhoneID != "" {

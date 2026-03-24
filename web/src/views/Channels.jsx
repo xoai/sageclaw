@@ -4,7 +4,8 @@ import { useState, useEffect } from 'preact/hooks';
 const PLATFORMS = [
   { id: 'telegram', label: 'Telegram', icon: '✈', fields: [{ key: 'token', label: 'Bot Token', hint: 'Get from @BotFather on Telegram' }] },
   { id: 'discord', label: 'Discord', icon: '🎮', fields: [{ key: 'token', label: 'Bot Token', hint: 'Get from Discord Developer Portal' }] },
-  { id: 'zalo', label: 'Zalo', icon: '💬', fields: [
+  { id: 'zalo_bot', label: 'Zalo Bot', icon: '🤖', fields: [{ key: 'token', label: 'Bot Token', hint: 'Get from Zalo Bot Manager on Zalo' }] },
+  { id: 'zalo', label: 'Zalo OA', icon: '💬', fields: [
     { key: 'oa_id', label: 'OA ID' },
     { key: 'secret_key', label: 'Secret Key' },
     { key: 'access_token', label: 'Access Token' },
@@ -178,8 +179,8 @@ export function Channels() {
     }
   };
 
-  const deletePaired = async (id) => {
-    await fetch(`/api/pairing/${id}`, { method: 'DELETE' });
+  const deletePaired = async (channel, chatId) => {
+    await fetch(`/api/pairing/${channel}/${chatId}`, { method: 'DELETE' });
     loadPaired();
   };
 
@@ -307,11 +308,11 @@ export function Channels() {
             </thead>
             <tbody>
               {pairedDevices.map(d => (
-                <tr key={d.id}>
+                <tr key={`${d.channel}_${d.chat_id}`}>
                   <td>{d.channel}</td>
                   <td style="font-family:var(--mono);font-size:12px">{d.chat_id}</td>
                   <td style="color:var(--text-muted)">{d.paired_at?.slice(0, 19)}</td>
-                  <td><button class="btn-small btn-danger" onClick={() => deletePaired(d.id)}>Unpair</button></td>
+                  <td><button class="btn-small btn-danger" onClick={() => deletePaired(d.channel, d.chat_id)}>Unpair</button></td>
                 </tr>
               ))}
             </tbody>

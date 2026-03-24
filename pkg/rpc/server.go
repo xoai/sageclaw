@@ -7,11 +7,13 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"path/filepath"
 	"sync"
 
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/agent"
+	"github.com/xoai/sageclaw/pkg/agentcfg"
 	"github.com/xoai/sageclaw/pkg/auth"
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/channel"
@@ -635,14 +637,18 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 		rows.Scan(&id, &key, &channel, &chatID, &agentID, &kind, &label,
 			&status, &model, &provider, &inputTokens, &outputTokens,
 			&compactionCount, &messageCount, &createdAt, &updatedAt)
-		sessions = append(sessions, map[string]any{
+		sess := map[string]any{
 			"id": id, "key": key, "channel": channel, "chat_id": chatID,
 			"agent_id": agentID, "kind": kind, "label": label, "status": status,
 			"model": model, "provider": provider,
 			"input_tokens": inputTokens, "output_tokens": outputTokens,
 			"compaction_count": compactionCount, "message_count": messageCount,
 			"created_at": createdAt, "updated_at": updatedAt,
-		})
+		}
+		if agentID != "" {
+			sess["agent_name"] = s.resolveAgentName(agentID)
+		}
+		sessions = append(sessions, sess)
 	}
 	if sessions == nil {
 		sessions = []map[string]any{}
@@ -653,7 +659,24 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 func (s *Server) sessionsGet(ctx context.Context, params json.RawMessage) (any, error) {
 	var p struct{ ID string `json:"id"` }
 	json.Unmarshal(params, &p)
-	return s.store.GetSession(ctx, p.ID)
+	sess, err := s.store.GetSession(ctx, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	// Wrap session with agent_name for display.
+	result := map[string]any{
+		"id": sess.ID, "key": sess.Key, "channel": sess.Channel, "chat_id": sess.ChatID,
+		"agent_id": sess.AgentID, "kind": sess.Kind, "label": sess.Label, "status": sess.Status,
+		"model": sess.Model, "provider": sess.Provider,
+		"input_tokens": sess.InputTokens, "output_tokens": sess.OutputTokens,
+		"compaction_count": sess.CompactionCount, "message_count": sess.MessageCount,
+		"created_at": sess.CreatedAt, "updated_at": sess.UpdatedAt,
+		"spawned_by": sess.SpawnedBy,
+	}
+	if sess.AgentID != "" {
+		result["agent_name"] = s.resolveAgentName(sess.AgentID)
+	}
+	return result, nil
 }
 
 func (s *Server) sessionsMessages(ctx context.Context, params json.RawMessage) (any, error) {
@@ -718,6 +741,21 @@ func (s *Server) chatSend(ctx context.Context, params json.RawMessage) (any, err
 
 	s.msgBus.PublishInbound(ctx, envelope)
 	return map[string]string{"status": "sent"}, nil
+}
+
+// resolveAgentName looks up the display name for an agent ID.
+// Checks file-based configs first, then DB agents table, falls back to raw ID.
+func (s *Server) resolveAgentName(agentID string) string {
+	if s.agentsDir != "" {
+		if cfg, err := agentcfg.LoadAgent(filepath.Join(s.agentsDir, agentID)); err == nil && cfg.Identity.Name != "" {
+			return cfg.Identity.Name
+		}
+	}
+	var name string
+	if err := s.store.DB().QueryRow(`SELECT name FROM agents WHERE id = ?`, agentID).Scan(&name); err == nil && name != "" {
+		return name
+	}
+	return agentID
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

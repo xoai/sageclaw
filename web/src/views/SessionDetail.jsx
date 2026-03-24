@@ -67,7 +67,7 @@ export function SessionDetail({ id }) {
         <h1 style="margin-bottom:0">
           {session?.label || `Session ${id?.slice(0, 8)}`}
           <span style="font-size:13px;color:var(--text-muted);margin-left:12px">
-            {session?.channel} · {session?.agent_id}
+            {session?.channel} · {session?.agent_name || session?.agent_id}
           </span>
         </h1>
         <div style="display:flex;gap:8px;align-items:center">

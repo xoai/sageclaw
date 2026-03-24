@@ -94,16 +94,15 @@ func TestIntegration_FullPipeline(t *testing.T) {
 		},
 	}
 
-	agentLoop := agent.NewLoop(agent.Config{
-		AgentID: "default", SystemPrompt: "Test agent.", Model: "mock",
-	}, prov, toolReg, preCtx, postTool, nil)
-
 	msgBus := localbus.New()
 	var p *pipeline.Pipeline
 	scheduler := pipeline.NewLaneScheduler(pipeline.DefaultLaneLimits(), func(ctx context.Context, req pipeline.RunRequest) {
 		p.RunAgent(ctx, req)
 	})
-	p = pipeline.New(msgBus, scheduler, store, agentLoop, pipeline.PipelineConfig{AgentID: "default"})
+	loopPool := agent.NewLoopPool(map[string]agent.Config{
+		"default": {AgentID: "default", SystemPrompt: "Test agent.", Model: "mock"},
+	}, prov, toolReg, preCtx, postTool, nil)
+	p = pipeline.New(msgBus, scheduler, store, pipeline.PipelineConfig{AgentID: "default", LoopPool: loopPool})
 
 	var outbound []bus.Envelope
 	var outMu sync.Mutex
@@ -188,14 +187,16 @@ func TestIntegration_CommandBypass(t *testing.T) {
 	store.DB().ExecContext(ctx, `INSERT INTO agents (id, name, model) VALUES ('default', 'test', 'mock')`)
 
 	prov := &mockProvider{}
-	agentLoop := agent.NewLoop(agent.Config{AgentID: "default", Model: "mock"}, prov, tool.NewRegistry(), nil, nil, nil)
 
 	msgBus := localbus.New()
 	var p *pipeline.Pipeline
 	scheduler := pipeline.NewLaneScheduler(pipeline.DefaultLaneLimits(), func(ctx context.Context, req pipeline.RunRequest) {
 		p.RunAgent(ctx, req)
 	})
-	p = pipeline.New(msgBus, scheduler, store, agentLoop, pipeline.PipelineConfig{AgentID: "default"})
+	loopPool := agent.NewLoopPool(map[string]agent.Config{
+		"default": {AgentID: "default", Model: "mock"},
+	}, prov, tool.NewRegistry(), nil, nil, nil)
+	p = pipeline.New(msgBus, scheduler, store, pipeline.PipelineConfig{AgentID: "default", LoopPool: loopPool})
 
 	var outbound []bus.Envelope
 	var outMu sync.Mutex

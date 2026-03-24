@@ -7,6 +7,7 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/activity"
 	"github.com/xoai/sageclaw/pkg/agent"
+	"github.com/xoai/sageclaw/pkg/agentcfg"
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/middleware"
@@ -23,20 +24,23 @@ type Pipeline struct {
 	debouncer        *Debouncer
 	scheduler        Scheduler
 	store            store.Store
-	agentLoop        *agent.Loop
+	loopPool         *agent.LoopPool
 	agentID          string
 	preResponse      middleware.Middleware
 	pairing          *security.PairingManager
 	costRecorder     CostRecorderFunc
 	activityTracker  *activity.Tracker
+	agentProvider    agentcfg.Provider
 }
 
 // Config for the pipeline.
 type PipelineConfig struct {
-	AgentID      string
-	PreResponse  middleware.Middleware                // Optional: runs before outbound delivery.
-	Pairing      *security.PairingManager            // Optional: channel pairing enforcement.
-	CostRecorder CostRecorderFunc                    // Optional: records cost after each agent run.
+	AgentID       string
+	LoopPool      *agent.LoopPool                     // Multi-agent loop pool.
+	PreResponse   middleware.Middleware                // Optional: runs before outbound delivery.
+	Pairing       *security.PairingManager            // Optional: channel pairing enforcement.
+	CostRecorder  CostRecorderFunc                    // Optional: records cost after each agent run.
+	AgentProvider agentcfg.Provider                   // Optional: agent config lookup for channel filtering.
 }
 
 // New creates a new pipeline.
@@ -44,19 +48,19 @@ func New(
 	messageBus bus.MessageBus,
 	scheduler Scheduler,
 	store store.Store,
-	agentLoop *agent.Loop,
 	config PipelineConfig,
 ) *Pipeline {
 	p := &Pipeline{
 		bus:             messageBus,
 		scheduler:       scheduler,
 		store:           store,
-		agentLoop:       agentLoop,
+		loopPool:        config.LoopPool,
 		agentID:         config.AgentID,
 		preResponse:     config.PreResponse,
 		pairing:         config.Pairing,
 		costRecorder:    config.CostRecorder,
 		activityTracker: activity.NewTracker(store.DB()),
+		agentProvider:   config.AgentProvider,
 	}
 
 	// Create debouncer that feeds into intent classification.
@@ -65,19 +69,30 @@ func New(
 	return p
 }
 
-// InjectConsent sends a consent response into the agent loop's inject channel.
+// InjectConsent sends a consent response into all active agent loops.
 func (p *Pipeline) InjectConsent(group string, granted bool) {
-	if p.agentLoop == nil {
+	if p.loopPool == nil {
 		return
 	}
 	action := "__consent_deny__"
 	if granted {
 		action = "__consent_grant__"
 	}
-	p.agentLoop.Inject(canonical.Message{
+	p.loopPool.InjectAll(canonical.Message{
 		Role: "user",
 		Content: []canonical.Content{{Type: "text", Text: action + group}},
 	})
+}
+
+// resolveAgentName returns the display name for an agent ID.
+// Falls back to the raw ID if no provider is configured or agent not found.
+func (p *Pipeline) resolveAgentName(agentID string) string {
+	if p.agentProvider != nil {
+		if cfg := p.agentProvider.Get(agentID); cfg != nil && cfg.Identity.Name != "" {
+			return cfg.Identity.Name
+		}
+	}
+	return agentID
 }
 
 // channelKey encodes channel, kind, chatID, threadID, and optional agentID into a single key for the debouncer.
@@ -254,32 +269,56 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 		kind = "dm"
 	}
 
+	log.Printf("pipeline: routeToAgent channel=%q chatID=%q kind=%q threadID=%q requestAgentID=%q", channel, chatID, kind, threadID, requestAgentID)
+
 	// Determine which agent to use: envelope override > connection binding > pipeline default.
 	agentID := p.agentID
+	platform := ""
 	if requestAgentID != "" {
 		agentID = requestAgentID
+		log.Printf("pipeline: using envelope agent override %q", agentID)
 	}
 
 	// Look up connection binding if no explicit agent requested.
 	if requestAgentID == "" {
 		conn, err := p.store.GetConnection(ctx, channel)
 		if err == nil && conn != nil {
+			platform = conn.Platform
 			if conn.AgentID != "" {
 				agentID = conn.AgentID
+				log.Printf("pipeline: connection %s bound to agent %q", channel, agentID)
 			} else {
 				// Unbound connection — refuse to respond.
 				log.Printf("pipeline: connection %s has no agent bound, ignoring message", channel)
 				return
 			}
+		} else {
+			log.Printf("pipeline: GetConnection(%s) failed: %v", channel, err)
 		}
 	}
 
-	// If agentID is still "default" but no such agent exists, try to find the first available agent.
+	// If agentID is still "default" or empty, try LoopPool configs first, then DB fallback.
 	if agentID == "default" || agentID == "" {
-		var firstAgent string
-		p.store.DB().QueryRow(`SELECT id FROM agents ORDER BY id LIMIT 1`).Scan(&firstAgent)
-		if firstAgent != "" {
-			agentID = firstAgent
+		// Check if the LoopPool actually has a "default" config — if so, keep it.
+		if agentID == "default" && p.loopPool != nil && p.loopPool.Get("default") != nil {
+			log.Printf("pipeline: using pipeline default agent %q (exists in pool)", agentID)
+		} else {
+			var firstAgent string
+			p.store.DB().QueryRow(`SELECT id FROM agents ORDER BY id LIMIT 1`).Scan(&firstAgent)
+			log.Printf("pipeline: fallback agent from DB: %q (agentID was %q)", firstAgent, agentID)
+			if firstAgent != "" {
+				agentID = firstAgent
+			}
+		}
+	}
+
+	log.Printf("pipeline: resolved agentID=%q for %s/%s", agentID, channel, chatID)
+
+	// Channel-type filtering: check if the agent is allowed to serve this channel.
+	if p.agentProvider != nil && platform != "" {
+		if !p.agentProvider.ServesChannel(agentID, platform) {
+			log.Printf("pipeline: agent %s does not serve channel type %s (connection %s), ignoring", agentID, platform, channel)
+			return
 		}
 	}
 
@@ -310,7 +349,23 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 				log.Printf("failed to create session: %v", err)
 				return
 			}
+		} else if sess.AgentID != agentID {
+			// Agent binding changed — close old session and start fresh.
+			log.Printf("pipeline: agent rebind %s→%s for %s/%s, closing old session %s", sess.AgentID, agentID, channel, chatID, sess.ID)
+			p.store.DB().ExecContext(ctx, `UPDATE sessions SET status = 'closed', updated_at = datetime('now') WHERE id = ?`, sess.ID)
+			sess, err = p.store.CreateSessionWithKind(ctx, channel, chatID, agentID, kind)
+			if err != nil {
+				log.Printf("failed to create session after rebind: %v", err)
+				return
+			}
 		}
+	}
+
+	// Update session label with agent display name if different from ID.
+	agentName := p.resolveAgentName(agentID)
+	if agentName != agentID {
+		p.store.DB().ExecContext(ctx, `UPDATE sessions SET label = ? WHERE id = ? AND label LIKE ?`,
+			agentName+" on "+channel, sess.ID, agentID+" on %")
 	}
 
 	// S4: Schedule on the main lane.
@@ -349,8 +404,13 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 	// Append new messages.
 	allMsgs := append(history, req.Messages...)
 
-	// S5: Agent loop.
-	result := p.agentLoop.Run(ctx, req.SessionID, allMsgs)
+	// S5: Agent loop — select the right loop for this agent.
+	loop := p.loopPool.Get(req.AgentID)
+	if loop == nil {
+		log.Printf("pipeline: no agent loop for %s, skipping", req.AgentID)
+		return
+	}
+	result := loop.Run(ctx, req.SessionID, allMsgs)
 
 	// Update Activity with result.
 	if p.activityTracker != nil && activityID != "" {
@@ -369,8 +429,8 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 	// Record cost.
 	if p.costRecorder != nil && (result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0) {
 		provName, model := "", ""
-		if p.agentLoop != nil {
-			provName, model = p.agentLoop.ProviderAndModel()
+		if p.loopPool != nil {
+			provName, model = p.loopPool.ProviderAndModel(req.AgentID)
 		}
 		p.costRecorder(ctx, req.SessionID, req.AgentID, provName, model, result.Usage)
 	}

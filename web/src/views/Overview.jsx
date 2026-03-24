@@ -190,7 +190,7 @@ export function Overview() {
                     </div>
                   </div>
                   <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
-                    {s.agent_id} · {s.updated_at?.slice(11, 19)}
+                    {s.agent_name || s.agent_id} · {s.updated_at?.slice(11, 19)}
                   </div>
                 </div>
               </a>

@@ -11,6 +11,7 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/channel/discord"
 	"github.com/xoai/sageclaw/pkg/channel/telegram"
+	"github.com/xoai/sageclaw/pkg/channel/zalobot"
 	"github.com/xoai/sageclaw/pkg/store"
 	"github.com/xoai/sageclaw/pkg/store/sqlite"
 )
@@ -45,14 +46,9 @@ func (s *Server) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 			"updated_at":      c.UpdatedAt.Format("2006-01-02 15:04:05"),
 		}
 
-		// If agent_id is set, look up agent name for display.
+		// If agent_id is set, resolve display name.
 		if c.AgentID != "" {
-			agentName := c.AgentID // Default to ID.
-			var name string
-			if err := s.store.DB().QueryRow(`SELECT name FROM agents WHERE id = ?`, c.AgentID).Scan(&name); err == nil && name != "" {
-				agentName = name
-			}
-			item["agent_name"] = agentName
+			item["agent_name"] = s.resolveAgentName(c.AgentID)
 		}
 
 		// Check if running.
@@ -160,6 +156,8 @@ func (s *Server) handleConnectionCreate(w http.ResponseWriter, r *http.Request) 
 			cfg["TELEGRAM_BOT_TOKEN"] = creds["token"]
 		case "discord":
 			cfg["DISCORD_BOT_TOKEN"] = creds["token"]
+		case "zalo_bot":
+			cfg["ZALO_BOT_TOKEN"] = creds["token"]
 		}
 		if err := s.chanMgr.StartConnection(connID, p.Platform, cfg); err != nil {
 			log.Printf("connection %s: adapter start failed: %v", connID, err)
@@ -279,6 +277,9 @@ func (s *Server) handleConnectionDelete(w http.ResponseWriter, r *http.Request) 
 	// Delete credential.
 	s.store.DB().ExecContext(r.Context(), `DELETE FROM credentials WHERE key = ?`, conn.CredentialKey)
 
+	// Cascade-delete paired devices for this connection.
+	s.store.DB().ExecContext(r.Context(), `DELETE FROM paired_channels WHERE channel = ?`, id)
+
 	// Delete connection record.
 	if err := s.store.DeleteConnection(r.Context(), id); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -396,6 +397,23 @@ func fetchPlatformMetadata(ctx context.Context, platform, connID, token string) 
 		label := user.Username
 		if label == "" {
 			label = "Discord Bot"
+		}
+		return metadata, label, nil
+
+	case "zalo_bot":
+		adapter := zalobot.New(connID, token)
+		bot, err := adapter.GetMe(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("zalo_bot getMe: %w", err)
+		}
+		metadata := map[string]any{
+			"account_name": bot.AccountName,
+			"account_type": bot.AccountType,
+			"id":           bot.ID,
+		}
+		label := bot.AccountName
+		if label == "" {
+			label = "Zalo Bot"
 		}
 		return metadata, label, nil
 

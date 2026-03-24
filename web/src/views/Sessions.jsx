@@ -173,7 +173,7 @@ export function Sessions() {
                   <div style="font-weight:600;font-size:13px">{s.label || s.id?.slice(0, 8)}</div>
                   <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">{s.id?.slice(0, 8)}</div>
                 </td>
-                <td>{s.agent_id}</td>
+                <td>{s.agent_name || s.agent_id}</td>
                 <td>
                   <span style="margin-right:4px">{channelIcons[s.channel] || ''}</span>
                   {s.channel}
