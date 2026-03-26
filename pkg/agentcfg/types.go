@@ -26,6 +26,10 @@ type AgentConfig struct {
 	// Dir is the absolute path to the agent's config folder.
 	Dir string `json:"-" yaml:"-"`
 
+	// SkillsDir is the path to the marketplace skills install directory.
+	// Set by the caller (main.go) so AssembleSystemPrompt can read SKILL.md files.
+	SkillsDir string `json:"-" yaml:"-"`
+
 	Identity  Identity        `json:"identity" yaml:"identity"`
 	Soul      string          `json:"soul" yaml:"-"`      // Raw markdown content of soul.md
 	Behavior  string          `json:"behavior" yaml:"-"`  // Raw markdown content of behavior.md
@@ -34,6 +38,8 @@ type AgentConfig struct {
 	Memory    MemoryConfig    `json:"memory" yaml:"memory"`
 	Heartbeat HeartbeatConfig `json:"heartbeat" yaml:"heartbeat"`
 	Channels  ChannelsConfig  `json:"channels" yaml:"channels"`
+	Skills    SkillsConfig    `json:"skills" yaml:"skills"`
+	Voice     VoiceConfig     `json:"voice" yaml:"voice"`
 }
 
 // Identity defines who the agent is (identity.yaml).
@@ -122,6 +128,56 @@ type ChannelsConfig struct {
 // ChannelOverride is per-channel configuration.
 type ChannelOverride struct {
 	MaxTokens int `json:"max_tokens,omitempty" yaml:"max_tokens"`
+}
+
+// SkillsConfig defines which marketplace skills this agent uses (skills.yaml).
+type SkillsConfig struct {
+	// Skills lists skill names from the skills/ directory.
+	// Empty = no marketplace skills loaded (explicit assignment).
+	Skills []string `json:"skills" yaml:"skills"`
+}
+
+// Default voice constants.
+const (
+	// DefaultVoiceName is the default Gemini voice preset for SageClaw agents.
+	// Sadaltager = "Knowledgeable" — fits an AI assistant persona.
+	DefaultVoiceName = "Sadaltager"
+
+	// DefaultVoiceModel is the default Gemini Live native audio model.
+	// Note: "gemini-live-2.5-flash-native-audio" is Vertex AI only.
+	// The Google AI Studio (v1beta) API uses the preview model ID.
+	DefaultVoiceModel = "gemini-2.5-flash-native-audio-preview-12-2025"
+)
+
+// VoiceConfig defines voice messaging capabilities.
+// When enabled, the agent can receive and respond with voice messages
+// using a native audio model (e.g. Gemini Live).
+type VoiceConfig struct {
+	Enabled      bool   `json:"enabled" yaml:"enabled"`
+	Model        string `json:"model,omitempty" yaml:"model"`                 // Audio model ID
+	VoiceName    string `json:"voice_name,omitempty" yaml:"voice_name"`       // Voice preset (e.g. "Kore", "Sadaltager")
+	LanguageCode string `json:"language_code,omitempty" yaml:"language_code"` // BCP-47 code (e.g. "en-US", "vi-VN"). Empty = auto-detect.
+}
+
+// HasVoice returns true if this agent has voice messaging enabled.
+func (cfg *AgentConfig) HasVoice() bool {
+	return cfg.Voice.Enabled
+}
+
+// VoiceModel returns the voice model ID, with a default fallback.
+func (cfg *AgentConfig) VoiceModel() string {
+	if cfg.Voice.Model != "" {
+		return cfg.Voice.Model
+	}
+	return DefaultVoiceModel
+}
+
+// VoiceNameOrDefault returns the voice preset name, defaulting to Sadaltager.
+func (cfg *AgentConfig) VoiceNameOrDefault() string {
+	if cfg.Voice.VoiceName != "" {
+		return cfg.Voice.VoiceName
+	}
+	return DefaultVoiceName
 }
 
 // Defaults returns an AgentConfig with sensible defaults.

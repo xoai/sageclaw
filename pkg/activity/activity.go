@@ -40,6 +40,8 @@ type Activity struct {
 	StartedAt      time.Time
 	CompletedAt    *time.Time
 	TimeoutSeconds int
+	AudioInputMs   int // Voice: total input audio duration in milliseconds.
+	AudioOutputMs  int // Voice: total output audio duration in milliseconds.
 }
 
 // Tracker manages Activity lifecycle against the database.
@@ -102,6 +104,17 @@ func (t *Tracker) RecordToolCall(ctx context.Context, id string) error {
 	return err
 }
 
+// RecordAudio updates audio duration metrics for voice messaging.
+func (t *Tracker) RecordAudio(ctx context.Context, id string, inputMs, outputMs int) error {
+	_, err := t.db.ExecContext(ctx,
+		`UPDATE activities SET
+			audio_input_ms = audio_input_ms + ?,
+			audio_output_ms = audio_output_ms + ?
+		 WHERE id = ?`,
+		inputMs, outputMs, id)
+	return err
+}
+
 // Complete marks the Activity as completed with an optional summary.
 func (t *Tracker) Complete(ctx context.Context, id, summary string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -133,12 +146,14 @@ func (t *Tracker) Get(ctx context.Context, id string) (*Activity, error) {
 	err := t.db.QueryRowContext(ctx,
 		`SELECT id, session_id, agent_id, status, summary, input_tokens, output_tokens,
 			cache_creation, cache_read, cost_usd, iterations, tool_calls, parent_id,
-			error_message, started_at, completed_at, timeout_seconds
+			error_message, started_at, completed_at, timeout_seconds,
+			audio_input_ms, audio_output_ms
 		 FROM activities WHERE id = ?`, id).Scan(
 		&a.ID, &a.SessionID, &a.AgentID, &a.Status, &summary,
 		&a.InputTokens, &a.OutputTokens, &a.CacheCreation, &a.CacheRead,
 		&a.CostUSD, &a.Iterations, &a.ToolCalls, &parentID,
-		&errMsg, &startedAt, &completedAt, &a.TimeoutSeconds)
+		&errMsg, &startedAt, &completedAt, &a.TimeoutSeconds,
+		&a.AudioInputMs, &a.AudioOutputMs)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +177,8 @@ func (t *Tracker) ListBySession(ctx context.Context, sessionID string, limit int
 		`SELECT id, session_id, agent_id, status, COALESCE(summary,''), input_tokens, output_tokens,
 			cache_creation, cache_read, cost_usd, iterations, tool_calls,
 			COALESCE(parent_id,''), COALESCE(error_message,''),
-			started_at, completed_at, timeout_seconds
+			started_at, completed_at, timeout_seconds,
+			audio_input_ms, audio_output_ms
 		 FROM activities WHERE session_id = ? ORDER BY started_at DESC LIMIT ?`,
 		sessionID, limit)
 	if err != nil {
@@ -181,7 +197,8 @@ func (t *Tracker) ListRecent(ctx context.Context, limit int) ([]Activity, error)
 		`SELECT id, session_id, agent_id, status, COALESCE(summary,''), input_tokens, output_tokens,
 			cache_creation, cache_read, cost_usd, iterations, tool_calls,
 			COALESCE(parent_id,''), COALESCE(error_message,''),
-			started_at, completed_at, timeout_seconds
+			started_at, completed_at, timeout_seconds,
+			audio_input_ms, audio_output_ms
 		 FROM activities ORDER BY started_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -199,7 +216,8 @@ func scanActivities(rows *sql.Rows) ([]Activity, error) {
 		if err := rows.Scan(&a.ID, &a.SessionID, &a.AgentID, &a.Status, &a.Summary,
 			&a.InputTokens, &a.OutputTokens, &a.CacheCreation, &a.CacheRead,
 			&a.CostUSD, &a.Iterations, &a.ToolCalls, &a.ParentID, &a.ErrorMessage,
-			&startedAt, &completedAt, &a.TimeoutSeconds); err != nil {
+			&startedAt, &completedAt, &a.TimeoutSeconds,
+			&a.AudioInputMs, &a.AudioOutputMs); err != nil {
 			return nil, err
 		}
 		a.StartedAt, _ = time.Parse(time.RFC3339, startedAt)

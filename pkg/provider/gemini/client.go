@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -246,5 +247,76 @@ func fromGeminiResponse(body []byte) (*canonical.Response, error) {
 		StopReason: "end_turn",
 	}, nil
 }
+
+// TranscribeAudio sends audio to Gemini's REST API for transcription.
+// Uses gemini-2.0-flash (fast, supports audio) to convert audio to text.
+// This bypasses the Live API entirely — no WebSocket, no PCM conversion.
+func (c *Client) TranscribeAudio(ctx context.Context, audioData []byte, mimeType string) (string, error) {
+	model := "gemini-2.5-flash" // Fast model, supports audio input.
+
+	reqBody := map[string]any{
+		"contents": []map[string]any{
+			{
+				"parts": []map[string]any{
+					{
+						"inlineData": map[string]any{
+							"mimeType": mimeType,
+							"data":     base64.StdEncoding.EncodeToString(audioData),
+						},
+					},
+					{
+						"text": "Transcribe this audio message exactly as spoken. Return only the transcription, nothing else.",
+					},
+				},
+			},
+		},
+	}
+
+	jsonBody, _ := json.Marshal(reqBody)
+	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", c.baseURL, model, c.apiKey)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("gemini transcribe: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("gemini transcribe error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	// Parse response — extract text from candidates.
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("gemini transcribe parse: %w", err)
+	}
+
+	if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
+		return result.Candidates[0].Content.Parts[0].Text, nil
+	}
+
+	return "", fmt.Errorf("gemini transcribe: no text in response")
+}
+
+// APIKey returns the API key for use by other components (e.g. voice pipeline).
+func (c *Client) APIKey() string { return c.apiKey }
+
+// BaseURL returns the base URL for use by other components.
+func (c *Client) BaseURL() string { return c.baseURL }
 
 var _ provider.Provider = (*Client)(nil)

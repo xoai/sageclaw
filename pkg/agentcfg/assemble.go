@@ -2,6 +2,8 @@ package agentcfg
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/xoai/sageclaw/pkg/agent"
@@ -68,6 +70,37 @@ func AssembleSystemPrompt(cfg *AgentConfig) string {
 			TruncateContext(cfg.Bootstrap, 5000))
 	}
 
+	// Skills — inject SKILL.md content for each assigned marketplace skill.
+	if len(cfg.Skills.Skills) > 0 && cfg.SkillsDir != "" {
+		var skillParts []string
+		for _, skillName := range cfg.Skills.Skills {
+			skillMD := filepath.Join(cfg.SkillsDir, skillName, "SKILL.md")
+			if data, err := os.ReadFile(skillMD); err == nil && len(data) > 0 {
+				content := TruncateContext(string(data), MaxContextFileChars)
+				skillParts = append(skillParts, fmt.Sprintf("## Skill: %s\n\n%s", skillName, content))
+			}
+		}
+		if len(skillParts) > 0 {
+			parts = append(parts, "SKILLS: You have the following skills available. Use them when relevant to the user's request.\n\n"+
+				strings.Join(skillParts, "\n\n---\n\n"))
+		}
+	}
+
+	// Voice — inject audio-specific instructions when voice is enabled.
+	if cfg.Voice.Enabled {
+		voicePrompt := "VOICE MODE: You are in a voice conversation. " +
+			"Listen carefully to the user's audio and respond naturally as in spoken dialogue. " +
+			"Keep responses concise and conversational — avoid long monologues. " +
+			"Do not use markdown, code blocks, or formatting that doesn't work in speech."
+		if cfg.Voice.LanguageCode != "" {
+			// Per Gemini docs: explicit language instruction for non-English.
+			lang := cfg.Voice.LanguageCode
+			voicePrompt += fmt.Sprintf(
+				"\n\nRESPOND IN %s. YOU MUST RESPOND UNMISTAKABLY IN %s.", lang, lang)
+		}
+		parts = append(parts, voicePrompt)
+	}
+
 	// Memory context.
 	if cfg.Memory.Scope != "" || cfg.Memory.AutoStore {
 		var memParts []string
@@ -111,7 +144,7 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 		maxIter = 25
 	}
 
-	return agent.Config{
+	rc := agent.Config{
 		AgentID:       cfg.ID,
 		SystemPrompt:  AssembleSystemPrompt(cfg),
 		Model:         model,
@@ -119,4 +152,13 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 		MaxIterations: maxIter,
 		Tools:         cfg.Tools.Enabled,
 	}
+
+	// Map voice config to runtime.
+	if cfg.Voice.Enabled {
+		rc.VoiceEnabled = true
+		rc.VoiceModel = cfg.VoiceModel()
+		rc.VoiceName = cfg.VoiceNameOrDefault()
+	}
+
+	return rc
 }

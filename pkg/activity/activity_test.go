@@ -29,7 +29,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 		cost_usd REAL NOT NULL DEFAULT 0.0, iterations INTEGER NOT NULL DEFAULT 0,
 		tool_calls INTEGER NOT NULL DEFAULT 0, parent_id TEXT,
 		error_message TEXT, started_at TEXT NOT NULL DEFAULT (datetime('now')),
-		completed_at TEXT, timeout_seconds INTEGER NOT NULL DEFAULT 300
+		completed_at TEXT, timeout_seconds INTEGER NOT NULL DEFAULT 300,
+		audio_input_ms INTEGER NOT NULL DEFAULT 0,
+		audio_output_ms INTEGER NOT NULL DEFAULT 0
 	)`)
 
 	return db

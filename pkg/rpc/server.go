@@ -22,6 +22,7 @@ import (
 	"github.com/xoai/sageclaw/pkg/memory"
 	"github.com/xoai/sageclaw/pkg/provider"
 	"github.com/xoai/sageclaw/pkg/security"
+	"github.com/xoai/sageclaw/pkg/skillstore"
 	"github.com/xoai/sageclaw/pkg/store"
 	"github.com/xoai/sageclaw/pkg/tool"
 	"github.com/xoai/sageclaw/pkg/tunnel"
@@ -60,10 +61,13 @@ type Server struct {
 	chanMgr        *channel.Manager
 	mcpMgr         *mcp.Manager
 	consentHandler func(group string, granted bool) // Callback for consent responses.
+	pendingConsent []map[string]any                // Queued consent prompts awaiting response.
+	skillStore     *skillstore.Store
 	agentsDir      string
 	encKey         []byte // Credential encryption key.
 	startTime      time.Time
 	providerHealth map[string]string
+	audioBasePath  string // Base path for audio file serving (e.g. "data/audio").
 }
 
 // wsConn is a minimal WebSocket connection using the standard upgrade.
@@ -143,6 +147,16 @@ func WithMCPManager(m *mcp.Manager) ServerOption {
 // WithConsentHandler sets the callback for consent responses from the dashboard.
 func WithConsentHandler(fn func(group string, granted bool)) ServerOption {
 	return func(s *Server) { s.consentHandler = fn }
+}
+
+// WithSkillStore adds skill marketplace management to the server.
+func WithSkillStore(ss *skillstore.Store) ServerOption {
+	return func(s *Server) { s.skillStore = ss }
+}
+
+// WithAudioBasePath sets the base path for serving audio files.
+func WithAudioBasePath(path string) ServerOption {
+	return func(s *Server) { s.audioBasePath = path }
 }
 
 // NewServer creates a new RPC server.
@@ -255,6 +269,7 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 
 	// Consent (authenticated).
 	mux.HandleFunc("POST /api/consent", srv.authGuard(srv.handleConsentResponse))
+	mux.HandleFunc("GET /api/consent/pending", srv.authGuard(srv.handleConsentPending))
 
 	// Credentials (authenticated).
 	mux.HandleFunc("GET /api/credentials", srv.authGuard(srv.handleCredentialsList))
@@ -265,6 +280,16 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("POST /api/skills/install", srv.authGuard(srv.handleSkillInstall))
 	mux.HandleFunc("POST /api/skills/reload", srv.authGuard(srv.handleSkillReload))
 	mux.HandleFunc("DELETE /api/skills/", srv.authGuard(srv.handleSkillDelete))
+
+	// Skill marketplace (authenticated).
+	mux.HandleFunc("GET /api/skills/marketplace/search", srv.authGuard(srv.handleSkillMarketplaceSearch))
+	mux.HandleFunc("GET /api/skills/marketplace/preview", srv.authGuard(srv.handleSkillMarketplacePreview))
+	mux.HandleFunc("POST /api/skills/marketplace/install", srv.authGuard(srv.handleSkillMarketplaceInstall))
+	mux.HandleFunc("GET /api/skills/marketplace/installed", srv.authGuard(srv.handleSkillMarketplaceInstalled))
+	mux.HandleFunc("POST /api/skills/marketplace/update/", srv.authGuard(srv.handleSkillMarketplaceUpdate))
+	mux.HandleFunc("GET /api/skills/marketplace/updates", srv.authGuard(srv.handleSkillMarketplaceUpdates))
+	mux.HandleFunc("PUT /api/skills/marketplace/assign/", srv.authGuard(srv.handleSkillMarketplaceAssign))
+	mux.HandleFunc("DELETE /api/skills/marketplace/", srv.authGuard(srv.handleSkillMarketplaceUninstall))
 
 	// Templates (authenticated).
 	mux.HandleFunc("GET /api/templates", srv.authGuard(srv.handleTemplatesList))
@@ -325,6 +350,9 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("GET /api/budget/alerts/unread", srv.authGuard(srv.handleBudgetAlertsUnread))
 	mux.HandleFunc("POST /api/budget/alerts/", srv.authGuard(srv.handleBudgetAlertAck))
 	mux.HandleFunc("GET /api/budget/top-models", srv.authGuard(srv.handleBudgetTopModels))
+
+	// Audio file serving (authenticated).
+	mux.HandleFunc("GET /api/audio/", srv.authGuard(srv.handleAudioServe))
 
 	// Health (public).
 	mux.HandleFunc("GET /api/health", srv.handleHealth)
@@ -395,6 +423,17 @@ func (s *Server) EventHandler() agent.EventHandler {
 		}
 		if e.Consent != nil {
 			payload["consent"] = e.Consent
+			// Queue for polling — SSE may be missed.
+			s.mu.Lock()
+			s.pendingConsent = append(s.pendingConsent, map[string]any{
+				"tool_name":  e.Consent.ToolName,
+				"group":      e.Consent.Group,
+				"risk_level": e.Consent.RiskLevel,
+				"explanation": e.Consent.Explanation,
+				"agent_id":   e.AgentID,
+				"session_id": e.SessionID,
+			})
+			s.mu.Unlock()
 		}
 		data, _ := json.Marshal(payload)
 		s.broadcast(data)

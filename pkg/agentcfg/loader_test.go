@@ -366,6 +366,87 @@ func TestAssembleSystemPrompt_WithBootstrap(t *testing.T) {
 	}
 }
 
+func TestAssembleSystemPrompt_WithVoice(t *testing.T) {
+	cfg := &AgentConfig{
+		Identity: Identity{Name: "Bot", Role: "assistant"},
+		Voice:    VoiceConfig{Enabled: true},
+	}
+
+	prompt := AssembleSystemPrompt(cfg)
+	if !contains(prompt, "VOICE MODE") {
+		t.Error("voice-enabled prompt should contain VOICE MODE instruction")
+	}
+	if !contains(prompt, "concise and conversational") {
+		t.Error("voice prompt should include conversational guidance")
+	}
+	// No language instruction when language_code is empty.
+	if contains(prompt, "RESPOND IN") {
+		t.Error("should not have language instruction when language_code is empty")
+	}
+}
+
+func TestAssembleSystemPrompt_WithVoiceLanguage(t *testing.T) {
+	cfg := &AgentConfig{
+		Identity: Identity{Name: "Bot", Role: "assistant"},
+		Voice:    VoiceConfig{Enabled: true, LanguageCode: "vi-VN"},
+	}
+
+	prompt := AssembleSystemPrompt(cfg)
+	if !contains(prompt, "RESPOND IN vi-VN") {
+		t.Error("voice prompt should contain language instruction for vi-VN")
+	}
+	if !contains(prompt, "UNMISTAKABLY IN vi-VN") {
+		t.Error("voice prompt should contain emphatic language instruction")
+	}
+}
+
+func TestToRuntimeConfig_VoiceFields(t *testing.T) {
+	cfg := &AgentConfig{
+		ID:       "test",
+		Identity: Identity{Name: "Bot", Model: "strong", MaxTokens: 4096, MaxIterations: 10},
+		Voice:    VoiceConfig{Enabled: true, Model: "custom-model", VoiceName: "Kore"},
+	}
+
+	rc := ToRuntimeConfig(cfg)
+	if !rc.VoiceEnabled {
+		t.Error("VoiceEnabled should be true")
+	}
+	if rc.VoiceModel != "custom-model" {
+		t.Errorf("VoiceModel = %q, want custom-model", rc.VoiceModel)
+	}
+	if rc.VoiceName != "Kore" {
+		t.Errorf("VoiceName = %q, want Kore", rc.VoiceName)
+	}
+}
+
+func TestToRuntimeConfig_VoiceDefaults(t *testing.T) {
+	cfg := &AgentConfig{
+		ID:       "test",
+		Identity: Identity{Name: "Bot", Model: "strong"},
+		Voice:    VoiceConfig{Enabled: true},
+	}
+
+	rc := ToRuntimeConfig(cfg)
+	if rc.VoiceModel != DefaultVoiceModel {
+		t.Errorf("VoiceModel = %q, want %q", rc.VoiceModel, DefaultVoiceModel)
+	}
+	if rc.VoiceName != DefaultVoiceName {
+		t.Errorf("VoiceName = %q, want %q", rc.VoiceName, DefaultVoiceName)
+	}
+}
+
+func TestVoiceNameOrDefault(t *testing.T) {
+	cfg := &AgentConfig{Voice: VoiceConfig{VoiceName: "Puck"}}
+	if cfg.VoiceNameOrDefault() != "Puck" {
+		t.Error("should return configured voice name")
+	}
+
+	cfg2 := &AgentConfig{}
+	if cfg2.VoiceNameOrDefault() != DefaultVoiceName {
+		t.Errorf("should return default %q, got %q", DefaultVoiceName, cfg2.VoiceNameOrDefault())
+	}
+}
+
 func TestTruncateContext(t *testing.T) {
 	// Short content — no truncation.
 	short := "Hello world"

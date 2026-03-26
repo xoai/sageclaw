@@ -16,6 +16,16 @@ type Content struct {
 	ToolResult *ToolResult  `json:"tool_result,omitempty"`
 	Thinking   string       `json:"thinking,omitempty"`
 	Source     *ImageSource `json:"source,omitempty"`
+	Audio      *AudioSource `json:"audio,omitempty"` // type: "audio"
+}
+
+// AudioSource describes an audio file reference.
+type AudioSource struct {
+	FilePath   string `json:"file_path"`             // Path on disk (e.g. "data/audio/{session}/{msg}.ogg")
+	MimeType   string `json:"mime_type"`              // "audio/ogg", "audio/pcm", etc.
+	DurationMs int    `json:"duration_ms,omitempty"`  // Duration in milliseconds
+	Transcript string `json:"transcript,omitempty"`   // STT transcript if available
+	SampleRate int    `json:"sample_rate,omitempty"`  // Sample rate in Hz (e.g. 16000, 24000)
 }
 
 // ToolCall represents an LLM-initiated tool invocation.
@@ -63,6 +73,36 @@ type Response struct {
 	Messages   []Message `json:"messages"`
 	Usage      Usage     `json:"usage"`
 	StopReason string    `json:"stop_reason"` // "end_turn", "tool_use", "max_tokens"
+}
+
+// HasAudio returns true if the message contains at least one audio content block.
+func HasAudio(msg Message) bool {
+	for _, c := range msg.Content {
+		if c.Type == "audio" && c.Audio != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ExtractAudio returns the first audio source from a message, or nil.
+func ExtractAudio(msg Message) *AudioSource {
+	for _, c := range msg.Content {
+		if c.Type == "audio" && c.Audio != nil {
+			return c.Audio
+		}
+	}
+	return nil
+}
+
+// MessagesHaveAudio returns true if any message in the slice contains audio.
+func MessagesHaveAudio(msgs []Message) bool {
+	for _, m := range msgs {
+		if HasAudio(m) {
+			return true
+		}
+	}
+	return false
 }
 
 // Usage tracks token consumption.

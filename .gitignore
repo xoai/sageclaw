@@ -38,3 +38,5 @@ sage/
 .claude/
 CLAUDE.md
 docs/adr/
+.impeccable.md
+.skills-lock.json

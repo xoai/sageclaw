@@ -32,6 +32,17 @@ function extractText(content) {
   return content.text || String(content);
 }
 
+// Extract audio source from canonical content blocks.
+function extractAudio(content) {
+  if (!content || !Array.isArray(content)) return null;
+  for (const c of content) {
+    if (c && c.type === 'audio' && c.audio) {
+      return c.audio; // { file_path, mime_type, duration_ms, transcript }
+    }
+  }
+  return null;
+}
+
 export function Chat() {
   // View state: 'list' | 'pick-agent' | 'chat'
   const [view, setView] = useState('list');
@@ -74,7 +85,11 @@ export function Chat() {
   const loadMessages = useCallback(async (sessionId) => {
     const { data: msgs } = await callRPC('sessions.messages', { id: sessionId, limit: 100 });
     if (!msgs || !Array.isArray(msgs)) return [];
-    return msgs.map(m => ({ role: m.role, text: extractText(m.content) })).filter(m => m.text);
+    return msgs.map(m => {
+      const text = extractText(m.content);
+      const audio = extractAudio(m.content);
+      return { role: m.role, text, audio };
+    }).filter(m => m.text || m.audio);
   }, []);
 
   const findWebSession = useCallback(async (agentId) => {
@@ -440,7 +455,19 @@ export function Chat() {
         {messages.map((msg, i) => (
           <div key={i} class={`message ${msg.role}`}>
             {msg.role !== 'user' && <div class="message-role">{msg.role}</div>}
-            <div class="message-text">{msg.text}</div>
+            {msg.audio && (
+              <div style="margin-bottom:4px">
+                <audio controls preload="none" style="max-width:100%;height:36px"
+                  src={`/api/audio/${msg.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
+                </audio>
+                {msg.audio.duration_ms > 0 && (
+                  <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
+                    {Math.round(msg.audio.duration_ms / 1000)}s
+                  </span>
+                )}
+              </div>
+            )}
+            {msg.text && <div class="message-text">{msg.text}</div>}
           </div>
         ))}
 

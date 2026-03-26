@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 
@@ -31,16 +32,18 @@ type Pipeline struct {
 	costRecorder     CostRecorderFunc
 	activityTracker  *activity.Tracker
 	agentProvider    agentcfg.Provider
+	liveSessionPool  agent.LiveSessionPool // Optional: for voice messaging.
 }
 
 // Config for the pipeline.
 type PipelineConfig struct {
-	AgentID       string
-	LoopPool      *agent.LoopPool                     // Multi-agent loop pool.
-	PreResponse   middleware.Middleware                // Optional: runs before outbound delivery.
-	Pairing       *security.PairingManager            // Optional: channel pairing enforcement.
-	CostRecorder  CostRecorderFunc                    // Optional: records cost after each agent run.
-	AgentProvider agentcfg.Provider                   // Optional: agent config lookup for channel filtering.
+	AgentID         string
+	LoopPool        *agent.LoopPool                     // Multi-agent loop pool.
+	PreResponse     middleware.Middleware                // Optional: runs before outbound delivery.
+	Pairing         *security.PairingManager            // Optional: channel pairing enforcement.
+	CostRecorder    CostRecorderFunc                    // Optional: records cost after each agent run.
+	AgentProvider   agentcfg.Provider                   // Optional: agent config lookup for channel filtering.
+	LiveSessionPool agent.LiveSessionPool               // Optional: for voice messaging dispatch.
 }
 
 // New creates a new pipeline.
@@ -61,6 +64,7 @@ func New(
 		costRecorder:    config.CostRecorder,
 		activityTracker: activity.NewTracker(store.DB()),
 		agentProvider:   config.AgentProvider,
+		liveSessionPool: config.LiveSessionPool,
 	}
 
 	// Create debouncer that feeds into intent classification.
@@ -380,6 +384,29 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 		AgentID:   agentID,
 		Messages:  msgs,
 		Lane:      LaneMain,
+		HasAudio:  canonical.MessagesHaveAudio(msgs),
+	}
+
+	// Voice capability check: if audio but agent can't handle voice,
+	// send text rejection instead of scheduling.
+	if req.HasAudio && p.agentProvider != nil {
+		cfg := p.agentProvider.Get(agentID)
+		if cfg == nil || !cfg.HasVoice() {
+			agentName := p.resolveAgentName(agentID)
+			p.bus.PublishOutbound(ctx, bus.Envelope{
+				Channel: channel,
+				ChatID:  chatID,
+				Kind:    kind,
+				Messages: []canonical.Message{{
+					Role: "assistant",
+					Content: []canonical.Content{{
+						Type: "text",
+						Text: fmt.Sprintf("%s doesn't support voice messages. Please send a text message instead.", agentName),
+					}},
+				}},
+			})
+			return
+		}
 	}
 
 	if err := p.scheduler.Schedule(ctx, LaneMain, req); err != nil {
@@ -416,7 +443,28 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 		log.Printf("pipeline: no agent loop for %s, skipping", req.AgentID)
 		return
 	}
-	result := loop.Run(ctx, req.SessionID, allMsgs)
+
+	// Dispatch: voice or text path.
+	var result agent.RunResult
+	if req.HasAudio && loop.CanVoice() && p.liveSessionPool != nil {
+		result = loop.RunVoice(ctx, req.SessionID, allMsgs, p.liveSessionPool)
+	} else if req.HasAudio {
+		// Voice dispatch unavailable — don't fall through to text path with audio.
+		reason := "Voice messaging is not available right now."
+		if !loop.CanVoice() {
+			reason = "This agent's voice capability is not fully configured. Check that a Gemini API key is set and audio tools (ffmpeg) are installed."
+		} else if p.liveSessionPool == nil {
+			reason = "Voice sessions are not available. Ensure a Gemini API key is configured."
+		}
+		result = agent.RunResult{
+			Messages: []canonical.Message{{
+				Role:    "assistant",
+				Content: []canonical.Content{{Type: "text", Text: reason}},
+			}},
+		}
+	} else {
+		result = loop.Run(ctx, req.SessionID, allMsgs)
+	}
 
 	// Update Activity with result.
 	if p.activityTracker != nil && activityID != "" {
@@ -468,6 +516,20 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 		}
 	}
 
+	// On error with no response messages, send error feedback to the user.
+	if result.Error != nil && len(result.Messages) == 0 {
+		log.Printf("[%s] run error: %v", req.SessionID, result.Error)
+		errMsg := "Sorry, I encountered an issue processing your request."
+		if req.HasAudio {
+			errMsg = "Sorry, I couldn't process your voice message. " + result.Error.Error()
+		}
+		result.Messages = []canonical.Message{{
+			Role:    "assistant",
+			Content: []canonical.Content{{Type: "text", Text: errMsg}},
+		}}
+		result.Error = nil // Clear error so the response gets delivered below.
+	}
+
 	// Deliver response via outbound bus.
 	if result.Error == nil && len(result.Messages) > 0 {
 		// Find the last assistant text message.
@@ -489,6 +551,7 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 					Channel:   channel,
 					ChatID:    chatID,
 					Kind:      kind,
+					HasAudio:  canonical.HasAudio(result.Messages[i]),
 					Messages:  []canonical.Message{result.Messages[i]},
 				})
 				break

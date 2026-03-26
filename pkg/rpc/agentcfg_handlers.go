@@ -210,6 +210,8 @@ func (s *Server) handleAgentGetFile(w http.ResponseWriter, r *http.Request) {
 		"memory":    "memory.yaml",
 		"heartbeat": "heartbeat.yaml",
 		"channels":  "channels.yaml",
+		"skills":    "skills.yaml",
+		"voice":     "voice.yaml",
 		"identity":  "identity.yaml",
 	}
 
@@ -259,6 +261,8 @@ func (s *Server) handleAgentPutFile(w http.ResponseWriter, r *http.Request) {
 		"memory":    "memory.yaml",
 		"heartbeat": "heartbeat.yaml",
 		"channels":  "channels.yaml",
+		"skills":    "skills.yaml",
+		"voice":     "voice.yaml",
 		"identity":  "identity.yaml",
 	}
 
@@ -363,6 +367,20 @@ func configFromMap(id string, m map[string]any) *agentcfg.AgentConfig {
 		}
 	}
 
+	// Skills: re-marshal through JSON.
+	if raw, ok := m["skills"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(b, &cfg.Skills)
+		}
+	}
+
+	// Voice: re-marshal through JSON.
+	if raw, ok := m["voice"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			json.Unmarshal(b, &cfg.Voice)
+		}
+	}
+
 	// Apply defaults.
 	if cfg.Identity.Name == "" {
 		cfg.Identity.Name = id
@@ -416,6 +434,8 @@ func configToResponse(cfg *agentcfg.AgentConfig) map[string]any {
 		"memory":    cfg.Memory,
 		"heartbeat": cfg.Heartbeat,
 		"channels":  cfg.Channels,
+		"skills":    cfg.Skills,
+		"voice":     cfg.Voice,
 	}
 
 	// Parse YAML strings back to objects for the frontend.

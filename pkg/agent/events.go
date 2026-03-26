@@ -14,6 +14,9 @@ const (
 	EventToolResult    EventType = "tool.result"
 	EventConsentNeeded EventType = "consent.needed"
 	EventConsentResult EventType = "consent.result"
+	EventVoiceStarted  EventType = "voice.started"
+	EventVoiceAudio    EventType = "voice.audio"    // Audio chunk received from model.
+	EventVoiceText     EventType = "voice.text"     // Transcript received.
 )
 
 // Event represents an observable event from the agent loop.

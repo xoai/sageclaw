@@ -6,6 +6,13 @@ type AppConfig struct {
 	Delegation []DelegationLinkConfig   `yaml:"links"`
 	Teams      []TeamConfig             `yaml:"teams"`
 	Router     *RouterConfig            `yaml:"router"`
+	Audio      AudioConfig              `yaml:"audio"`
+}
+
+// AudioConfig configures voice message audio storage.
+type AudioConfig struct {
+	StoragePath string `yaml:"storage_path"` // Default: "data/audio"
+	MaxAgeDays  int    `yaml:"max_age_days"` // 0 = keep forever (default)
 }
 
 // AgentConfig defines an agent.

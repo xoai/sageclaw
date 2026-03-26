@@ -26,6 +26,7 @@ type RunRequest struct {
 	Messages  []canonical.Message
 	Lane      Lane
 	Priority  int
+	HasAudio  bool // Hint: messages contain voice/audio content.
 }
 
 // Scheduler is the process boundary interface for scheduling (ADR-013).

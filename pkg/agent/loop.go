@@ -30,6 +30,11 @@ type Config struct {
 	ToolDeny      []string      // Tools or groups to deny (e.g. "group:runtime").
 	ToolAlsoAllow []string      // Tools to add back after deny.
 	NonInteractive bool         // If true, auto-consent all tools (cron, heartbeat, non-web channels).
+
+	// Voice configuration.
+	VoiceEnabled  bool   // If true, this loop can handle voice messages.
+	VoiceModel    string // Audio model ID for Gemini Live.
+	VoiceName     string // Voice preset (e.g. "Kore").
 }
 
 // Loop runs the agent's think-act-observe cycle.
@@ -42,6 +47,12 @@ type Loop struct {
 	preContext    middleware.Middleware
 	postTool     middleware.Middleware
 	onEvent      EventHandler
+
+	// Voice support.
+	liveProvider     provider.LiveProvider
+	audioCodec       AudioCodec
+	audioStore       AudioStore
+	audioTranscriber AudioTranscriber
 
 	mu         sync.Mutex
 	injectChan chan canonical.Message // For steer/inject.
@@ -58,6 +69,26 @@ func WithRouter(r *provider.Router) LoopOption {
 // WithConsentStore adds a consent store for first-use consent.
 func WithConsentStore(cs *tool.ConsentStore) LoopOption {
 	return func(l *Loop) { l.consentStore = cs }
+}
+
+// WithLiveProvider adds a LiveProvider for voice messaging.
+func WithLiveProvider(lp provider.LiveProvider) LoopOption {
+	return func(l *Loop) { l.liveProvider = lp }
+}
+
+// WithAudioCodec sets the audio codec for OGG↔PCM conversion.
+func WithAudioCodec(c AudioCodec) LoopOption {
+	return func(l *Loop) { l.audioCodec = c }
+}
+
+// WithAudioStore sets the audio file store.
+func WithAudioStore(s AudioStore) LoopOption {
+	return func(l *Loop) { l.audioStore = s }
+}
+
+// WithAudioTranscriber sets the audio-to-text transcriber (e.g. Gemini REST).
+func WithAudioTranscriber(t AudioTranscriber) LoopOption {
+	return func(l *Loop) { l.audioTranscriber = t }
 }
 
 // NewLoop creates a new agent loop.
@@ -250,6 +281,10 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 }
 
 func (l *Loop) buildRequest(history []canonical.Message, injections []string) *canonical.Request {
+	// Filter audio content from history — text providers can't handle audio blocks.
+	// Replace with transcript text or a placeholder.
+	history = sanitizeAudioContent(history)
+
 	system := l.config.SystemPrompt
 	if len(injections) > 0 {
 		system += "\n\n" + strings.Join(injections, "\n\n")
@@ -293,6 +328,41 @@ func (l *Loop) ProviderAndModel() (string, string) {
 		return p.Name(), m
 	}
 	return "", l.config.Model
+}
+
+// sanitizeAudioContent replaces audio content blocks with text placeholders
+// so that text-only providers (Anthropic, OpenAI) don't receive unsupported content.
+// Preserves transcripts when available.
+func sanitizeAudioContent(msgs []canonical.Message) []canonical.Message {
+	out := make([]canonical.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if !canonical.HasAudio(msg) {
+			out = append(out, msg)
+			continue
+		}
+
+		// Rebuild content: replace audio blocks with text.
+		var newContent []canonical.Content
+		for _, c := range msg.Content {
+			if c.Type == "audio" && c.Audio != nil {
+				// Use transcript if available, otherwise placeholder.
+				text := "[Voice message]"
+				if c.Audio.Transcript != "" {
+					text = c.Audio.Transcript
+				}
+				newContent = append(newContent, canonical.Content{Type: "text", Text: text})
+			} else {
+				newContent = append(newContent, c)
+			}
+		}
+
+		if len(newContent) == 0 {
+			newContent = []canonical.Content{{Type: "text", Text: "[Voice message]"}}
+		}
+
+		out = append(out, canonical.Message{Role: msg.Role, Content: newContent})
+	}
+	return out
 }
 
 func (l *Loop) drainInjections(history *[]canonical.Message) {

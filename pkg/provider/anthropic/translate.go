@@ -164,6 +164,13 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 						},
 					})
 				}
+			case "audio":
+				// Audio not supported by Anthropic — convert to text placeholder.
+				text := "[Voice message]"
+				if c.Audio != nil && c.Audio.Transcript != "" {
+					text = c.Audio.Transcript
+				}
+				blocks = append(blocks, apiTextBlock{Type: "text", Text: text})
 			}
 		}
 

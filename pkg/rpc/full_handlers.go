@@ -986,5 +986,28 @@ func (s *Server) handleConsentResponse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.consentHandler(req.Group, req.Granted)
+
+	// Clear pending consent for this group.
+	s.mu.Lock()
+	filtered := s.pendingConsent[:0]
+	for _, c := range s.pendingConsent {
+		if g, _ := c["group"].(string); g != req.Group {
+			filtered = append(filtered, c)
+		}
+	}
+	s.pendingConsent = filtered
+	s.mu.Unlock()
+
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleConsentPending returns queued consent prompts for polling.
+func (s *Server) handleConsentPending(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	pending := s.pendingConsent
+	s.mu.RUnlock()
+	if pending == nil {
+		pending = []map[string]any{}
+	}
+	writeJSON(w, pending)
 }

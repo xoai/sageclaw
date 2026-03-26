@@ -78,6 +78,20 @@ func LoadAgent(dir string) (*AgentConfig, error) {
 		}
 	}
 
+	// skills.yaml — optional. Lists marketplace skills assigned to this agent.
+	if data, err := os.ReadFile(filepath.Join(dir, "skills.yaml")); err == nil {
+		if err := yaml.Unmarshal(data, &cfg.Skills); err != nil {
+			log.Printf("agentcfg: %s/skills.yaml parse error: %v (using defaults)", id, err)
+		}
+	}
+
+	// voice.yaml — optional. Voice messaging capability.
+	if data, err := os.ReadFile(filepath.Join(dir, "voice.yaml")); err == nil {
+		if err := yaml.Unmarshal(data, &cfg.Voice); err != nil {
+			log.Printf("agentcfg: %s/voice.yaml parse error: %v (using defaults)", id, err)
+		}
+	}
+
 	return &cfg, nil
 }
 
@@ -179,6 +193,22 @@ func SaveAgent(cfg *AgentConfig, dir string) error {
 	if len(cfg.Channels.Serve) > 0 || len(cfg.Channels.Overrides) > 0 {
 		data, _ := yaml.Marshal(&cfg.Channels)
 		if err := writeFileAtomic(filepath.Join(dir, "channels.yaml"), data); err != nil {
+			return err
+		}
+	}
+
+	// skills.yaml — only write if skills are assigned.
+	if len(cfg.Skills.Skills) > 0 {
+		data, _ := yaml.Marshal(&cfg.Skills)
+		if err := writeFileAtomic(filepath.Join(dir, "skills.yaml"), data); err != nil {
+			return err
+		}
+	}
+
+	// voice.yaml — only write if voice is enabled.
+	if cfg.Voice.Enabled {
+		data, _ := yaml.Marshal(&cfg.Voice)
+		if err := writeFileAtomic(filepath.Join(dir, "voice.yaml"), data); err != nil {
 			return err
 		}
 	}

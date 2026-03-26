@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xoai/sageclaw/pkg/agent"
 	"github.com/xoai/sageclaw/pkg/agentcfg"
+	"github.com/xoai/sageclaw/pkg/audio"
 	localbus "github.com/xoai/sageclaw/pkg/bus/local"
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/channel"
@@ -38,12 +39,14 @@ import (
 	"github.com/xoai/sageclaw/pkg/provider/anthropic"
 	"github.com/xoai/sageclaw/pkg/provider/gemini"
 	"github.com/xoai/sageclaw/pkg/provider/github"
+	"github.com/xoai/sageclaw/pkg/provider/livesession"
 	"github.com/xoai/sageclaw/pkg/provider/ollama"
 	"github.com/xoai/sageclaw/pkg/provider/openai"
 	"github.com/xoai/sageclaw/pkg/provider/openrouter"
 	"github.com/xoai/sageclaw/pkg/rpc"
 	"github.com/xoai/sageclaw/pkg/security"
 	"github.com/xoai/sageclaw/pkg/skill"
+	"github.com/xoai/sageclaw/pkg/skillstore"
 	"github.com/xoai/sageclaw/pkg/store"
 	"github.com/xoai/sageclaw/pkg/store/sqlite"
 	"github.com/xoai/sageclaw/pkg/tool"
@@ -328,8 +331,10 @@ func run() error {
 			log.Println("provider: gemini key loaded from database")
 		}
 	}
+	var geminiClient *gemini.Client
 	if geminiKey != "" {
-		gp := gemini.NewClient(geminiKey)
+		geminiClient = gemini.NewClient(geminiKey)
+		gp := geminiClient
 		if _, exists := routes[provider.TierStrong]; !exists {
 			routes[provider.TierStrong] = provider.Route{Provider: gp, Model: "gemini-2.0-flash"}
 		}
@@ -449,6 +454,7 @@ func run() error {
 
 	if len(fileAgents) > 0 {
 		for id, ac := range fileAgents {
+			ac.SkillsDir = skillsDir
 			agentConfigs[id] = agentcfg.ToRuntimeConfig(ac)
 		}
 		log.Printf("agents: %d loaded from files (%s)", len(fileAgents), agentsDir)
@@ -461,6 +467,7 @@ func run() error {
 				log.Printf("agentcfg: reload failed for %s: %v", agentID, err)
 				return
 			}
+			reloaded.SkillsDir = skillsDir
 			agentConfigs[agentID] = agentcfg.ToRuntimeConfig(reloaded)
 			agentProvider.Update(agentID, reloaded)
 			if loopPool != nil {
@@ -505,6 +512,7 @@ func run() error {
 			// Reload from files after migration.
 			if freshAgents, err := agentcfg.LoadAll(agentsDir); err == nil {
 				for id, ac := range freshAgents {
+					ac.SkillsDir = skillsDir
 					agentConfigs[id] = agentcfg.ToRuntimeConfig(ac)
 				}
 			}
@@ -610,6 +618,20 @@ Key behaviors:
 		}
 	}
 
+	// --- Skill Store (marketplace) ---
+	skillLockPath := filepath.Join(skillsDir, ".skills-lock.json")
+	skillStoreOpts := []skillstore.Option{}
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		skillStoreOpts = append(skillStoreOpts, skillstore.WithGitHubToken(token))
+	}
+	if apiURL := os.Getenv("SKILLS_API_URL"); apiURL != "" {
+		skillStoreOpts = append(skillStoreOpts, skillstore.WithSearchURL(apiURL))
+	}
+	skillStore, err := skillstore.NewStore(skillsDir, skillLockPath, skillStoreOpts...)
+	if err != nil {
+		log.Printf("warning: skill store init failed: %v", err)
+	}
+
 	// --- Middleware ---
 	preCtx := middleware.Chain(
 		middleware.PreContextMemory(memEngine),
@@ -628,6 +650,58 @@ Key behaviors:
 
 	// Forward-reference for SSE broadcast (set after RPC server is created).
 	var sseBroadcast func(agent.Event)
+
+	// --- Voice messaging infrastructure ---
+	audioStoragePath := cfg.Audio.StoragePath
+	if audioStoragePath == "" {
+		audioStoragePath = "data/audio"
+	}
+	audioStore := audio.NewStore(audioStoragePath)
+
+	// Run audio cleanup on startup.
+	if cfg.Audio.MaxAgeDays > 0 {
+		deleted, err := audioStore.Cleanup(cfg.Audio.MaxAgeDays)
+		if err != nil {
+			log.Printf("audio: cleanup error: %v", err)
+		} else if deleted > 0 {
+			log.Printf("audio: cleaned up %d old files (max age: %d days)", deleted, cfg.Audio.MaxAgeDays)
+		}
+	}
+
+	// Audio codec (ffmpeg or opus-tools).
+	audioCodec, codecErr := audio.DefaultCodec()
+	if codecErr != nil {
+		log.Printf("audio: no codec available (%v) — voice encoding/decoding will fail. Install ffmpeg or opus-tools.", codecErr)
+	} else {
+		log.Printf("audio: codec ready (%s)", audioCodec.Name())
+	}
+
+	// Gemini Live client for voice sessions (requires Gemini API key).
+	var liveClient *gemini.LiveClient
+	var livePool *livesession.Pool
+	if geminiKey != "" {
+		liveClient = gemini.NewLiveClient(geminiKey)
+		livePool = livesession.NewPool(liveClient, 0) // Default 5min idle timeout.
+		log.Println("voice: Gemini Live client ready")
+	} else {
+		log.Println("voice: disabled (no Gemini API key)")
+	}
+
+	// Build loop options — include voice components when available.
+	loopOpts := []agent.LoopOption{
+		agent.WithRouter(router),
+		agent.WithConsentStore(consentStore),
+	}
+	if liveClient != nil {
+		loopOpts = append(loopOpts, agent.WithLiveProvider(liveClient))
+	}
+	if audioCodec != nil {
+		loopOpts = append(loopOpts, agent.WithAudioCodec(audioCodec))
+	}
+	if geminiClient != nil {
+		loopOpts = append(loopOpts, agent.WithAudioTranscriber(geminiClient))
+	}
+	loopOpts = append(loopOpts, agent.WithAudioStore(audioStore))
 
 	if !noProviders {
 		loopPool = agent.NewLoopPool(agentConfigs, defaultProvider, toolReg, preCtx, postTool,
@@ -652,7 +726,7 @@ Key behaviors:
 				if sseBroadcast != nil {
 					sseBroadcast(e)
 				}
-			}, agent.WithRouter(router), agent.WithConsentStore(consentStore))
+			}, loopOpts...)
 	}
 
 	// --- Channel Pairing ---
@@ -681,7 +755,7 @@ Key behaviors:
 		if connID == "" {
 			connID = "telegram"
 		}
-		return telegram.New(connID, token), nil
+		return telegram.New(connID, token, telegram.WithAudioStore(audioStore)), nil
 	})
 	chanMgr.RegisterFactory("discord", func(cfg map[string]string) (channel.Channel, error) {
 		token := cfg["DISCORD_BOT_TOKEN"]
@@ -740,11 +814,12 @@ Key behaviors:
 		}
 	})
 	p = pipeline.New(msgBus, scheduler, appStore, pipeline.PipelineConfig{
-		AgentID:       "default",
-		LoopPool:      loopPool,
-		PreResponse:   middleware.PreResponseLog(),
-		Pairing:       pairingMgr,
-		AgentProvider: agentProvider,
+		AgentID:         "default",
+		LoopPool:        loopPool,
+		PreResponse:     middleware.PreResponseLog(),
+		Pairing:         pairingMgr,
+		AgentProvider:   agentProvider,
+		LiveSessionPool: livePool,
 		CostRecorder: func(ctx context.Context, sessionID, agentID, provName, model string, usage canonical.Usage) {
 			budgetEngine.RecordCost(ctx, provider.CostEntry{
 				SessionID:     sessionID,
@@ -865,7 +940,9 @@ Key behaviors:
 		rpc.WithRouter(router),
 		rpc.WithChannelManager(chanMgr),
 		rpc.WithMCPManager(mcpMgr),
+		rpc.WithSkillStore(skillStore),
 		rpc.WithConsentHandler(p.InjectConsent),
+		rpc.WithAudioBasePath(audioStoragePath),
 	)
 	// Wire SSE broadcast now that rpcServer exists.
 	sseBroadcast = rpcServer.EventHandler()
@@ -881,7 +958,7 @@ Key behaviors:
 	useCLI := f.forceCLI || (telegramToken == "" && discordToken == "")
 
 	if telegramToken != "" && !f.forceCLI {
-		tg := telegram.New("telegram", telegramToken)
+		tg := telegram.New("telegram", telegramToken, telegram.WithAudioStore(audioStore))
 		if err := tg.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting telegram: %w", err)
 		}

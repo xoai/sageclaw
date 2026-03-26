@@ -34,10 +34,10 @@ func NewDebouncer(window time.Duration, flush func(chatID string, msgs []canonic
 	}
 }
 
-// Add adds a message for a chat. If it contains an image, flush immediately.
+// Add adds a message for a chat. If it contains an image or audio, flush immediately.
 func (d *Debouncer) Add(chatID string, msg canonical.Message) {
-	// Media bypass: images skip debounce.
-	if hasImage(msg) {
+	// Media bypass: images and audio skip debounce.
+	if hasImage(msg) || canonical.HasAudio(msg) {
 		d.flushImmediate(chatID, msg)
 		return
 	}

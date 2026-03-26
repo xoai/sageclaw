@@ -104,6 +104,8 @@ export default function AgentEditor({ id }) {
     { id: 'memory', label: 'Memory' },
     { id: 'heartbeat', label: 'Heartbeat' },
     { id: 'channels', label: 'Channels' },
+    { id: 'skills', label: 'Skills' },
+    { id: 'voice', label: 'Voice' },
   ];
 
   return (
@@ -140,6 +142,8 @@ export default function AgentEditor({ id }) {
       {tab === 'memory' && <MemoryTab agent={agent} update={update} />}
       {tab === 'heartbeat' && <HeartbeatTab agent={agent} update={update} />}
       {tab === 'channels' && <ChannelsTab agent={agent} update={update} />}
+      {tab === 'skills' && <SkillsTab agent={agent} update={update} />}
+      {tab === 'voice' && <VoiceTab agent={agent} update={update} />}
     </div>
   );
 }
@@ -634,6 +638,65 @@ function HeartbeatTab({ agent, update }) {
   );
 }
 
+function SkillsTab({ agent, update }) {
+  const assigned = agent.skills?.skills || [];
+  const [installed, setInstalled] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch('/api/skills/marketplace/installed', { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => { setInstalled(Array.isArray(data) ? data : []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const isAssigned = (name) => assigned.includes(name);
+
+  const toggle = (name) => {
+    const next = isAssigned(name)
+      ? assigned.filter(s => s !== name)
+      : [...assigned, name];
+    update('skills.skills', next);
+  };
+
+  return (
+    <div style="max-width:600px">
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
+        Select which marketplace skills this agent can use. Install skills from the <a href="/skills">Skills page</a>.
+      </p>
+
+      {loading ? (
+        <div style="color:var(--text-muted);font-size:13px">Loading installed skills...</div>
+      ) : installed.length === 0 ? (
+        <div class="card" style="padding:20px;text-align:center">
+          <p style="color:var(--text-muted);font-size:13px;margin-bottom:8px">No marketplace skills installed yet.</p>
+          <a href="/skills" class="btn-secondary" style="text-decoration:none;display:inline-block">Browse Marketplace</a>
+        </div>
+      ) : (
+        <div>
+          <div style="margin-bottom:12px;font-size:12px;color:var(--text-muted)">
+            {assigned.length} of {installed.length} skills assigned
+          </div>
+          {installed.map(sk => (
+            <label key={sk.name} style="display:flex;align-items:flex-start;gap:10px;padding:10px;cursor:pointer;border-bottom:1px solid var(--border)">
+              <input type="checkbox" checked={isAssigned(sk.name)} onChange={() => toggle(sk.name)}
+                style="margin-top:2px" />
+              <div style="flex:1">
+                <div style="font-weight:600;font-size:13px">{sk.name}</div>
+                {sk.description && <div style="font-size:11px;color:var(--text-muted)">{sk.description}</div>}
+                <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+                  {sk.source}
+                  {sk.hasScripts && <span class="badge badge-yellow" style="font-size:9px;margin-left:6px">scripts</span>}
+                </div>
+              </div>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChannelsTab({ agent, update }) {
   const serve = new Set(agent.channels?.serve || []);
   const overrides = agent.channels?.overrides || {};
@@ -688,6 +751,166 @@ function ChannelsTab({ agent, update }) {
           <span style="font-size:11px;color:var(--text-muted)">max tokens</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function VoiceTab({ agent, update }) {
+  const voice = agent.voice || {};
+  const enabled = voice.enabled || false;
+  const model = voice.model || '';
+  const voiceName = voice.voice_name || 'Sadaltager';
+  const languageCode = voice.language_code || '';
+
+  // All 30 Gemini Live voice presets from official docs, grouped by character.
+  const voicePresets = [
+    { name: 'Sadaltager', desc: 'Knowledgeable' },
+    { name: 'Kore', desc: 'Bright' },
+    { name: 'Charon', desc: 'Informative' },
+    { name: 'Zephyr', desc: 'Bright' },
+    { name: 'Puck', desc: 'Upbeat' },
+    { name: 'Fenrir', desc: 'Excitable' },
+    { name: 'Orus', desc: 'Firm' },
+    { name: 'Leda', desc: 'Youthful' },
+    { name: 'Aoede', desc: 'Breezy' },
+    { name: 'Callirrhoe', desc: 'Easy-going' },
+    { name: 'Autonoe', desc: 'Bright' },
+    { name: 'Iapetus', desc: 'Clear' },
+    { name: 'Enceladus', desc: 'Breathy' },
+    { name: 'Umbriel', desc: 'Easy-going' },
+    { name: 'Despina', desc: 'Smooth' },
+    { name: 'Algieba', desc: 'Smooth' },
+    { name: 'Algzenib', desc: 'Gravelly' },
+    { name: 'Rasalgethi', desc: 'Informative' },
+    { name: 'Erinome', desc: 'Clear' },
+    { name: 'Alnilam', desc: 'Firm' },
+    { name: 'Laomedeia', desc: 'Upbeat' },
+    { name: 'Achernar', desc: 'Soft' },
+    { name: 'Pulcherrima', desc: 'Forward' },
+    { name: 'Schedar', desc: 'Even' },
+    { name: 'Gacrux', desc: 'Mature' },
+    { name: 'Vindemiatrix', desc: 'Gentle' },
+    { name: 'Achird', desc: 'Friendly' },
+    { name: 'Zubenelgenubi', desc: 'Casual' },
+    { name: 'Sulafat', desc: 'Warm' },
+    { name: 'Sadachbia', desc: 'Lively' },
+  ];
+
+  // Supported languages from Gemini Live docs.
+  const languages = [
+    { code: '', label: 'Auto-detect (default)' },
+    { code: 'en-US', label: 'English (US)' },
+    { code: 'en-IN', label: 'English (India)' },
+    { code: 'vi-VN', label: 'Vietnamese' },
+    { code: 'ja-JP', label: 'Japanese' },
+    { code: 'ko-KR', label: 'Korean' },
+    { code: 'zh-CN', label: 'Chinese (Mandarin)' },
+    { code: 'fr-FR', label: 'French' },
+    { code: 'de-DE', label: 'German' },
+    { code: 'es-US', label: 'Spanish (US)' },
+    { code: 'pt-BR', label: 'Portuguese (Brazil)' },
+    { code: 'hi-IN', label: 'Hindi' },
+    { code: 'id-ID', label: 'Indonesian' },
+    { code: 'it-IT', label: 'Italian' },
+    { code: 'nl-NL', label: 'Dutch' },
+    { code: 'pl-PL', label: 'Polish' },
+    { code: 'ro-RO', label: 'Romanian' },
+    { code: 'ru-RU', label: 'Russian' },
+    { code: 'th-TH', label: 'Thai' },
+    { code: 'tr-TR', label: 'Turkish' },
+    { code: 'uk-UA', label: 'Ukrainian' },
+    { code: 'ar-EG', label: 'Arabic (Egyptian)' },
+    { code: 'bn-BD', label: 'Bengali' },
+    { code: 'mr-IN', label: 'Marathi' },
+    { code: 'ta-IN', label: 'Tamil' },
+    { code: 'te-IN', label: 'Telugu' },
+  ];
+
+  return (
+    <div style="max-width:600px">
+      <div style="margin-bottom:20px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" checked={enabled}
+            onChange={() => {
+              update('voice.enabled', !enabled);
+              if (!enabled && !voice.voice_name) {
+                update('voice.voice_name', 'Sadaltager');
+              }
+            }} />
+          <span style="font-weight:500">Enable voice messaging</span>
+        </label>
+        <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0 26px">
+          When enabled, this agent can receive and respond with voice messages
+          using Gemini Live native audio.
+        </p>
+
+        <div style="margin:8px 0 0 26px;padding:8px 12px;background:var(--warning-bg, #fef3c7);border-radius:6px;border:1px solid var(--warning-border, #f59e0b)">
+          <p style="font-size:12px;color:var(--warning-text, #92400e);margin:0">
+            Requires a <strong>Gemini API key</strong> configured in <a href="/providers">Providers</a>.
+            Voice will not work without it.
+          </p>
+        </div>
+      </div>
+
+      {enabled && (
+        <div>
+          <div style="margin-bottom:16px">
+            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px">Audio Model</label>
+            <input type="text" style="width:100%"
+              placeholder="gemini-2.5-flash-native-audio-preview-12-2025"
+              value={model}
+              onInput={e => update('voice.model', e.target.value)} />
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">
+              Leave empty for default. Preview models may change.
+            </p>
+          </div>
+
+          <div style="margin-bottom:16px">
+            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px">Language</label>
+            <select style="width:100%;padding:6px 8px"
+              value={languageCode}
+              onChange={e => update('voice.language_code', e.target.value)}>
+              {languages.map(l => (
+                <option key={l.code} value={l.code}>{l.label}</option>
+              ))}
+            </select>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">
+              Native audio models can auto-detect language, but setting one explicitly improves quality.
+            </p>
+          </div>
+
+          <div style="margin-bottom:16px">
+            <label style="display:block;font-size:13px;font-weight:500;margin-bottom:6px">
+              Voice Preset
+              <span style="font-weight:400;color:var(--text-muted);margin-left:8px">
+                ({voiceName || 'none'})
+              </span>
+            </label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              {voicePresets.map(v => (
+                <button key={v.name}
+                  class={voiceName === v.name ? 'btn-primary' : 'btn-outline'}
+                  style="padding:3px 10px;font-size:11px"
+                  title={v.desc}
+                  onClick={() => update('voice.voice_name', v.name)}>
+                  {v.name}
+                </button>
+              ))}
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">
+              Default: Sadaltager (Knowledgeable). Hover for character description.
+            </p>
+          </div>
+
+          <div style="padding:12px;background:var(--bg-elevated);border-radius:8px;border:1px solid var(--border)">
+            <p style="font-size:12px;color:var(--text-muted);margin:0;line-height:1.5">
+              <strong>Cost:</strong> Audio processing costs ~$1.35/min for full-duplex conversation
+              ($3/M input tokens, $12/M output tokens). Audio accumulates at ~25 tokens/sec.
+              Costs are tracked in the Budget page.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
