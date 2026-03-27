@@ -183,8 +183,8 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		activeProvider, activeModel := l.resolveProvider()
 		req.Model = activeModel
 
-		// Call LLM.
-		resp, err := activeProvider.Chat(ctx, req)
+		// Call LLM — prefer streaming for real-time token delivery.
+		resp, err := l.callLLM(ctx, activeProvider, req, sessionID, iteration)
 		if err != nil {
 			l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: err, Iteration: iteration})
 			return RunResult{Messages: pendingMsgs, Usage: totalUsage, Error: fmt.Errorf("LLM call failed (iteration %d): %w", iteration, err)}
@@ -203,12 +203,6 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		assistantMsg := resp.Messages[0]
 		history = append(history, assistantMsg)
 		pendingMsgs = append(pendingMsgs, assistantMsg)
-
-		// Emit text chunks.
-		text := ExtractText(assistantMsg)
-		if text != "" {
-			l.onEvent(Event{Type: EventChunk, SessionID: sessionID, Text: text, Iteration: iteration})
-		}
 
 		// Check stop reason.
 		if resp.StopReason == "end_turn" || resp.StopReason == "max_tokens" {
@@ -311,6 +305,33 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 		Tools:     tools,
 		MaxTokens: l.config.MaxTokens,
 	}
+}
+
+// callLLM calls the provider, preferring streaming for real-time token delivery.
+// Falls back to non-streaming Chat() if ChatStream fails to open.
+// Mid-stream errors are NOT retried via Chat() — partial text is returned with error.
+func (l *Loop) callLLM(ctx context.Context, p provider.Provider, req *canonical.Request, sessionID string, iteration int) (*canonical.Response, error) {
+	// Try streaming first.
+	stream, err := p.ChatStream(ctx, req)
+	if err != nil {
+		// Stream open failed — fall back to non-streaming.
+		log.Printf("[%s] streaming unavailable, falling back to Chat(): %v", sessionID, err)
+		return p.Chat(ctx, req)
+	}
+
+	// Consume the stream, emitting EventChunk for each text delta.
+	result := consumeStream(ctx, stream, sessionID, iteration, l.onEvent)
+
+	if result.Error != nil {
+		// Mid-stream error — return partial content + error.
+		return nil, fmt.Errorf("stream error: %w", result.Error)
+	}
+
+	return &canonical.Response{
+		Messages:   []canonical.Message{result.Message},
+		Usage:      result.Usage,
+		StopReason: result.StopReason,
+	}, nil
 }
 
 // resolveProvider returns the provider and model to use, consulting the router if available.

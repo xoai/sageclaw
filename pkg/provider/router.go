@@ -33,8 +33,8 @@ type Combo struct {
 
 // ComboModel is a single entry in a combo's fallback chain.
 type ComboModel struct {
-	Provider string `json:"provider"` // provider name (e.g. "anthropic")
-	ModelID  string `json:"model_id"` // model ID (e.g. "claude-sonnet-4-20250514")
+	Provider string `json:"provider_type"` // provider name (e.g. "anthropic")
+	ModelID  string `json:"model"`         // model ID (e.g. "claude-sonnet-4-20250514")
 }
 
 // Router selects which provider+model to use based on tier.

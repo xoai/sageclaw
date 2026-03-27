@@ -64,26 +64,41 @@ func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent) {
 	switch evt.Event {
 	case eventContentBlockDelta:
 		var delta struct {
+			Index int `json:"index"`
 			Delta struct {
-				Type  string `json:"type"`
-				Text  string `json:"text,omitempty"`
+				Type          string `json:"type"`
+				Text          string `json:"text,omitempty"`
+				PartialJSON   string `json:"partial_json,omitempty"`
 			} `json:"delta"`
 		}
 		if err := json.Unmarshal([]byte(evt.Data), &delta); err != nil {
 			return
 		}
-		if delta.Delta.Type == "text_delta" {
+		switch delta.Delta.Type {
+		case "text_delta":
 			events <- provider.StreamEvent{
-				Type: "content_delta",
+				Type:  "content_delta",
+				Index: delta.Index,
 				Delta: &canonical.Content{
 					Type: "text",
 					Text: delta.Delta.Text,
+				},
+			}
+		case "input_json_delta":
+			// Tool call input arrives as partial JSON fragments.
+			events <- provider.StreamEvent{
+				Type:  "tool_call",
+				Index: delta.Index,
+				Delta: &canonical.Content{
+					Type:      "tool_call",
+					ToolInput: delta.Delta.PartialJSON,
 				},
 			}
 		}
 
 	case eventContentBlockStart:
 		var block struct {
+			Index        int `json:"index"`
 			ContentBlock struct {
 				Type  string          `json:"type"`
 				ID    string          `json:"id,omitempty"`
@@ -96,31 +111,55 @@ func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent) {
 		}
 		if block.ContentBlock.Type == "tool_use" {
 			events <- provider.StreamEvent{
-				Type: "tool_call",
+				Type:  "tool_call",
+				Index: block.Index,
 				Delta: &canonical.Content{
-					Type: "tool_call",
-					ToolCall: &canonical.ToolCall{
-						ID:   block.ContentBlock.ID,
-						Name: block.ContentBlock.Name,
-					},
+					Type:       "tool_call",
+					ToolCallID: block.ContentBlock.ID,
+					ToolName:   block.ContentBlock.Name,
+				},
+			}
+		}
+
+	case eventMessageStart:
+		// Extract usage from initial message.
+		var msg struct {
+			Message struct {
+				Usage apiUsage `json:"usage"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(evt.Data), &msg); err != nil {
+			return
+		}
+		if msg.Message.Usage.InputTokens > 0 {
+			events <- provider.StreamEvent{
+				Type: "usage",
+				Usage: &canonical.Usage{
+					InputTokens:   msg.Message.Usage.InputTokens,
+					CacheCreation: msg.Message.Usage.CacheCreationInputTokens,
+					CacheRead:     msg.Message.Usage.CacheReadInputTokens,
 				},
 			}
 		}
 
 	case eventMessageDelta:
 		var delta struct {
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
 			Usage apiUsage `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(evt.Data), &delta); err != nil {
 			return
 		}
-		events <- provider.StreamEvent{
-			Type: "usage",
+		ev := provider.StreamEvent{
+			Type:       "usage",
+			StopReason: delta.Delta.StopReason,
 			Usage: &canonical.Usage{
-				InputTokens:  delta.Usage.InputTokens,
 				OutputTokens: delta.Usage.OutputTokens,
 			},
 		}
+		events <- ev
 
 	case eventMessageStop:
 		events <- provider.StreamEvent{Type: "done"}

@@ -17,6 +17,11 @@ type Content struct {
 	Thinking   string       `json:"thinking,omitempty"`
 	Source     *ImageSource `json:"source,omitempty"`
 	Audio      *AudioSource `json:"audio,omitempty"` // type: "audio"
+
+	// Stream delta fields — used during streaming accumulation only.
+	ToolCallID string `json:"tool_call_id,omitempty"` // For tool_call start delta.
+	ToolName   string `json:"tool_name,omitempty"`    // For tool_call start delta.
+	ToolInput  string `json:"tool_input,omitempty"`   // For tool_call input_json_delta (partial JSON).
 }
 
 // AudioSource describes an audio file reference.

@@ -8,10 +8,12 @@ import (
 
 // StreamEvent represents a streaming response event from an LLM provider.
 type StreamEvent struct {
-	Type  string             // "content_delta", "tool_call", "usage", "done", "error"
-	Delta *canonical.Content // For content deltas.
-	Usage *canonical.Usage   // For usage updates.
-	Error error              // For errors.
+	Type       string             // "content_delta", "tool_call", "usage", "done", "error"
+	Delta      *canonical.Content // For content deltas and tool call deltas.
+	Usage      *canonical.Usage   // For usage updates.
+	Error      error              // For errors.
+	Index      int                // Block index for tool call accumulation.
+	StopReason string             // Set on "done" events (e.g. "end_turn", "tool_use").
 }
 
 // Provider defines the interface for LLM providers.

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -459,6 +460,25 @@ func run() error {
 		}
 		if orpClient != nil {
 			router.RegisterProvider("openrouter", orpClient)
+		}
+
+		// Load combos from DB into the router.
+		comboRows, err := appStore.DB().Query(
+			`SELECT id, name, strategy, models FROM combos ORDER BY name`)
+		if err == nil {
+			defer comboRows.Close()
+			for comboRows.Next() {
+				var id, name, strategy, modelsJSON string
+				comboRows.Scan(&id, &name, &strategy, &modelsJSON)
+				var models []provider.ComboModel
+				if json.Unmarshal([]byte(modelsJSON), &models) == nil && len(models) > 0 {
+					router.SetCombo(id, provider.Combo{
+						Name:     name,
+						Strategy: strategy,
+						Models:   models,
+					})
+				}
+			}
 		}
 	}
 

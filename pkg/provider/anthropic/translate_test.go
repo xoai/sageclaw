@@ -282,8 +282,8 @@ data: {"type":"message_stop"}
 
 	hasToolCall := false
 	for _, evt := range collected {
-		if evt.Type == "tool_call" && evt.Delta != nil && evt.Delta.ToolCall != nil {
-			if evt.Delta.ToolCall.Name == "read_file" {
+		if evt.Type == "tool_call" && evt.Delta != nil {
+			if evt.Delta.ToolName == "read_file" {
 				hasToolCall = true
 			}
 		}

@@ -11,6 +11,7 @@ export function Providers() {
   const [expandedCombo, setExpandedCombo] = useState(null);
   const [providerForm, setProviderForm] = useState({ type: 'anthropic', name: '', api_key: '', base_url: '' });
   const [comboForm, setComboForm] = useState({ name: '', description: '', strategy: 'priority', models: [] });
+  const [editingComboId, setEditingComboId] = useState(null);
   const [allModels, setAllModels] = useState([]);
   const [comboSearch, setComboSearch] = useState('');
   const [dragIdx, setDragIdx] = useState(null);
@@ -24,7 +25,23 @@ export function Providers() {
   useEffect(() => {
     loadProviders();
     loadCombos();
-    fetch('/api/providers/models').then(r => r.json()).then(d => setAllModels(d.models || [])).catch(() => {});
+    // Load hardcoded models, then merge with live-discovered models.
+    fetch('/api/providers/models').then(r => r.json()).then(d => {
+      const known = d.models || [];
+      // Also fetch live models from connected providers.
+      fetch('/api/providers/models/live').then(r => r.json()).then(live => {
+        const liveModels = live.models || [];
+        // Merge: live models that aren't already in the known list.
+        const knownIds = new Set(known.map(m => m.model_id));
+        const merged = [...known];
+        for (const m of liveModels) {
+          if (!knownIds.has(m.model_id)) {
+            merged.push(m);
+          }
+        }
+        setAllModels(merged);
+      }).catch(() => setAllModels(known));
+    }).catch(() => {});
   }, []);
 
   const saveProvider = async () => {
@@ -87,7 +104,13 @@ export function Providers() {
 
   const deleteCombo = async (id) => {
     if (!confirm('Delete this combo?')) return;
-    await fetch(`/api/combos/${id}`, { method: 'DELETE' });
+    try {
+      const res = await fetch(`/api/combos/${id}`, { method: 'DELETE', credentials: 'include' });
+      const data = await res.json();
+      if (data.warning) {
+        alert(data.warning);
+      }
+    } catch {}
     loadCombos();
   };
 
@@ -197,7 +220,17 @@ export function Providers() {
                     </div>
                     <div style="display:flex;gap:6px;align-items:center">
                       <span style="font-size:11px;color:var(--text-muted);font-family:var(--mono)">combo:{c.id}</span>
-                      {!c.is_preset && <button class="btn-small btn-danger" onClick={(e) => { e.stopPropagation(); deleteCombo(c.id); }}>Delete</button>}
+                      {!c.is_preset && (
+                        <div style="display:flex;gap:4px">
+                          <button class="btn-small" onClick={(e) => {
+                            e.stopPropagation();
+                            setComboForm({ name: c.name, description: c.description || '', strategy: c.strategy, models: comboModels });
+                            setEditingComboId(c.id);
+                            setShowAddCombo(true);
+                          }}>Edit</button>
+                          <button class="btn-small btn-danger" onClick={(e) => { e.stopPropagation(); deleteCombo(c.id); }}>Delete</button>
+                        </div>
+                      )}
                     </div>
                   </div>
                   {c.description && <div style="color:var(--text-muted);font-size:13px;margin-top:4px">{c.description}</div>}
@@ -207,8 +240,8 @@ export function Providers() {
                       {comboModels.map((m, i) => (
                         <div key={i} style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px">
                           <span style="color:var(--text-muted);font-size:11px;width:18px;text-align:right">{i + 1}.</span>
-                          <span class="badge badge-gray" style="font-size:10px">{m.provider || m.split?.('/')[0] || '?'}</span>
-                          <span style="font-family:var(--mono)">{m.model_id || m}</span>
+                          <span class="badge badge-gray" style="font-size:10px">{m.provider_type || m.provider || '?'}</span>
+                          <span style="font-family:var(--mono)">{m.model || m.model_id || (typeof m === 'string' ? m : '?')}</span>
                         </div>
                       ))}
                     </div>
@@ -268,12 +301,14 @@ export function Providers() {
       {/* Add Combo Modal */}
       {showAddCombo && (() => {
         const selectedIds = new Set((comboForm.models || []).map(m => m.model));
+        const q = comboSearch.trim().toLowerCase();
         const searchResults = allModels.filter(m =>
-          m.available && !selectedIds.has(m.model_id) &&
-          (comboSearch === '' ||
-           m.name.toLowerCase().includes(comboSearch.toLowerCase()) ||
-           m.id.toLowerCase().includes(comboSearch.toLowerCase()) ||
-           m.provider.toLowerCase().includes(comboSearch.toLowerCase()))
+          !selectedIds.has(m.model_id) &&
+          (q === '' ||
+           (m.name || '').toLowerCase().includes(q) ||
+           (m.id || '').toLowerCase().includes(q) ||
+           (m.model_id || '').toLowerCase().includes(q) ||
+           (m.provider || '').toLowerCase().includes(q))
         );
 
         const addModel = (m) => {
@@ -307,9 +342,12 @@ export function Providers() {
         };
 
         return (
-          <div class="modal-overlay" onClick={() => setShowAddCombo(false)} role="dialog" aria-modal="true" aria-labelledby="add-combo-title">
-            <div class="modal-content" style="width:560px" onClick={e => e.stopPropagation()}>
-              <h2 id="add-combo-title">Create Combo</h2>
+          <div class="modal-overlay" onClick={() => { setShowAddCombo(false); setEditingComboId(null); }} role="dialog" aria-modal="true" aria-labelledby="add-combo-title">
+            <div class="modal-content" style="width:560px;max-height:85vh;overflow-y:auto" onClick={e => e.stopPropagation()}>
+              <h2 id="add-combo-title">{editingComboId ? 'Edit Combo' : 'Create Combo'}</h2>
+              <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px">
+                Define a fallback chain. Requests to this combo name try each model in order.
+              </p>
               <div class="form-group">
                 <Label text="Name" tip="A short name for this routing combo." />
                 <input type="text" placeholder="e.g. Budget Friendly"
@@ -353,13 +391,10 @@ export function Providers() {
                   </div>
                 )}
 
-                {/* Search to add */}
+                {/* Search to add — dropdown opens upward to avoid modal overflow */}
                 <div style="position:relative">
-                  <input type="text" placeholder="Search models to add..." value={comboSearch}
-                    onInput={e => setComboSearch(e.target.value)} />
-
                   {comboSearch && searchResults.length > 0 && (
-                    <div style="position:absolute;top:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:0 0 6px 6px;max-height:250px;overflow-y:auto;z-index:10">
+                    <div style="position:absolute;bottom:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:6px 6px 0 0;max-height:200px;overflow-y:auto;z-index:100;box-shadow:0 -4px 24px rgba(0,0,0,0.4)">
                       {searchResults.slice(0, 15).map(m => (
                         <div key={m.id} style="padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)"
                           onMouseDown={() => addModel(m)}
@@ -367,28 +402,33 @@ export function Providers() {
                           onMouseLeave={e => e.currentTarget.style.background = ''}>
                           <div>
                             <span style="font-family:var(--mono);color:var(--primary)">{m.id}</span>
-                            <span class={`badge badge-${m.tier === 'strong' ? 'blue' : m.tier === 'fast' ? 'green' : 'gray'}`}
-                              style="margin-left:6px">{m.tier}</span>
+                            {m.tier && <span class={`badge badge-${m.tier === 'strong' ? 'blue' : m.tier === 'fast' ? 'green' : 'gray'}`}
+                              style="margin-left:6px">{m.tier}</span>}
                           </div>
                           <div style="color:var(--text-muted);margin-top:2px">
-                            {m.input_cost === 0 ? 'Free' : `$${m.input_cost} in / $${m.output_cost} out per 1M tokens`}
+                            {!m.input_cost && !m.output_cost ? '' : m.input_cost === 0 ? 'Free' : `$${m.input_cost} in / $${m.output_cost} out per 1M tokens`}
                             {m.context_window > 0 && ` · ${(m.context_window / 1000).toFixed(0)}K context`}
                           </div>
                         </div>
                       ))}
                     </div>
                   )}
+                  <input type="text" placeholder="+ Add model (type to search)..." value={comboSearch}
+                    onInput={e => setComboSearch(e.target.value)} />
                 </div>
               </div>
 
               <div style="display:flex;gap:0.5rem;margin-top:1rem">
                 <button class="btn-primary" onClick={() => {
                   const models = (comboForm.models || []).map(m => ({
-                    provider_type: m.provider_type, model: m.model, priority: m.priority,
+                    provider_type: m.provider_type || m.provider, model: m.model || m.model_id, priority: m.priority,
                   }));
                   saveCombo({ ...comboForm, models: JSON.stringify(models) });
-                }} disabled={!comboForm.name || !(comboForm.models || []).length}>Create</button>
-                <button class="btn-secondary" onClick={() => setShowAddCombo(false)}>Cancel</button>
+                  setEditingComboId(null);
+                }} disabled={!comboForm.name || !(comboForm.models || []).length}>
+                  {editingComboId ? 'Save Changes' : 'Create'}
+                </button>
+                <button class="btn-secondary" onClick={() => { setShowAddCombo(false); setEditingComboId(null); }}>Cancel</button>
               </div>
             </div>
           </div>

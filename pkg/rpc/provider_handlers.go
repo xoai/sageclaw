@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/xoai/sageclaw/pkg/provider"
@@ -370,6 +372,16 @@ func (s *Server) handleCombosCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
+
+	// Sync combo to router for live resolution.
+	if s.router != nil {
+		var models []provider.ComboModel
+		if json.Unmarshal(p.Models, &models) == nil && len(models) > 0 {
+			s.router.SetCombo(id, provider.Combo{
+				Name: p.Name, Strategy: p.Strategy, Models: models,
+			})
+		}
+	}
 	writeJSON(w, map[string]string{"id": id, "status": "created"})
 }
 
@@ -390,6 +402,37 @@ func (s *Server) handleCombosDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if any agents are using this combo.
+	comboRef := "combo:" + id
+	var affectedAgents []string
+	if s.agentsDir != "" {
+		entries, _ := os.ReadDir(s.agentsDir)
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			identityPath := filepath.Join(s.agentsDir, entry.Name(), "identity.yaml")
+			data, err := os.ReadFile(identityPath)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(data), comboRef) {
+				affectedAgents = append(affectedAgents, entry.Name())
+			}
+		}
+	}
+
 	s.store.DB().ExecContext(r.Context(), `DELETE FROM combos WHERE id = ?`, id)
-	writeJSON(w, map[string]string{"id": id, "status": "deleted"})
+
+	// Remove combo from router.
+	if s.router != nil {
+		s.router.RemoveCombo(id)
+	}
+
+	result := map[string]any{"id": id, "status": "deleted"}
+	if len(affectedAgents) > 0 {
+		result["warning"] = fmt.Sprintf("Combo was used by agents: %s. They will fall back to the default tier.", strings.Join(affectedAgents, ", "))
+		result["affected_agents"] = affectedAgents
+	}
+	writeJSON(w, result)
 }
