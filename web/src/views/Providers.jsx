@@ -114,7 +114,11 @@ export function Providers() {
     loadCombos();
   };
 
-  const typeColors = { anthropic: '#d4a574', openai: '#74aa9c', gemini: '#4285f4', openrouter: '#f59e0b', github: '#6e40c9', ollama: '#888' };
+  const typeColors = {
+    anthropic: 'var(--brand-anthropic)', openai: 'var(--brand-openai)',
+    gemini: 'var(--brand-gemini)', openrouter: 'var(--brand-openrouter)',
+    github: 'var(--brand-github)', ollama: 'var(--brand-ollama)',
+  };
   const typeIcon = (type) => (
     <span style={`display:inline-block;width:10px;height:10px;border-radius:50%;background:${typeColors[type] || '#888'};margin-right:8px`} />
   );

@@ -357,7 +357,7 @@ export function Skills() {
 
                 {/* Script warning */}
                 {preview.hasScripts && (
-                  <div class="card" style="padding:12px;margin-bottom:16px;border-color:var(--warning);background:rgba(255,165,0,0.05)">
+                  <div class="card" style="padding:12px;margin-bottom:16px;border-color:var(--warning);background:var(--surface)">
                     <div style="font-weight:600;font-size:13px;color:var(--warning);margin-bottom:4px">
                       This skill contains executable scripts
                     </div>

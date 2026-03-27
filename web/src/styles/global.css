@@ -35,6 +35,14 @@
   --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
+  /* Provider brand colors */
+  --brand-anthropic: #d4a574;
+  --brand-openai: #74aa9c;
+  --brand-gemini: #4285f4;
+  --brand-openrouter: #f59e0b;
+  --brand-github: #6e40c9;
+  --brand-ollama: #8b949e;
+
   /* Z-index scale */
   --z-tooltip: 50;
   --z-overlay: 90;
@@ -131,6 +139,19 @@ button { font-family: var(--sans); }
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
+}
+
+.content h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* Page subtitle — muted text below h1 */
+.page-subtitle {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 0;
 }
 
 /* Dashboard section label — used for section headings on overview */
