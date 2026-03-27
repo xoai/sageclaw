@@ -36,8 +36,15 @@ type AudioStore interface {
 type streamMsg struct {
 	chatID    string
 	messageID int
+	draftID   int // Unique draft identifier for sendMessageDraft (Bot API 9.5).
 	text      string
 	lastEdit  time.Time
+}
+
+// recentStream tracks a stream that was recently ended, to prevent
+// sendResponse from sending a duplicate message.
+type recentStream struct {
+	endedAt time.Time
 }
 
 // Adapter implements the Channel interface for Telegram.
@@ -53,8 +60,9 @@ type Adapter struct {
 	audioStore  AudioStore // Optional: for voice message handling.
 
 	// Streaming: progressive message editing.
-	streamMu   sync.Mutex
-	streams    map[string]*streamMsg // sessionID → active stream
+	streamMu      sync.Mutex
+	streams       map[string]*streamMsg    // sessionID → active stream
+	recentStreams map[string]*recentStream // sessionID → recently ended (prevents duplicate sends)
 }
 
 // New creates a new Telegram adapter.
@@ -64,7 +72,8 @@ func New(connID, token string, opts ...Option) *Adapter {
 		token:   token,
 		client:  &http.Client{Timeout: time.Duration(pollTimeout+10) * time.Second},
 		baseURL: telegramAPI + token,
-		streams: make(map[string]*streamMsg),
+		streams:       make(map[string]*streamMsg),
+		recentStreams: make(map[string]*recentStream),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -304,13 +313,23 @@ func (a *Adapter) sendResponse(env bus.Envelope) {
 		// in the progressively edited message. Just finalize with formatting.
 		a.streamMu.Lock()
 		sm, hasStream := a.streams[env.SessionID]
+		_, wasRecentStream := a.recentStreams[env.SessionID]
 		a.streamMu.Unlock()
+
 		if hasStream && sm != nil {
-			// Update stream text with final response and end.
+			// Stream still active — update text and finalize.
 			a.streamMu.Lock()
 			sm.text = text
 			a.streamMu.Unlock()
 			a.endStream(env.SessionID)
+			continue
+		}
+		if wasRecentStream {
+			// Stream already ended (event forwarder handled it).
+			// Clean up and skip to avoid duplicate message.
+			a.streamMu.Lock()
+			delete(a.recentStreams, env.SessionID)
+			a.streamMu.Unlock()
 			continue
 		}
 
@@ -336,48 +355,51 @@ func (a *Adapter) OnAgentEvent(sessionID, chatID, eventType, text string) {
 	}
 }
 
-// streamChunk accumulates text and progressively edits the Telegram message.
-// Throttled to max 1 edit per second to avoid Telegram rate limits.
+// streamChunk accumulates text and sends draft updates to Telegram.
+// Uses sendMessageDraft (Bot API 9.5) for real-time streaming — shows a
+// draft bubble that updates with animation when using the same draft_id.
+// Throttled to max 2 drafts per second.
 func (a *Adapter) streamChunk(sessionID, chatID, delta string) {
 	a.streamMu.Lock()
 	sm, exists := a.streams[sessionID]
 
 	if !exists {
-		// First chunk — send a new message.
-		a.streamMu.Unlock()
-		msgID := a.sendPlainMessage(chatID, delta)
-		if msgID == 0 {
-			return
+		// First chunk — generate a draft_id and initialize stream.
+		// draft_id must be non-zero; use lower 31 bits of current time as unique ID.
+		draftID := int(time.Now().UnixMilli() & 0x7FFFFFFF)
+		if draftID == 0 {
+			draftID = 1
 		}
-		a.streamMu.Lock()
 		a.streams[sessionID] = &streamMsg{
-			chatID:    chatID,
-			messageID: msgID,
-			text:      delta,
-			lastEdit:  time.Now(),
+			chatID:   chatID,
+			draftID:  draftID,
+			text:     delta,
+			lastEdit: time.Now(),
 		}
 		a.streamMu.Unlock()
+		a.sendMessageDraft(chatID, draftID, delta)
 		return
 	}
 
 	// Accumulate text.
 	sm.text += delta
 
-	// Throttle: edit at most once per second.
-	if time.Since(sm.lastEdit) < time.Second {
+	// Throttle: send draft at most every 500ms.
+	if time.Since(sm.lastEdit) < 500*time.Millisecond {
 		a.streamMu.Unlock()
 		return
 	}
 	text := sm.text
-	msgID := sm.messageID
+	draftID := sm.draftID
 	sm.lastEdit = time.Now()
 	a.streamMu.Unlock()
 
-	// Edit message with accumulated text (plain text, no markdown during streaming).
-	a.editMessageText(chatID, msgID, text)
+	// Update the draft with accumulated text (same draft_id = animated update).
+	a.sendMessageDraft(chatID, draftID, text)
 }
 
-// endStream finalizes streaming: apply MarkdownV2 formatting on the final text.
+// endStream finalizes streaming: send the real message with MarkdownV2 formatting.
+// The draft is replaced by the final sendMessage call.
 func (a *Adapter) endStream(sessionID string) {
 	a.streamMu.Lock()
 	sm, exists := a.streams[sessionID]
@@ -386,34 +408,31 @@ func (a *Adapter) endStream(sessionID string) {
 		return
 	}
 	delete(a.streams, sessionID)
+	// Mark as recently ended so sendResponse skips duplicate send.
+	a.recentStreams[sessionID] = &recentStream{endedAt: time.Now()}
 	a.streamMu.Unlock()
 
-	// Final edit with MarkdownV2 formatting.
-	formatted := toTelegramMarkdown(sm.text)
-	params := url.Values{
-		"chat_id":    {sm.chatID},
-		"message_id": {strconv.Itoa(sm.messageID)},
-		"text":       {formatted},
-		"parse_mode": {"MarkdownV2"},
+	// Finalize: send the real message with MarkdownV2 (replaces the draft).
+	a.sendMessage(sm.chatID, sm.text)
+}
+
+// sendMessageDraft sends or updates a draft message in the chat.
+// Bot API 9.5: shows a draft bubble that updates with animation when
+// called with the same draft_id. draft_id must be non-zero.
+func (a *Adapter) sendMessageDraft(chatID string, draftID int, text string) {
+	if len(text) > maxMessageLen {
+		text = text[:maxMessageLen]
 	}
-	resp, err := a.client.PostForm(a.baseURL+"/editMessageText", params)
+	params := url.Values{
+		"chat_id":  {chatID},
+		"draft_id": {strconv.Itoa(draftID)},
+		"text":     {text},
+	}
+	resp, err := a.client.PostForm(a.baseURL+"/sendMessageDraft", params)
 	if err != nil {
 		return
 	}
-	defer resp.Body.Close()
-
-	// If MarkdownV2 fails, try plain text.
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		if strings.Contains(string(body), "can't parse") {
-			params.Set("text", sm.text)
-			params.Del("parse_mode")
-			resp2, err := a.client.PostForm(a.baseURL+"/editMessageText", params)
-			if err == nil {
-				resp2.Body.Close()
-			}
-		}
-	}
+	resp.Body.Close()
 }
 
 // sendPlainMessage sends a plain text message and returns its message_id.
