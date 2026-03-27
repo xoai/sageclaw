@@ -491,6 +491,7 @@ func run() error {
 	tool.RegisterGraph(toolReg, graphOps)
 	tool.RegisterCron(toolReg, appStore)
 	tool.RegisterSpawn(toolReg)
+	tool.RegisterPlan(toolReg)
 
 	// --- Agent configs (file-first, with DB/YAML fallback) ---
 	agentsDir := filepath.Join(f.workspace, "agents")
