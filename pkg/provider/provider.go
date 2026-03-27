@@ -21,6 +21,11 @@ type Provider interface {
 	ChatStream(ctx context.Context, req *canonical.Request) (<-chan StreamEvent, error)
 }
 
+// ModelLister is an optional interface for providers that can list available models.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]ModelInfo, error)
+}
+
 // --- Live (bidirectional streaming) provider types ---
 
 // LiveMessage is sent from client to a live session.

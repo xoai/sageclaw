@@ -57,6 +57,46 @@ func (c *Client) Healthy(ctx context.Context) bool {
 	return resp.StatusCode == 200
 }
 
+// ListModels queries the Gemini API for available models.
+func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
+	url := fmt.Sprintf("%s/models?key=%s", c.baseURL, c.apiKey)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("gemini list models: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Models []struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"displayName"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	var models []provider.ModelInfo
+	for _, m := range result.Models {
+		// Name is "models/gemini-2.0-flash" — strip prefix.
+		modelID := strings.TrimPrefix(m.Name, "models/")
+		models = append(models, provider.ModelInfo{
+			ID:       "gemini/" + modelID,
+			Provider: "gemini",
+			ModelID:  modelID,
+			Name:     m.DisplayName,
+		})
+	}
+	return models, nil
+}
+
 func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.Response, error) {
 	model := c.resolveModel(req.Model)
 	body := toGeminiRequest(req)

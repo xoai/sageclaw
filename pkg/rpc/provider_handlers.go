@@ -256,6 +256,59 @@ func (s *Server) handleProvidersModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleProvidersModelsLive queries connected providers for their actual available models.
+func (s *Server) handleProvidersModelsLive(w http.ResponseWriter, r *http.Request) {
+	if s.router == nil {
+		writeJSON(w, map[string]any{"models": []any{}})
+		return
+	}
+
+	var allModels []map[string]any
+	seen := map[string]bool{}
+
+	// Query each registered provider that implements ModelLister.
+	s.router.ForEachProvider(func(name string, p provider.Provider) {
+		lister, ok := p.(provider.ModelLister)
+		if !ok {
+			return
+		}
+		models, err := lister.ListModels(r.Context())
+		if err != nil {
+			log.Printf("live models: %s: %v", name, err)
+			return
+		}
+		for _, m := range models {
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+
+			// Enrich with pricing from KnownModels if available.
+			entry := map[string]any{
+				"id":        m.ID,
+				"provider":  m.Provider,
+				"model_id":  m.ModelID,
+				"name":      m.Name,
+				"tier":      m.Tier,
+				"available": true,
+			}
+			if known := provider.FindModel(m.ModelID); known != nil {
+				entry["input_cost"] = known.InputCost
+				entry["output_cost"] = known.OutputCost
+				entry["context_window"] = known.ContextWindow
+				entry["name"] = known.Name
+				entry["tier"] = known.Tier
+			}
+			allModels = append(allModels, entry)
+		}
+	})
+
+	if allModels == nil {
+		allModels = []map[string]any{}
+	}
+	writeJSON(w, map[string]any{"models": allModels})
+}
+
 // --- Combos ---
 
 func (s *Server) handleCombosList(w http.ResponseWriter, r *http.Request) {

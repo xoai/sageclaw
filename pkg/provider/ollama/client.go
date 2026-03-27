@@ -106,4 +106,23 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// ListModels returns available Ollama models as ModelInfo.
+func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
+	names, err := c.Models(ctx)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]provider.ModelInfo, len(names))
+	for i, name := range names {
+		models[i] = provider.ModelInfo{
+			ID:       "ollama/" + name,
+			Provider: "ollama",
+			ModelID:  name,
+			Name:     name,
+			Tier:     "local",
+		}
+	}
+	return models, nil
+}
+
 var _ provider.Provider = (*Client)(nil)

@@ -301,21 +301,31 @@ func run() error {
 	routes := make(map[provider.Tier]provider.Route)
 	var defaultProvider provider.Provider
 
+	// Provider registration order:
+	// Strong tier: Anthropic > OpenAI > Gemini > OpenRouter > GitHub Copilot
+	// Fast tier:   Gemini > OpenAI > Anthropic > OpenRouter (best cost/speed ratio)
+
+	// Track providers for fast tier — registered after all providers are loaded.
+	var (
+		apClient  provider.Provider
+		opClient  provider.Provider
+		gpClient  provider.Provider
+		orpClient provider.Provider
+	)
+
 	if anthropicKey != "" {
 		ap := anthropic.NewClient(anthropicKey)
+		apClient = ap
 		routes[provider.TierStrong] = provider.Route{Provider: ap, Model: "claude-sonnet-4-20250514"}
-		routes[provider.TierFast] = provider.Route{Provider: ap, Model: "claude-haiku-4-5-20251001"}
 		defaultProvider = ap
-		log.Println("provider: anthropic (strong + fast)")
+		log.Println("provider: anthropic")
 	}
 
 	if openaiKey != "" {
 		op := openai.NewClient(openaiKey)
+		opClient = op
 		if _, exists := routes[provider.TierStrong]; !exists {
 			routes[provider.TierStrong] = provider.Route{Provider: op, Model: "gpt-4o"}
-		}
-		if _, exists := routes[provider.TierFast]; !exists {
-			routes[provider.TierFast] = provider.Route{Provider: op, Model: "gpt-4o-mini"}
 		}
 		if defaultProvider == nil {
 			defaultProvider = op
@@ -334,15 +344,12 @@ func run() error {
 	var geminiClient *gemini.Client
 	if geminiKey != "" {
 		geminiClient = gemini.NewClient(geminiKey)
-		gp := geminiClient
+		gpClient = geminiClient
 		if _, exists := routes[provider.TierStrong]; !exists {
-			routes[provider.TierStrong] = provider.Route{Provider: gp, Model: "gemini-2.0-flash"}
-		}
-		if _, exists := routes[provider.TierFast]; !exists {
-			routes[provider.TierFast] = provider.Route{Provider: gp, Model: "gemini-2.0-flash-lite"}
+			routes[provider.TierStrong] = provider.Route{Provider: geminiClient, Model: "gemini-2.0-flash"}
 		}
 		if defaultProvider == nil {
-			defaultProvider = gp
+			defaultProvider = geminiClient
 		}
 		log.Println("provider: gemini")
 	}
@@ -357,16 +364,16 @@ func run() error {
 	}
 	if openrouterKey != "" {
 		orp := openrouter.NewClient(openrouterKey)
+		orpClient = orp
 		if _, exists := routes[provider.TierStrong]; !exists {
 			routes[provider.TierStrong] = provider.Route{Provider: orp, Model: "anthropic/claude-sonnet-4-20250514"}
-		}
-		if _, exists := routes[provider.TierFast]; !exists {
-			routes[provider.TierFast] = provider.Route{Provider: orp, Model: "anthropic/claude-haiku-4-5-20251001"}
 		}
 		if defaultProvider == nil {
 			defaultProvider = orp
 		}
 		log.Println("provider: openrouter")
+
+		_ = orpClient // used below for fast tier
 	}
 
 	// GitHub Copilot.
@@ -402,6 +409,21 @@ func run() error {
 		log.Println("provider: ollama not available")
 	}
 
+	// Fast tier: Gemini > OpenAI > Anthropic > OpenRouter.
+	// These models offer the best speed/cost ratio for the fast tier.
+	if _, exists := routes[provider.TierFast]; !exists && gpClient != nil {
+		routes[provider.TierFast] = provider.Route{Provider: gpClient, Model: "gemini-3-flash-preview"}
+	}
+	if _, exists := routes[provider.TierFast]; !exists && opClient != nil {
+		routes[provider.TierFast] = provider.Route{Provider: opClient, Model: "gpt-5.4-mini"}
+	}
+	if _, exists := routes[provider.TierFast]; !exists && apClient != nil {
+		routes[provider.TierFast] = provider.Route{Provider: apClient, Model: "claude-haiku-4-5-20251001"}
+	}
+	if _, exists := routes[provider.TierFast]; !exists && orpClient != nil {
+		routes[provider.TierFast] = provider.Route{Provider: orpClient, Model: "anthropic/claude-haiku-4-5-20251001"}
+	}
+
 	noProviders := defaultProvider == nil
 	if noProviders {
 		log.Println("warning: no providers available — dashboard will work but agent chat requires ANTHROPIC_API_KEY, OPENAI_API_KEY, or Ollama")
@@ -424,6 +446,20 @@ func run() error {
 			return fmt.Errorf("creating router: %w", err)
 		}
 		log.Printf("router: tiers=%v fallback=%s", router.Tiers(), router.Fallback())
+
+		// Register providers for model discovery and combo resolution.
+		if apClient != nil {
+			router.RegisterProvider("anthropic", apClient)
+		}
+		if opClient != nil {
+			router.RegisterProvider("openai", opClient)
+		}
+		if gpClient != nil {
+			router.RegisterProvider("gemini", gpClient)
+		}
+		if orpClient != nil {
+			router.RegisterProvider("openrouter", orpClient)
+		}
 	}
 
 	// --- Tool registry ---
@@ -957,7 +993,16 @@ Key behaviors:
 	// --- Channels ---
 	useCLI := f.forceCLI || (telegramToken == "" && discordToken == "")
 
-	if telegramToken != "" && !f.forceCLI {
+	// Check which platforms already have DB-configured connections.
+	// Skip legacy env var startup for those to avoid duplicate pollers.
+	dbPlatforms := map[string]bool{}
+	if dbConnsCheck, err := appStore.ListConnections(startCtx, store.ConnectionFilter{Status: "active"}); err == nil {
+		for _, conn := range dbConnsCheck {
+			dbPlatforms[conn.Platform] = true
+		}
+	}
+
+	if telegramToken != "" && !f.forceCLI && !dbPlatforms["telegram"] {
 		tg := telegram.New("telegram", telegramToken, telegram.WithAudioStore(audioStore))
 		if err := tg.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting telegram: %w", err)
@@ -965,9 +1010,11 @@ Key behaviors:
 		log.Println("channel: telegram (legacy)")
 		chanMgr.Register(tg)
 		defer tg.Stop(startCtx)
+	} else if telegramToken != "" && dbPlatforms["telegram"] {
+		log.Println("channel: telegram (skipping legacy — DB connection exists)")
 	}
 
-	if discordToken != "" {
+	if discordToken != "" && !dbPlatforms["discord"] {
 		dc := discord.New("discord", discordToken)
 		if err := dc.Start(startCtx, msgBus); err != nil {
 			log.Printf("warning: discord start failed: %v", err)

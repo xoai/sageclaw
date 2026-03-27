@@ -8,6 +8,7 @@ export function Providers() {
   const [tab, setTab] = useState('providers');
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [showAddCombo, setShowAddCombo] = useState(false);
+  const [expandedCombo, setExpandedCombo] = useState(null);
   const [providerForm, setProviderForm] = useState({ type: 'anthropic', name: '', api_key: '', base_url: '' });
   const [comboForm, setComboForm] = useState({ name: '', description: '', strategy: 'priority', models: [] });
   const [allModels, setAllModels] = useState([]);
@@ -182,19 +183,39 @@ export function Providers() {
           )}
 
           <div class="card-list">
-            {combos.map(c => (
-              <div class="card" key={c.id} style="padding:1rem">
-                <div style="display:flex;justify-content:space-between;align-items:center">
-                  <div>
-                    <strong style="font-size:1.1rem">{c.name}</strong>
-                    {c.is_preset && <span class="badge badge-blue" style="margin-left:0.75rem">preset</span>}
-                    <span class="badge badge-gray" style="margin-left:0.5rem">{c.strategy}</span>
+            {combos.map(c => {
+              const comboModels = Array.isArray(c.models) ? c.models : [];
+              return (
+                <div class="card" key={c.id} style="padding:1rem;cursor:pointer"
+                  onClick={() => setExpandedCombo(expandedCombo === c.id ? null : c.id)}>
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div>
+                      <strong style="font-size:1.1rem">{c.name}</strong>
+                      {c.is_preset && <span class="badge badge-blue" style="margin-left:0.75rem">preset</span>}
+                      <span class="badge badge-gray" style="margin-left:0.5rem">{c.strategy}</span>
+                      <span style="color:var(--text-muted);font-size:12px;margin-left:0.75rem">{comboModels.length} models</span>
+                    </div>
+                    <div style="display:flex;gap:6px;align-items:center">
+                      <span style="font-size:11px;color:var(--text-muted);font-family:var(--mono)">combo:{c.id}</span>
+                      {!c.is_preset && <button class="btn-small btn-danger" onClick={(e) => { e.stopPropagation(); deleteCombo(c.id); }}>Delete</button>}
+                    </div>
                   </div>
-                  {!c.is_preset && <button class="btn-small btn-danger" onClick={() => deleteCombo(c.id)}>Delete</button>}
+                  {c.description && <div style="color:var(--text-muted);font-size:13px;margin-top:4px">{c.description}</div>}
+                  {expandedCombo === c.id && comboModels.length > 0 && (
+                    <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+                      <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Fallback Chain</div>
+                      {comboModels.map((m, i) => (
+                        <div key={i} style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px">
+                          <span style="color:var(--text-muted);font-size:11px;width:18px;text-align:right">{i + 1}.</span>
+                          <span class="badge badge-gray" style="font-size:10px">{m.provider || m.split?.('/')[0] || '?'}</span>
+                          <span style="font-family:var(--mono)">{m.model_id || m}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <div style="color:var(--text-muted);font-size:13px;margin-top:4px">{c.description}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

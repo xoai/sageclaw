@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -315,7 +316,16 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 // resolveProvider returns the provider and model to use, consulting the router if available.
 func (l *Loop) resolveProvider() (provider.Provider, string) {
 	if l.router != nil {
-		tier := provider.Tier(l.config.Model)
+		model := l.config.Model
+		// Combo resolution: "combo:my-chain" → resolve from combo's fallback chain.
+		if provider.IsCombo(model) {
+			p, m, err := l.router.ResolveCombo(provider.ComboName(model))
+			if err == nil {
+				return p, m
+			}
+			log.Printf("combo %q resolution failed: %v, falling back to tier", model, err)
+		}
+		tier := provider.Tier(model)
 		return l.router.Resolve(tier)
 	}
 	return l.provider, l.config.Model

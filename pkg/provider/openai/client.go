@@ -3,9 +3,11 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -49,6 +51,50 @@ func NewClient(apiKey string, opts ...Option) *Client {
 
 func (c *Client) Name() string  { return "openai" }
 func (c *Client) APIKey() string { return c.apiKey }
+
+// ListModels queries the OpenAI API for available models.
+func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("openai list models: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	var models []provider.ModelInfo
+	for _, m := range result.Data {
+		// Filter to chat models only (skip embeddings, tts, whisper, dall-e).
+		if strings.HasPrefix(m.ID, "text-embedding") || strings.HasPrefix(m.ID, "tts-") ||
+			strings.HasPrefix(m.ID, "whisper") || strings.HasPrefix(m.ID, "dall-e") {
+			continue
+		}
+		models = append(models, provider.ModelInfo{
+			ID:       "openai/" + m.ID,
+			Provider: "openai",
+			ModelID:  m.ID,
+			Name:     m.ID,
+		})
+	}
+	return models, nil
+}
 
 func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.Response, error) {
 	req.Stream = false

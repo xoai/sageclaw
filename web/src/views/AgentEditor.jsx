@@ -150,6 +150,7 @@ export default function AgentEditor({ id }) {
 
 function IdentityTab({ agent, update, isNew, modelData }) {
   const models = modelData?.models || [];
+  const combos = modelData?.combos || [];
   const connected = modelData?.connected || {};
 
   // Group models by provider.
@@ -203,6 +204,15 @@ function IdentityTab({ agent, update, isNew, modelData }) {
             <option value="fast">fast — Lower latency (auto-selects)</option>
             <option value="local">local — Ollama, free</option>
           </optgroup>
+          {combos.length > 0 && (
+            <optgroup label="Combos (custom fallback chains)">
+              {combos.map(c => (
+                <option key={c.id} value={`combo:${c.id}`}>
+                  {c.name} — {c.strategy} ({(c.models || []).length} models)
+                </option>
+              ))}
+            </optgroup>
+          )}
           {Object.entries(grouped).map(([prov, provModels]) => (
             <optgroup key={prov} label={`${providerLabels[prov] || prov} ${connected[prov] ? '(connected)' : '(not connected)'}`}>
               {provModels.map(m => (

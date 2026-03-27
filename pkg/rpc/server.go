@@ -206,6 +206,7 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("POST /api/providers", srv.authGuard(srv.handleProvidersCreate))
 	mux.HandleFunc("DELETE /api/providers/", srv.authGuard(srv.handleProvidersDelete))
 	mux.HandleFunc("GET /api/providers/models", srv.authGuard(srv.handleProvidersModels))
+	mux.HandleFunc("GET /api/providers/models/live", srv.authGuard(srv.handleProvidersModelsLive))
 
 	// Combos (authenticated).
 	mux.HandleFunc("GET /api/combos", srv.authGuard(srv.handleCombosList))
