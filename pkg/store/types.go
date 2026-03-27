@@ -73,6 +73,7 @@ type DelegationLink struct {
 	TargetID      string
 	Direction     string // "sync" or "async"
 	MaxConcurrent int
+	TimeoutSec    int // Per-link timeout in seconds. 0 = use default (300s).
 }
 
 // DelegationRecord captures a delegation execution.

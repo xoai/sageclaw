@@ -13,7 +13,10 @@ import (
 	"github.com/xoai/sageclaw/pkg/tool"
 )
 
-const maxDelegationDepth = 3
+const (
+	maxDelegationDepth      = 3
+	defaultDelegationTimeout = 300 // 5 minutes default per delegation.
+)
 
 type delegationDepthKey struct{}
 
@@ -99,8 +102,16 @@ func (d *Delegator) Delegate(ctx context.Context, sourceID, targetID, prompt, mo
 		mode = link.Direction
 	}
 
+	// Apply per-link timeout (or default).
+	timeoutSec := link.TimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = defaultDelegationTimeout
+	}
+
 	if mode == "sync" {
-		result, err := d.runSync(ctx, targetConfig, prompt, depth)
+		delegateCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+		defer cancel()
+		result, err := d.runSync(delegateCtx, targetConfig, prompt, depth)
 		now := time.Now().UTC()
 		if err != nil {
 			d.updateRecord(ctx, recordID, link.ID, "failed", err.Error(), &now)
@@ -110,9 +121,11 @@ func (d *Delegator) Delegate(ctx context.Context, sourceID, targetID, prompt, mo
 		return recordID, result, nil
 	}
 
-	// Async — run in goroutine, return immediately.
+	// Async — run in goroutine with timeout.
 	go func() {
-		result, err := d.runSync(context.Background(), targetConfig, prompt, depth)
+		asyncCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+		defer cancel()
+		result, err := d.runSync(asyncCtx, targetConfig, prompt, depth)
 		now := time.Now().UTC()
 		if err != nil {
 			d.updateRecord(context.Background(), recordID, link.ID, "failed", err.Error(), &now)

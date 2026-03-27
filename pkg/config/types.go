@@ -32,6 +32,7 @@ type DelegationLinkConfig struct {
 	Target        string `yaml:"target"`
 	Direction     string `yaml:"direction"`
 	MaxConcurrent int    `yaml:"max_concurrent"`
+	TimeoutSec    int    `yaml:"timeout"` // Per-link timeout in seconds. 0 = default (300s).
 }
 
 // TeamConfig defines a team.

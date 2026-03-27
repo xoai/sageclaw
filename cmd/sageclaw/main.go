@@ -609,6 +609,7 @@ Key behaviors:
 			ID: fmt.Sprintf("link_%s_%s", dl.Source, dl.Target),
 			SourceID: dl.Source, TargetID: dl.Target,
 			Direction: dl.Direction, MaxConcurrent: maxC,
+			TimeoutSec: dl.TimeoutSec,
 		})
 	}
 
