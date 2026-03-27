@@ -161,6 +161,7 @@ func (s *Store) SearchMemories(ctx context.Context, query string, limit int) ([]
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT m.id, m.title, m.content, m.tags, m.content_hash,
 			m.created_at, m.updated_at, m.accessed_at, m.access_count,
+			COALESCE(m.confidence, 0.8),
 			bm25(memories_fts) AS score
 		 FROM memories_fts fts
 		 JOIN memories m ON m.rowid = fts.rowid
@@ -181,7 +182,7 @@ func (s *Store) SearchMemories(ctx context.Context, query string, limit int) ([]
 		var tagsJSON, createdAt, updatedAt, accessedAt string
 		var score float64
 		if err := rows.Scan(&m.ID, &m.Title, &m.Content, &tagsJSON, &m.ContentHash,
-			&createdAt, &updatedAt, &accessedAt, &m.AccessCount, &score); err != nil {
+			&createdAt, &updatedAt, &accessedAt, &m.AccessCount, &m.Confidence, &score); err != nil {
 			return nil, nil, fmt.Errorf("scanning memory: %w", err)
 		}
 		m.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)

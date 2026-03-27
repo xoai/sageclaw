@@ -31,3 +31,10 @@ type MemoryEngine interface {
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, tags []string, limit, offset int) ([]Entry, error)
 }
+
+// ConfidenceWriter is an optional interface for memory engines that support
+// confidence-weighted writes. Self-learning corrections use 0.9, general
+// facts 0.7, inferred preferences 0.5.
+type ConfidenceWriter interface {
+	WriteWithConfidence(ctx context.Context, content, title string, tags []string, confidence float64) (string, error)
+}

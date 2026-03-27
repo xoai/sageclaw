@@ -54,6 +54,7 @@ type Memory struct {
 	UpdatedAt   time.Time
 	AccessedAt  time.Time
 	AccessCount int
+	Confidence  float64 // 0.0-1.0: trust level (0.9=correction, 0.8=default, 0.7=fact, 0.5=inferred)
 }
 
 // CronJob represents a scheduled job.

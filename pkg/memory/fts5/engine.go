@@ -30,6 +30,22 @@ func (e *Engine) Write(ctx context.Context, content, title string, tags []string
 	return id, nil
 }
 
+// WriteWithConfidence writes a memory with an explicit confidence score.
+func (e *Engine) WriteWithConfidence(ctx context.Context, content, title string, tags []string, confidence float64) (string, error) {
+	id, dup, err := e.store.WriteMemory(ctx, content, title, tags)
+	if err != nil {
+		return "", err
+	}
+	if dup {
+		return id, nil
+	}
+	// Update confidence on the newly created memory.
+	if confidence > 0 && confidence <= 1.0 {
+		e.store.DB().ExecContext(ctx, `UPDATE memories SET confidence = ? WHERE id = ?`, confidence, id)
+	}
+	return id, nil
+}
+
 // Delete removes a memory by ID.
 func (e *Engine) Delete(ctx context.Context, id string) error {
 	return e.store.DeleteMemory(ctx, id)
@@ -81,12 +97,18 @@ func (e *Engine) Search(ctx context.Context, query string, opts memory.SearchOpt
 		mems, scores = filterByTags(mems, scores, opts.FilterTags)
 	}
 
-	// Apply tag boost and recency decay.
+	// Apply tag boost, confidence weighting, and recency decay.
 	entries := make([]memory.Entry, len(mems))
 	for i, m := range mems {
 		score := -scores[i] // BM25 returns negative scores; negate for ranking.
 		score = applyTagBoost(score, m.Tags, opts.Tags)
 		score = applyRecencyDecay(score, m.UpdatedAt)
+		// Weight by confidence: higher confidence memories rank higher.
+		confidence := m.Confidence
+		if confidence <= 0 {
+			confidence = 0.8 // Default for pre-migration memories.
+		}
+		score *= confidence
 		entries[i] = toEntry(m)
 		entries[i].Score = score
 	}
