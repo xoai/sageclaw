@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/bus"
@@ -31,6 +32,14 @@ type AudioStore interface {
 	Exists(path string) bool
 }
 
+// streamMsg tracks a message being progressively edited during streaming.
+type streamMsg struct {
+	chatID    string
+	messageID int
+	text      string
+	lastEdit  time.Time
+}
+
 // Adapter implements the Channel interface for Telegram.
 type Adapter struct {
 	connID      string // Connection ID: "tg_abc123"
@@ -42,6 +51,10 @@ type Adapter struct {
 	botID       int64  // Bot user ID (from getMe).
 	botUsername string // Bot username without @ (from getMe).
 	audioStore  AudioStore // Optional: for voice message handling.
+
+	// Streaming: progressive message editing.
+	streamMu   sync.Mutex
+	streams    map[string]*streamMsg // sessionID → active stream
 }
 
 // New creates a new Telegram adapter.
@@ -51,6 +64,7 @@ func New(connID, token string, opts ...Option) *Adapter {
 		token:   token,
 		client:  &http.Client{Timeout: time.Duration(pollTimeout+10) * time.Second},
 		baseURL: telegramAPI + token,
+		streams: make(map[string]*streamMsg),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -60,6 +74,9 @@ func New(connID, token string, opts ...Option) *Adapter {
 
 // Option configures the adapter.
 type Option func(*Adapter)
+
+// ConnID returns the adapter's connection ID.
+func (a *Adapter) ConnID() string { return a.connID }
 
 // WithBaseURL overrides the API URL (for testing).
 func WithBaseURL(url string) Option {
@@ -266,10 +283,11 @@ func (a *Adapter) sendResponse(env bus.Envelope) {
 	for _, msg := range env.Messages {
 		// Check for audio content first.
 		if audio := canonical.ExtractAudio(msg); audio != nil {
+			// If streaming was active, end it first.
+			a.endStream(env.SessionID)
 			a.sendChatAction(env.ChatID, "upload_voice")
 			if err := a.sendVoice(env.ChatID, audio); err != nil {
 				log.Printf("telegram: sendVoice failed: %v, falling back to text", err)
-				// Fallback: send transcript as text.
 				if audio.Transcript != "" {
 					a.sendMessage(env.ChatID, audio.Transcript)
 				}
@@ -282,7 +300,21 @@ func (a *Adapter) sendResponse(env bus.Envelope) {
 			continue
 		}
 
-		// Chunk long messages (Telegram 4096 char limit).
+		// If streaming was active for this session, the text is already
+		// in the progressively edited message. Just finalize with formatting.
+		a.streamMu.Lock()
+		sm, hasStream := a.streams[env.SessionID]
+		a.streamMu.Unlock()
+		if hasStream && sm != nil {
+			// Update stream text with final response and end.
+			a.streamMu.Lock()
+			sm.text = text
+			a.streamMu.Unlock()
+			a.endStream(env.SessionID)
+			continue
+		}
+
+		// No streaming — send normally.
 		chunks := chunkText(text, maxMessageLen)
 		if len(chunks) > 1 {
 			a.sendChatAction(env.ChatID, "typing")
@@ -291,6 +323,136 @@ func (a *Adapter) sendResponse(env bus.Envelope) {
 			a.sendMessage(env.ChatID, chunk)
 		}
 	}
+}
+
+// OnAgentEvent handles agent events for progressive message editing.
+// Called from the pipeline's onEvent callback for Telegram sessions.
+func (a *Adapter) OnAgentEvent(sessionID, chatID, eventType, text string) {
+	switch eventType {
+	case "chunk":
+		a.streamChunk(sessionID, chatID, text)
+	case "run.completed", "run.failed":
+		a.endStream(sessionID)
+	}
+}
+
+// streamChunk accumulates text and progressively edits the Telegram message.
+// Throttled to max 1 edit per second to avoid Telegram rate limits.
+func (a *Adapter) streamChunk(sessionID, chatID, delta string) {
+	a.streamMu.Lock()
+	sm, exists := a.streams[sessionID]
+
+	if !exists {
+		// First chunk — send a new message.
+		a.streamMu.Unlock()
+		msgID := a.sendPlainMessage(chatID, delta)
+		if msgID == 0 {
+			return
+		}
+		a.streamMu.Lock()
+		a.streams[sessionID] = &streamMsg{
+			chatID:    chatID,
+			messageID: msgID,
+			text:      delta,
+			lastEdit:  time.Now(),
+		}
+		a.streamMu.Unlock()
+		return
+	}
+
+	// Accumulate text.
+	sm.text += delta
+
+	// Throttle: edit at most once per second.
+	if time.Since(sm.lastEdit) < time.Second {
+		a.streamMu.Unlock()
+		return
+	}
+	text := sm.text
+	msgID := sm.messageID
+	sm.lastEdit = time.Now()
+	a.streamMu.Unlock()
+
+	// Edit message with accumulated text (plain text, no markdown during streaming).
+	a.editMessageText(chatID, msgID, text)
+}
+
+// endStream finalizes streaming: apply MarkdownV2 formatting on the final text.
+func (a *Adapter) endStream(sessionID string) {
+	a.streamMu.Lock()
+	sm, exists := a.streams[sessionID]
+	if !exists {
+		a.streamMu.Unlock()
+		return
+	}
+	delete(a.streams, sessionID)
+	a.streamMu.Unlock()
+
+	// Final edit with MarkdownV2 formatting.
+	formatted := toTelegramMarkdown(sm.text)
+	params := url.Values{
+		"chat_id":    {sm.chatID},
+		"message_id": {strconv.Itoa(sm.messageID)},
+		"text":       {formatted},
+		"parse_mode": {"MarkdownV2"},
+	}
+	resp, err := a.client.PostForm(a.baseURL+"/editMessageText", params)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	// If MarkdownV2 fails, try plain text.
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), "can't parse") {
+			params.Set("text", sm.text)
+			params.Del("parse_mode")
+			resp2, err := a.client.PostForm(a.baseURL+"/editMessageText", params)
+			if err == nil {
+				resp2.Body.Close()
+			}
+		}
+	}
+}
+
+// sendPlainMessage sends a plain text message and returns its message_id.
+func (a *Adapter) sendPlainMessage(chatID, text string) int {
+	params := url.Values{
+		"chat_id": {chatID},
+		"text":    {text},
+	}
+	resp, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			MessageID int `json:"message_id"`
+		} `json:"result"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Result.MessageID
+}
+
+// editMessageText edits an existing message with plain text (no formatting).
+func (a *Adapter) editMessageText(chatID string, messageID int, text string) {
+	if len(text) > maxMessageLen {
+		text = text[:maxMessageLen]
+	}
+	params := url.Values{
+		"chat_id":    {chatID},
+		"message_id": {strconv.Itoa(messageID)},
+		"text":       {text},
+	}
+	resp, err := a.client.PostForm(a.baseURL+"/editMessageText", params)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 // sendChatAction sends a typing/recording indicator to the chat.

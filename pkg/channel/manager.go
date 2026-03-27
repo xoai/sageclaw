@@ -161,6 +161,15 @@ func (m *Manager) Running() []string {
 	return ids
 }
 
+// ForEachChannel calls fn for each active channel.
+func (m *Manager) ForEachChannel(fn func(Channel)) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, ch := range m.channels {
+		fn(ch)
+	}
+}
+
 // Register adds an already-started channel (for channels started at boot).
 func (m *Manager) Register(ch Channel) {
 	m.mu.Lock()

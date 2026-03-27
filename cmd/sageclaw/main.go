@@ -706,6 +706,7 @@ Key behaviors:
 
 	// Forward-reference for SSE broadcast (set after RPC server is created).
 	var sseBroadcast func(agent.Event)
+	var telegramEventForwarder func(agent.Event)
 
 	// --- Voice messaging infrastructure ---
 	audioStoragePath := cfg.Audio.StoragePath
@@ -781,6 +782,10 @@ Key behaviors:
 				// Broadcast to SSE clients (web dashboard).
 				if sseBroadcast != nil {
 					sseBroadcast(e)
+				}
+				// Forward streaming events to Telegram adapters.
+				if telegramEventForwarder != nil {
+					telegramEventForwarder(e)
 				}
 			}, loopOpts...)
 	}
@@ -1178,6 +1183,33 @@ Key behaviors:
 		log.Println("channel: cli (interactive)")
 	} else {
 		log.Println("SageClaw is running. Listening for messages...")
+	}
+
+	// --- Telegram streaming forwarder ---
+	// Forward EventChunk/EventRunCompleted events to Telegram adapters
+	// for progressive message editing.
+	telegramEventForwarder = func(e agent.Event) {
+		if e.Type != agent.EventChunk && e.Type != agent.EventRunCompleted && e.Type != agent.EventRunFailed {
+			return
+		}
+		if e.SessionID == "" {
+			return
+		}
+		// Look up the session to get channel and chatID.
+		sess, err := appStore.GetSession(startCtx, e.SessionID)
+		if err != nil || sess == nil {
+			return
+		}
+		// Only forward to Telegram channels.
+		if !strings.HasPrefix(sess.Channel, "tg_") && sess.Channel != "telegram" {
+			return
+		}
+		// Find the Telegram adapter via channel manager.
+		chanMgr.ForEachChannel(func(ch channel.Channel) {
+			if tg, ok := ch.(*telegram.Adapter); ok && (tg.ConnID() == sess.Channel) {
+				tg.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
+			}
+		})
 	}
 
 	// --- SIGHUP for skill hot-reload ---
