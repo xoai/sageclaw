@@ -96,6 +96,9 @@ func main() {
 		case "onboard":
 			runOnboard()
 			return
+		case "upgrade":
+			runUpgrade()
+			return
 		case "backup":
 			runBackup()
 			return

@@ -123,3 +123,34 @@ func (s *Store) migrate() error {
 
 	return nil
 }
+
+// AppliedMigrations returns the list of applied migration names.
+func (s *Store) AppliedMigrations() ([]string, error) {
+	rows, err := s.db.Query("SELECT name FROM _migrations ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		rows.Scan(&name)
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// TotalMigrations returns the total number of migration files.
+func (s *Store) TotalMigrations() int {
+	entries, err := fs.ReadDir(migrationsFS, "migrations")
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			count++
+		}
+	}
+	return count
+}
