@@ -70,19 +70,41 @@ func AssembleSystemPrompt(cfg *AgentConfig) string {
 			TruncateContext(cfg.Bootstrap, 5000))
 	}
 
-	// Skills — inject SKILL.md content for each assigned marketplace skill.
+	// Skills — progressive loading.
+	// Core skills (memory, self-learning, ontology) are eagerly loaded.
+	// Other skills show a manifest with descriptions — use load_skill tool for full content.
 	if len(cfg.Skills.Skills) > 0 && cfg.SkillsDir != "" {
-		var skillParts []string
+		coreSkills := map[string]bool{"memory": true, "self-learning": true, "ontology": true}
+		var eagerParts []string
+		var manifestLines []string
+
 		for _, skillName := range cfg.Skills.Skills {
 			skillMD := filepath.Join(cfg.SkillsDir, skillName, "SKILL.md")
-			if data, err := os.ReadFile(skillMD); err == nil && len(data) > 0 {
+			data, err := os.ReadFile(skillMD)
+			if err != nil || len(data) == 0 {
+				continue
+			}
+
+			if coreSkills[skillName] {
+				// Eagerly load core skills.
 				content := TruncateContext(string(data), MaxContextFileChars)
-				skillParts = append(skillParts, fmt.Sprintf("## Skill: %s\n\n%s", skillName, content))
+				eagerParts = append(eagerParts, fmt.Sprintf("## Skill: %s\n\n%s", skillName, content))
+			} else {
+				// Extract description from frontmatter for manifest.
+				desc := extractFrontmatterField(string(data), "description")
+				if desc == "" {
+					desc = "No description available"
+				}
+				manifestLines = append(manifestLines, fmt.Sprintf("- %s: %s", skillName, desc))
 			}
 		}
-		if len(skillParts) > 0 {
-			parts = append(parts, "SKILLS: You have the following skills available. Use them when relevant to the user's request.\n\n"+
-				strings.Join(skillParts, "\n\n---\n\n"))
+
+		if len(eagerParts) > 0 {
+			parts = append(parts, "SKILLS (active):\n\n"+strings.Join(eagerParts, "\n\n---\n\n"))
+		}
+		if len(manifestLines) > 0 {
+			parts = append(parts, "AVAILABLE SKILLS (use load_skill tool to activate):\n"+
+				strings.Join(manifestLines, "\n"))
 		}
 	}
 
@@ -161,4 +183,24 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 	}
 
 	return rc
+}
+
+// extractFrontmatterField extracts a field value from YAML frontmatter.
+func extractFrontmatterField(content, field string) string {
+	if !strings.HasPrefix(content, "---") {
+		return ""
+	}
+	end := strings.Index(content[3:], "---")
+	if end < 0 {
+		return ""
+	}
+	fm := content[3 : 3+end]
+	for _, line := range strings.Split(fm, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, field+":") {
+			val := strings.TrimPrefix(line, field+":")
+			return strings.TrimSpace(strings.Trim(val, `"'`))
+		}
+	}
+	return ""
 }
