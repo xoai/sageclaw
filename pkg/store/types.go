@@ -23,6 +23,7 @@ type Session struct {
 	OutputTokens    int64
 	CompactionCount int
 	MessageCount    int
+	Title           string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	Metadata        map[string]string

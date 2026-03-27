@@ -42,10 +42,10 @@ func ExecuteShellTool(ctx context.Context, scriptPath string, input json.RawMess
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 
-	// Limit output size to 1MB.
-	const maxOutput = 1 << 20
+	// Limit output size to 16KB (~4000 tokens) to prevent context overflow.
+	const maxOutput = 16_000
 	if len(result) > maxOutput {
-		result = result[:maxOutput] + "\n... [truncated at 1MB]"
+		result = result[:maxOutput] + "\n... [truncated at 16KB — full output too large for context]"
 	}
 
 	if err != nil {

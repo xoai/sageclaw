@@ -27,8 +27,8 @@ type CompactionConfig struct {
 func DefaultCompactionConfig() CompactionConfig {
 	return CompactionConfig{
 		Enabled:          true,
-		MessageThreshold: 50,
-		TokenRatio:       0.75,
+		MessageThreshold: 50,  // Fallback — primary trigger is token budget.
+		TokenRatio:       0.60, // Trigger at 60% of context window to leave headroom.
 		KeepRecent:       0.30,
 		MinKeep:          4,
 	}

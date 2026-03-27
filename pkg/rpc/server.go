@@ -644,7 +644,7 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 
 	query := `SELECT id, COALESCE(key,''), channel, chat_id, agent_id, kind, COALESCE(label,''),
 		status, COALESCE(model,''), COALESCE(provider,''), input_tokens, output_tokens,
-		compaction_count, message_count, created_at, updated_at
+		compaction_count, message_count, COALESCE(title,''), created_at, updated_at
 	 FROM sessions WHERE 1=1`
 	var args []any
 
@@ -671,15 +671,16 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 
 	var sessions []map[string]any
 	for rows.Next() {
-		var id, key, channel, chatID, agentID, kind, label, status, model, provider, createdAt, updatedAt string
+		var id, key, channel, chatID, agentID, kind, label, status, model, provider, title, createdAt, updatedAt string
 		var inputTokens, outputTokens int64
 		var compactionCount, messageCount int
 		rows.Scan(&id, &key, &channel, &chatID, &agentID, &kind, &label,
 			&status, &model, &provider, &inputTokens, &outputTokens,
-			&compactionCount, &messageCount, &createdAt, &updatedAt)
+			&compactionCount, &messageCount, &title, &createdAt, &updatedAt)
 		sess := map[string]any{
 			"id": id, "key": key, "channel": channel, "chat_id": chatID,
 			"agent_id": agentID, "kind": kind, "label": label, "status": status,
+			"title": title,
 			"model": model, "provider": provider,
 			"input_tokens": inputTokens, "output_tokens": outputTokens,
 			"compaction_count": compactionCount, "message_count": messageCount,

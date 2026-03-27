@@ -113,6 +113,14 @@ func (s *Store) FindSessionByKey(ctx context.Context, key string) (*Session, err
 	return sess, nil
 }
 
+// UpdateSessionTitle sets the session title (typically from first user message).
+func (s *Store) UpdateSessionTitle(ctx context.Context, sessionID, title string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET title = ? WHERE id = ? AND (title IS NULL OR title = '')`,
+		title, sessionID)
+	return err
+}
+
 // UpdateSessionTokens updates token usage after an agent loop iteration.
 func (s *Store) UpdateSessionTokens(ctx context.Context, sessionID string, inputTokens, outputTokens int64, model, provider string) error {
 	_, err := s.db.ExecContext(ctx,

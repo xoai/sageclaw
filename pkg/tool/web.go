@@ -117,7 +117,7 @@ func webFetch() ToolFunc {
 
 		content := fmt.Sprintf("HTTP %d\n\n%s", resp.StatusCode, string(body))
 		if len(content) > maxOutputBytes {
-			content = content[:maxOutputBytes] + "\n... [truncated at 100KB]"
+			content = content[:maxOutputBytes] + "\n... [truncated at 16KB — full output too large for context]"
 		}
 
 		return &canonical.ToolResult{Content: content}, nil

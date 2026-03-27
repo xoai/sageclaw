@@ -15,7 +15,7 @@ import (
 const (
 	defaultExecTimeout = 30 * time.Second
 	maxExecTimeout     = 300 * time.Second
-	maxOutputBytes     = 100_000
+	maxOutputBytes     = 16_000 // ~4000 tokens — prevents context overflow after 2-3 tool calls
 )
 
 // RegisterExec registers the shell execution tool.
@@ -65,7 +65,7 @@ func execCommand(workdir string, disabledDenyGroups map[string]bool) ToolFunc {
 
 		// Truncate large output.
 		if len(result) > maxOutputBytes {
-			result = result[:maxOutputBytes] + "\n... [truncated at 100KB]"
+			result = result[:maxOutputBytes] + "\n... [truncated at 16KB — full output too large for context]"
 		}
 
 		if err != nil {

@@ -19,6 +19,7 @@ type SessionStore interface {
 	FindSessionWithThread(ctx context.Context, channel, chatID, threadID string) (*Session, error)
 	FindSessionByKey(ctx context.Context, key string) (*Session, error)
 	UpdateSessionTokens(ctx context.Context, sessionID string, inputTokens, outputTokens int64, model, provider string) error
+	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
 	AppendMessages(ctx context.Context, sessionID string, msgs []canonical.Message) error
 	GetMessages(ctx context.Context, sessionID string, limit int) ([]canonical.Message, error)
 }

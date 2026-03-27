@@ -48,8 +48,8 @@ func fsRead(sandbox *security.Sandbox) ToolFunc {
 
 		// Truncate large files.
 		content := string(data)
-		if len(content) > 100_000 {
-			content = content[:100_000] + "\n... [truncated at 100KB]"
+		if len(content) > maxOutputBytes {
+			content = content[:maxOutputBytes] + "\n... [truncated at 16KB — full output too large for context]"
 		}
 
 		return &canonical.ToolResult{Content: content}, nil

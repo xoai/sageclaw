@@ -54,6 +54,9 @@ func (m *mockPolicyStore) FindSessionByKey(context.Context, string) (*store.Sess
 func (m *mockPolicyStore) UpdateSessionTokens(context.Context, string, int64, int64, string, string) error {
 	panic("not implemented")
 }
+func (m *mockPolicyStore) UpdateSessionTitle(context.Context, string, string) error {
+	return nil
+}
 func (m *mockPolicyStore) AppendMessages(context.Context, string, []canonical.Message) error {
 	panic("not implemented")
 }

@@ -497,6 +497,23 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 		}
 	}
 
+	// Auto-title: set session title from first user message (if not already set).
+	if len(req.Messages) > 0 {
+		for _, msg := range req.Messages {
+			if msg.Role == "user" {
+				text := agent.ExtractText(msg)
+				if text != "" {
+					title := text
+					if len(title) > 80 {
+						title = title[:80]
+					}
+					p.store.UpdateSessionTitle(ctx, req.SessionID, title)
+					break
+				}
+			}
+		}
+	}
+
 	// Run PreResponse middleware (if configured).
 	if p.preResponse != nil && result.Error == nil {
 		hookData := &middleware.HookData{

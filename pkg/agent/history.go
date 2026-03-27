@@ -255,32 +255,38 @@ func sanitize(msgs []canonical.Message) []canonical.Message {
 }
 
 // NeedsCompaction checks if the message history needs compaction.
-// Two-tier: fast check on message count, then full token count.
+// Primary trigger: token budget (context window usage exceeds tokenRatio).
+// Fallback: message count threshold as a safety net.
+// The token-budget approach handles cases where a few messages with large
+// tool results consume most of the context window.
 func NeedsCompaction(msgs []canonical.Message, contextWindow, messageThreshold int, tokenRatio float64) bool {
 	if messageThreshold <= 0 {
 		messageThreshold = 50
 	}
 	if tokenRatio <= 0 {
-		tokenRatio = 0.75
+		tokenRatio = 0.60 // Trigger at 60% to leave headroom for response + tools.
 	}
 
-	// Fast check: message count.
-	if len(msgs) > messageThreshold {
-		return true
-	}
-
-	// Only do expensive token count if message count > 30.
-	if len(msgs) <= 30 {
+	// Skip if too few messages — not worth compacting.
+	if len(msgs) <= 6 {
 		return false
 	}
 
-	counter, err := tokenizer.Get()
-	if err != nil {
-		return false
+	// Token-budget check (primary trigger).
+	// Estimate context size and compare against model's context window.
+	if contextWindow > 0 {
+		counter, err := tokenizer.Get()
+		if err == nil {
+			total := counter.CountMessages(msgs)
+			if float64(total) > float64(contextWindow)*tokenRatio {
+				return true
+			}
+		}
 	}
 
-	total := counter.CountMessages(msgs)
-	return float64(total) > float64(contextWindow)*tokenRatio
+	// Message-count fallback — catches edge cases where token counting
+	// is unavailable or context window is unknown.
+	return len(msgs) > messageThreshold
 }
 
 // CompactionSplit splits messages into "to compact" and "to keep" portions.
