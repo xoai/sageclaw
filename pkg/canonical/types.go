@@ -63,13 +63,14 @@ type ImageSource struct {
 
 // Request is the canonical LLM request format.
 type Request struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	System      string    `json:"system,omitempty"`
-	Tools       []ToolDef `json:"tools,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Temperature float64   `json:"temperature,omitempty"`
-	Stream      bool      `json:"stream,omitempty"`
+	Model            string    `json:"model"`
+	Messages         []Message `json:"messages"`
+	System           string    `json:"system,omitempty"`
+	Tools            []ToolDef `json:"tools,omitempty"`
+	MaxTokens        int       `json:"max_tokens,omitempty"`
+	Temperature      float64   `json:"temperature,omitempty"`
+	Stream           bool      `json:"stream,omitempty"`
+	SystemPromptSize int       `json:"-"` // Estimated tokens in system prompt (for diagnostics, not sent to LLM).
 }
 
 // Response is the canonical LLM response format.

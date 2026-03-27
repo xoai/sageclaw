@@ -140,9 +140,10 @@ func (l *Loop) Inject(msg canonical.Message) {
 
 // RunResult holds the outcome of an agent loop execution.
 type RunResult struct {
-	Messages []canonical.Message // All messages from the run (including tool calls/results).
-	Usage    canonical.Usage     // Aggregated token usage.
-	Error    error
+	Messages         []canonical.Message // All messages from the run (including tool calls/results).
+	Usage            canonical.Usage     // Aggregated token usage.
+	Error            error
+	SystemPromptSize int // Estimated system prompt tokens (for diagnostics).
 }
 
 // Run executes the agent loop for a given conversation history.
@@ -155,6 +156,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 
 	var pendingMsgs []canonical.Message
 	var totalUsage canonical.Usage
+	var systemPromptSize int
 
 	// Sanitize history before starting.
 	history = SanitizeHistory(history)
@@ -178,6 +180,9 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 
 		// Build the request.
 		req := l.buildRequest(history, hookData.Injections)
+		if iteration == 0 {
+			systemPromptSize = req.SystemPromptSize
+		}
 
 		// Resolve provider and model via router (or use direct provider).
 		activeProvider, activeModel := l.resolveProvider()
@@ -187,7 +192,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		resp, err := l.callLLM(ctx, activeProvider, req, sessionID, iteration)
 		if err != nil {
 			l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: err, Iteration: iteration})
-			return RunResult{Messages: pendingMsgs, Usage: totalUsage, Error: fmt.Errorf("LLM call failed (iteration %d): %w", iteration, err)}
+			return RunResult{Messages: pendingMsgs, Usage: totalUsage, SystemPromptSize: systemPromptSize, Error: fmt.Errorf("LLM call failed (iteration %d): %w", iteration, err)}
 		}
 
 		// Accumulate usage.
@@ -268,11 +273,11 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 	if ctx.Err() == context.DeadlineExceeded {
 		timeoutErr := fmt.Errorf("agent loop timed out after %s", l.config.Timeout)
 		l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: timeoutErr, Iteration: -1})
-		return RunResult{Messages: pendingMsgs, Usage: totalUsage, Error: timeoutErr}
+		return RunResult{Messages: pendingMsgs, Usage: totalUsage, SystemPromptSize: systemPromptSize, Error: timeoutErr}
 	}
 
 	l.onEvent(Event{Type: EventRunCompleted, SessionID: sessionID, AgentID: l.config.AgentID})
-	return RunResult{Messages: pendingMsgs, Usage: totalUsage}
+	return RunResult{Messages: pendingMsgs, Usage: totalUsage, SystemPromptSize: systemPromptSize}
 }
 
 func (l *Loop) buildRequest(history []canonical.Message, injections []string) *canonical.Request {
@@ -298,12 +303,20 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 		system += "\n\n" + mcpInjectionWarning
 	}
 
+	// Measure system prompt size and warn if large.
+	promptTokens := len(system) / 4 // chars/4 estimate
+	if promptTokens > 4000 {
+		log.Printf("[%s] warning: system prompt is ~%d tokens (recommended <4000). Consider reducing skills or soul/behavior content.",
+			l.config.AgentID, promptTokens)
+	}
+
 	return &canonical.Request{
-		Model:     l.config.Model, // May be overridden by router in Run().
-		System:    system,
-		Messages:  history,
-		Tools:     tools,
-		MaxTokens: l.config.MaxTokens,
+		Model:            l.config.Model, // May be overridden by router in Run().
+		System:           system,
+		Messages:         history,
+		Tools:            tools,
+		MaxTokens:        l.config.MaxTokens,
+		SystemPromptSize: promptTokens,
 	}
 }
 
