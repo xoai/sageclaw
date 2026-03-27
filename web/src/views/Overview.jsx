@@ -164,7 +164,7 @@ export function Overview() {
               <a key={s.id} href={`/sessions/${s.id}`} style="text-decoration:none">
                 <div class="card clickable" style="padding:10px 14px">
                   <div style="display:flex;justify-content:space-between;align-items:center">
-                    <span style="font-size:13px;color:var(--text);font-weight:500">{s.label || s.id?.slice(0, 8)}</span>
+                    <span style="font-size:13px;color:var(--text);font-weight:500">{s.title || s.label || s.id?.slice(0, 8)}</span>
                     <div style="display:flex;gap:6px;align-items:center">
                       <span class="badge badge-gray">{s.channel}</span>
                       {s.message_count > 0 && <span style="font-size:11px;color:var(--text-muted)">{s.message_count} msgs</span>}

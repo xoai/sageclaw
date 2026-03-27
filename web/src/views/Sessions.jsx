@@ -171,8 +171,10 @@ export function Sessions() {
                     onChange={e => toggle(s.id, e)} aria-label={`Select session ${s.label || s.id?.slice(0, 8)}`} />
                 </td>
                 <td>
-                  <div style="font-weight:600;font-size:13px">{s.label || s.id?.slice(0, 8)}</div>
-                  <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)" title={s.id}>{s.id?.slice(0, 8)}</div>
+                  <div style="font-weight:600;font-size:13px">{s.title || s.label || s.id?.slice(0, 8)}</div>
+                  <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)" title={s.id}>
+                    {s.agent_id} on {s.channel} &middot; {s.id?.slice(0, 8)}
+                  </div>
                 </td>
                 <td>{s.agent_name || s.agent_id}</td>
                 <td>

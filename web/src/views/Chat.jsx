@@ -359,7 +359,7 @@ export function Chat() {
                         <span class="badge badge-blue" style="font-size:10px">{s.kind || 'dm'}</span>
                       </div>
                       <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                        {s.label || s.id?.slice(0, 8)}
+                        {s.title || s.label || s.id?.slice(0, 8)}
                       </div>
                     </div>
                   </div>
