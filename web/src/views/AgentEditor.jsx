@@ -323,30 +323,41 @@ function SectionTab({ section, value, onChange, schemas, label, placeholder }) {
 
 
 function ToolsTab({ agent, update, available }) {
-  const enabled = new Set(agent.tools?.enabled || []);
-  const denied = new Set(agent.tools?.deny || []);
-  const profile = agent.tools?.profile || 'standard';
+  const profile = agent.tools?.profile || 'full';
+  const deny = agent.tools?.deny || [];
   const shellDeny = new Set(agent.tools?.shell_deny_groups || []);
   const mcpServers = agent.tools?.mcp_servers || {};
+  const headless = agent.tools?.headless || false;
+  const preAuthorize = agent.tools?.pre_authorize || [];
+  const [showAdvanced, setShowAdvanced] = useState(deny.length > 0 || shellDeny.size > 0);
   const [showAddMCP, setShowAddMCP] = useState(false);
   const [newMCP, setNewMCP] = useState({ name: '', transport: 'stdio', command: '', url: '', trust: 'untrusted' });
+  const [denyInput, setDenyInput] = useState('');
 
-  const toggle = (name) => {
-    const next = new Set(enabled);
-    if (next.has(name)) next.delete(name); else next.add(name);
-    update('tools.enabled', Array.from(next));
+  const addDeny = () => {
+    const v = denyInput.trim();
+    if (v && !deny.includes(v)) {
+      update('tools.deny', [...deny, v]);
+    }
+    setDenyInput('');
   };
 
-  const toggleDeny = (name) => {
-    const next = new Set(denied);
-    if (next.has(name)) next.delete(name); else next.add(name);
-    update('tools.deny', Array.from(next));
+  const removeDeny = (item) => {
+    update('tools.deny', deny.filter(d => d !== item));
   };
 
   const toggleShellGroup = (group) => {
     const next = new Set(shellDeny);
     if (next.has(group)) next.delete(group); else next.add(group);
     update('tools.shell_deny_groups', Array.from(next));
+  };
+
+  const togglePreAuth = (group) => {
+    if (preAuthorize.includes(group)) {
+      update('tools.pre_authorize', preAuthorize.filter(g => g !== group));
+    } else {
+      update('tools.pre_authorize', [...preAuthorize, group]);
+    }
   };
 
   const addMCPServer = () => {
@@ -368,8 +379,16 @@ function ToolsTab({ agent, update, available }) {
     update('tools.mcp_servers', next);
   };
 
-  const allEnabled = enabled.size === 0;
+  const profileDescriptions = {
+    full: 'All tool groups. Shell, MCP, and delegation still require consent.',
+    coding: 'Files, shell, web, memory, knowledge, delegation, audit.',
+    messaging: 'Web, memory, and team tools.',
+    readonly: 'Files (read), web, memory, and audit. No writing or execution.',
+    minimal: 'No tools by default. Use deny list exceptions or consent prompts.',
+  };
+
   const shellGroups = ['filesystem', 'network', 'process', 'system', 'package'];
+  const alwaysConsentGroups = ['runtime', 'mcp', 'orchestration'];
 
   return (
     <div>
@@ -377,82 +396,124 @@ function ToolsTab({ agent, update, available }) {
       <div style="margin-bottom:20px">
         <h3 style="font-size:14px;margin-bottom:8px">Tool Profile</h3>
         <select value={profile} onChange={e => update('tools.profile', e.target.value)} style="width:280px">
-          <option value="minimal">Minimal — safe tools only</option>
-          <option value="standard">Standard — safe + moderate tools</option>
-          <option value="full">Full — all risk levels (requires consent for sensitive)</option>
+          <option value="full">Full — all tool groups</option>
+          <option value="coding">Coding — files, shell, web, memory, delegation</option>
+          <option value="messaging">Messaging — web, memory, team</option>
+          <option value="readonly">Read Only — files, web, memory, audit</option>
+          <option value="minimal">Minimal — no tools by default</option>
         </select>
         <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-          Controls which risk levels this agent can access. Sensitive tools always require user consent.
+          {profileDescriptions[profile] || 'Select a profile to define which tools this agent can use.'}
         </div>
       </div>
 
-      {/* Enabled Tools */}
+      {/* Always-Consent Notice */}
+      <div class="card" style="padding:12px;margin-bottom:20px;border-color:var(--warning);background:var(--warning-bg, rgba(255,193,7,0.05))">
+        <div style="font-size:12px;font-weight:600;margin-bottom:4px">Always requires consent</div>
+        <div style="font-size:11px;color:var(--text-muted)">
+          Shell commands, MCP servers, and delegation always prompt for permission, regardless of profile.
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          {alwaysConsentGroups.map(g => (
+            <span key={g} class="badge badge-yellow" style="font-size:10px">{g}</span>
+          ))}
+        </div>
+      </div>
+
+      {/* Headless Mode */}
       <div style="margin-bottom:20px">
-        <h3 style="font-size:14px;margin-bottom:8px">Enabled Tools</h3>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:12px">
-          <input type="checkbox" checked={allEnabled}
-            onChange={() => update('tools.enabled', allEnabled ? available.map(t => t.name) : [])} />
-          <span style="font-size:13px">All tools enabled (leave empty for full access)</span>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" checked={headless}
+            onChange={e => update('tools.headless', e.target.checked)} />
+          <div>
+            <span style="font-size:13px;font-weight:500">Headless mode</span>
+            <div style="font-size:11px;color:var(--text-muted)">
+              No consent prompts. For cron jobs, API agents, and webhooks.
+            </div>
+          </div>
         </label>
 
-        {!allEnabled && (
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px">
-            {available.map(t => (
-              <label key={t.name} class="card" style="padding:8px 12px;display:flex;gap:8px;align-items:flex-start;cursor:pointer">
-                <input type="checkbox" checked={enabled.has(t.name)} onChange={() => toggle(t.name)}
-                  style="margin-top:2px" />
-                <div>
-                  <div style="display:flex;align-items:center;gap:6px">
-                    <span style="font-family:var(--mono);font-size:12px;color:var(--primary)">{t.name}</span>
-                    {t.risk && t.risk !== 'safe' && (
-                      <span class={`badge ${t.risk === 'sensitive' ? 'badge-red' : 'badge-yellow'}`} style="font-size:10px">{t.risk}</span>
-                    )}
-                  </div>
-                  <div style="font-size:11px;color:var(--text-muted);margin-top:2px">{t.description}</div>
-                </div>
-              </label>
-            ))}
+        {headless && (
+          <div style="margin-top:12px;padding:12px;border-radius:8px;background:var(--bg-secondary)">
+            <div style="font-size:12px;font-weight:500;margin-bottom:8px">Pre-authorize (required for always-consent tools)</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              {['runtime', 'orchestration'].map(g => (
+                <label key={g} style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                  <input type="checkbox" checked={preAuthorize.includes(g)} onChange={() => togglePreAuth(g)} />
+                  <span style="text-transform:capitalize">{g}</span>
+                </label>
+              ))}
+              {Object.keys(mcpServers).map(name => {
+                const key = `mcp:${name}`;
+                return (
+                  <label key={key} style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                    <input type="checkbox" checked={preAuthorize.includes(key)} onChange={() => togglePreAuth(key)} />
+                    <span style="font-family:var(--mono)">mcp:{name}</span>
+                  </label>
+                );
+              })}
+            </div>
+            {preAuthorize.length === 0 && (
+              <div style="font-size:11px;color:var(--warning);margin-top:6px">
+                No pre-authorized groups. Shell, MCP, and delegation will be blocked.
+              </div>
+            )}
           </div>
         )}
-        <div style="font-size:12px;color:var(--text-muted);margin-top:8px">
-          {allEnabled ? `${available.length} tools available` : `${enabled.size} of ${available.length} tools enabled`}
-        </div>
       </div>
 
-      {/* Deny List */}
+      {/* Advanced Section (collapsible) */}
       <div style="margin-bottom:20px">
-        <h3 style="font-size:14px;margin-bottom:8px">Deny List</h3>
-        <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
-          Block specific tools from this agent, even if their risk level is allowed by the profile.
-        </p>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px">
-          {available.filter(t => t.risk === 'sensitive' || t.risk === 'moderate').map(t => (
-            <label key={t.name} style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:4px 0">
-              <input type="checkbox" checked={denied.has(t.name)} onChange={() => toggleDeny(t.name)} />
-              <span style="font-family:var(--mono);color:var(--text)">{t.name}</span>
-              <span class={`badge ${t.risk === 'sensitive' ? 'badge-red' : 'badge-yellow'}`} style="font-size:10px">{t.risk}</span>
-            </label>
-          ))}
-        </div>
-        {denied.size > 0 && (
-          <div style="font-size:12px;color:var(--warning);margin-top:8px">{denied.size} tool(s) denied</div>
+        <span onClick={() => setShowAdvanced(!showAdvanced)}
+          style="font-size:13px;color:var(--text-muted);cursor:pointer;user-select:none">
+          {showAdvanced ? '\u25BC' : '\u25B6'} Advanced settings
+          {deny.length > 0 && ` (${deny.length} denied)`}
+        </span>
+
+        {showAdvanced && (
+          <div style="margin-top:12px">
+            {/* Deny List */}
+            <div style="margin-bottom:16px">
+              <h4 style="font-size:13px;margin-bottom:6px">Deny List</h4>
+              <p style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+                Block specific tools or groups. Use "group:runtime" for groups or tool names directly.
+              </p>
+              <div style="display:flex;gap:6px;margin-bottom:8px">
+                <input type="text" value={denyInput} placeholder="e.g. write_file or group:runtime"
+                  onInput={e => setDenyInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addDeny()}
+                  style="flex:1;font-size:12px" />
+                <button class="btn-small" onClick={addDeny} disabled={!denyInput.trim()}>Add</button>
+              </div>
+              {deny.length > 0 && (
+                <div style="display:flex;flex-wrap:wrap;gap:6px">
+                  {deny.map(d => (
+                    <span key={d} class="badge" style="display:flex;align-items:center;gap:4px;font-size:11px;padding:4px 8px;background:var(--bg-secondary)">
+                      <span style="font-family:var(--mono)">{d}</span>
+                      <button onClick={() => removeDeny(d)} style="background:none;border:none;cursor:pointer;font-size:14px;color:var(--text-muted);padding:0">&times;</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Shell Deny Groups */}
+            <div>
+              <h4 style="font-size:13px;margin-bottom:6px">Shell Command Restrictions</h4>
+              <p style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+                Block categories of shell commands.
+              </p>
+              <div style="display:flex;flex-wrap:wrap;gap:8px">
+                {shellGroups.map(g => (
+                  <label key={g} class="card" style="padding:6px 12px;display:flex;align-items:center;gap:6px;cursor:pointer">
+                    <input type="checkbox" checked={shellDeny.has(g)} onChange={() => toggleShellGroup(g)} />
+                    <span style="text-transform:capitalize;font-size:12px">{g}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
         )}
-      </div>
-
-      {/* Shell Deny Groups */}
-      <div style="margin-bottom:20px">
-        <h3 style="font-size:14px;margin-bottom:8px">Shell Command Restrictions</h3>
-        <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
-          Block categories of shell commands. The agent cannot execute commands in denied groups.
-        </p>
-        <div style="display:flex;flex-wrap:wrap;gap:8px">
-          {shellGroups.map(g => (
-            <label key={g} class="card" style="padding:8px 14px;display:flex;align-items:center;gap:8px;cursor:pointer">
-              <input type="checkbox" checked={shellDeny.has(g)} onChange={() => toggleShellGroup(g)} />
-              <span style="text-transform:capitalize;font-size:13px">{g}</span>
-            </label>
-          ))}
-        </div>
       </div>
 
       {/* MCP Servers */}
@@ -462,7 +523,7 @@ function ToolsTab({ agent, update, available }) {
           <button class="btn-small" onClick={() => setShowAddMCP(true)}>+ Add</button>
         </div>
         <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
-          External tool servers connected via Model Context Protocol.
+          External tool servers. Each server requires consent on first use.
         </p>
 
         {Object.keys(mcpServers).length === 0 ? (
@@ -475,8 +536,8 @@ function ToolsTab({ agent, update, available }) {
                   <div style="font-family:var(--mono);font-size:13px;color:var(--primary)">{name}</div>
                   <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
                     {cfg.transport || 'stdio'} &middot; {cfg.trust || 'untrusted'}
-                    {cfg.command && ` &middot; ${cfg.command}`}
-                    {cfg.url && ` &middot; ${cfg.url}`}
+                    {cfg.command && ` \u00b7 ${cfg.command}`}
+                    {cfg.url && ` \u00b7 ${cfg.url}`}
                   </div>
                 </div>
                 <button class="btn-small btn-danger" onClick={() => removeMCPServer(name)}>Remove</button>

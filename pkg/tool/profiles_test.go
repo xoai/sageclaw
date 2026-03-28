@@ -68,19 +68,19 @@ func TestListForAgent_FullProfile(t *testing.T) {
 	reg.RegisterWithGroup("memory_search", "Search", nil, GroupMemory, RiskSafe, "builtin", noop)
 
 	// Full profile = all tools.
-	tools := reg.ListForAgent(ProfileFull, nil, nil, nil)
+	tools := reg.ListForAgent(ProfileFull, nil)
 	if len(tools) != 3 {
 		t.Errorf("full profile should return 3 tools, got %d", len(tools))
 	}
 
 	// Empty profile defaults to full.
-	tools = reg.ListForAgent("", nil, nil, nil)
+	tools = reg.ListForAgent("", nil)
 	if len(tools) != 3 {
 		t.Errorf("empty profile should default to full, got %d", len(tools))
 	}
 }
 
-func TestListForAgent_CodingProfile(t *testing.T) {
+func TestListForAgent_AllProfilesShowAllTools(t *testing.T) {
 	reg := NewRegistry()
 	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
 
@@ -88,14 +88,11 @@ func TestListForAgent_CodingProfile(t *testing.T) {
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 	reg.RegisterWithGroup("team_send", "Send", nil, GroupTeam, RiskModerate, "builtin", noop)
 
-	// Coding profile excludes team.
-	tools := reg.ListForAgent(ProfileCoding, nil, nil, nil)
-	if len(tools) != 2 {
-		t.Errorf("coding profile should return 2 tools (no team), got %d", len(tools))
-	}
-	for _, td := range tools {
-		if td.Name == "team_send" {
-			t.Error("coding profile should not include team_send")
+	// All profiles show all tools — profile controls consent, not visibility.
+	for _, profile := range []string{ProfileFull, ProfileCoding, ProfileMessaging, ProfileReadonly, ProfileMinimal} {
+		tools := reg.ListForAgent(profile, nil)
+		if len(tools) != 3 {
+			t.Errorf("%s profile should return 3 tools (all visible), got %d", profile, len(tools))
 		}
 	}
 }
@@ -108,7 +105,7 @@ func TestListForAgent_DenyGroup(t *testing.T) {
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 
 	// Deny runtime group.
-	tools := reg.ListForAgent(ProfileFull, nil, []string{"group:runtime"}, nil)
+	tools := reg.ListForAgent(ProfileFull, []string{"group:runtime"})
 	if len(tools) != 1 {
 		t.Errorf("should have 1 tool after denying runtime, got %d", len(tools))
 	}
@@ -117,7 +114,7 @@ func TestListForAgent_DenyGroup(t *testing.T) {
 	}
 }
 
-func TestListForAgent_DenyAndAlsoAllow(t *testing.T) {
+func TestListForAgent_DenyGroupAndTool(t *testing.T) {
 	reg := NewRegistry()
 	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
 
@@ -125,23 +122,13 @@ func TestListForAgent_DenyAndAlsoAllow(t *testing.T) {
 	reg.RegisterWithGroup("write_file", "Write", nil, GroupFS, RiskModerate, "builtin", noop)
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 
-	// Deny fs group, then re-allow read_file.
-	tools := reg.ListForAgent(ProfileFull, nil, []string{"group:fs"}, []string{"read_file"})
-	if len(tools) != 2 {
-		t.Errorf("expected 2 tools (exec + re-allowed read_file), got %d", len(tools))
+	// Deny entire fs group.
+	tools := reg.ListForAgent(ProfileFull, []string{"group:fs"})
+	if len(tools) != 1 {
+		t.Errorf("expected 1 tool (exec only), got %d", len(tools))
 	}
-	names := map[string]bool{}
-	for _, td := range tools {
-		names[td.Name] = true
-	}
-	if !names["read_file"] {
-		t.Error("read_file should be re-allowed")
-	}
-	if !names["execute_command"] {
-		t.Error("execute_command should still be present")
-	}
-	if names["write_file"] {
-		t.Error("write_file should be denied")
+	if tools[0].Name != "execute_command" {
+		t.Errorf("remaining tool should be execute_command, got %s", tools[0].Name)
 	}
 }
 
@@ -153,7 +140,7 @@ func TestListForAgent_DenySingleTool(t *testing.T) {
 	reg.RegisterWithGroup("write_file", "Write", nil, GroupFS, RiskModerate, "builtin", noop)
 
 	// Deny single tool by name.
-	tools := reg.ListForAgent(ProfileFull, nil, []string{"write_file"}, nil)
+	tools := reg.ListForAgent(ProfileFull, []string{"write_file"})
 	if len(tools) != 1 {
 		t.Errorf("expected 1 tool, got %d", len(tools))
 	}
@@ -162,38 +149,76 @@ func TestListForAgent_DenySingleTool(t *testing.T) {
 	}
 }
 
-func TestListForAgent_EnabledIntersection(t *testing.T) {
+func TestListForAgent_MinimalProfileShowsAllTools(t *testing.T) {
 	reg := NewRegistry()
 	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
 
 	reg.RegisterWithGroup("read_file", "Read", nil, GroupFS, RiskModerate, "builtin", noop)
-	reg.RegisterWithGroup("write_file", "Write", nil, GroupFS, RiskModerate, "builtin", noop)
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 
-	// Legacy enabled field — only include specified tools.
-	tools := reg.ListForAgent(ProfileFull, []string{"read_file"}, nil, nil)
-	if len(tools) != 1 {
-		t.Errorf("enabled intersection should return 1 tool, got %d", len(tools))
+	// Minimal profile shows all tools — consent handles access control.
+	tools := reg.ListForAgent(ProfileMinimal, nil)
+	if len(tools) != 2 {
+		t.Errorf("minimal profile should show all tools (consent controls access), got %d", len(tools))
 	}
 }
 
-func TestListForAgent_MinimalProfile(t *testing.T) {
-	reg := NewRegistry()
-	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
+func TestAlwaysConsentGroups(t *testing.T) {
+	// Runtime, MCP, and orchestration must always require consent.
+	for _, g := range []string{GroupRuntime, GroupMCP, GroupOrchestration} {
+		if !AlwaysConsentGroups[g] {
+			t.Errorf("%s should be in AlwaysConsentGroups", g)
+		}
+	}
+	// Other groups should not be in the always-consent set.
+	for _, g := range []string{GroupFS, GroupWeb, GroupMemory, GroupKnowledge, GroupTeam, GroupCron, GroupAudit} {
+		if AlwaysConsentGroups[g] {
+			t.Errorf("%s should NOT be in AlwaysConsentGroups", g)
+		}
+	}
+}
 
-	reg.RegisterWithGroup("read_file", "Read", nil, GroupFS, RiskModerate, "builtin", noop)
-	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
-
-	// Minimal profile = no groups, so no tools.
-	tools := reg.ListForAgent(ProfileMinimal, nil, nil, nil)
-	if len(tools) != 0 {
-		t.Errorf("minimal profile should return 0 tools, got %d", len(tools))
+func TestIsInProfile(t *testing.T) {
+	// Full profile allows everything.
+	if !IsInProfile(ProfileFull, GroupFS) {
+		t.Error("full profile should allow fs")
+	}
+	if !IsInProfile(ProfileFull, GroupTeam) {
+		t.Error("full profile should allow team")
 	}
 
-	// But alsoAllow can add specific tools back.
-	tools = reg.ListForAgent(ProfileMinimal, nil, nil, []string{"read_file"})
-	if len(tools) != 1 {
-		t.Errorf("minimal + alsoAllow should return 1 tool, got %d", len(tools))
+	// Empty profile treated as full.
+	if !IsInProfile("", GroupRuntime) {
+		t.Error("empty profile should allow runtime")
+	}
+
+	// Unknown profile treated as full.
+	if !IsInProfile("nonexistent", GroupFS) {
+		t.Error("unknown profile should allow fs (treated as full)")
+	}
+
+	// Coding profile allows fs but not team.
+	if !IsInProfile(ProfileCoding, GroupFS) {
+		t.Error("coding profile should allow fs")
+	}
+	if IsInProfile(ProfileCoding, GroupTeam) {
+		t.Error("coding profile should not allow team")
+	}
+
+	// Messaging profile allows team but not fs.
+	if !IsInProfile(ProfileMessaging, GroupTeam) {
+		t.Error("messaging profile should allow team")
+	}
+	if IsInProfile(ProfileMessaging, GroupFS) {
+		t.Error("messaging profile should not allow fs")
+	}
+
+	// Minimal profile allows nothing.
+	if IsInProfile(ProfileMinimal, GroupFS) {
+		t.Error("minimal profile should not allow fs")
+	}
+	if IsInProfile(ProfileMinimal, GroupMemory) {
+		t.Error("minimal profile should not allow memory")
 	}
 }
 

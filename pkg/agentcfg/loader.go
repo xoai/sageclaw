@@ -55,6 +55,29 @@ func LoadAgent(dir string) (*AgentConfig, error) {
 		if err := yaml.Unmarshal(data, &cfg.Tools); err != nil {
 			log.Printf("agentcfg: %s/tools.yaml parse error: %v (using defaults)", id, err)
 		}
+		// Warn about deprecated fields so users know to update their configs.
+		if len(cfg.Tools.DeprecatedEnabled) > 0 {
+			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'enabled' field — tool access is now profile-based (profile: full/coding/messaging/readonly/minimal). Remove 'enabled' from your config.", id)
+		}
+		if len(cfg.Tools.DeprecatedAlsoAllow) > 0 {
+			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'also_allow' field — use 'profile' and 'deny' instead. Remove 'also_allow' from your config.", id)
+		}
+		if cfg.Tools.DeprecatedNonInteractive != nil {
+			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'non_interactive' field — use 'headless: true' with 'pre_authorize' instead. Remove 'non_interactive' from your config.", id)
+			// Auto-migrate: set headless if non_interactive was true.
+			if *cfg.Tools.DeprecatedNonInteractive && !cfg.Tools.Headless {
+				cfg.Tools.Headless = true
+				log.Printf("agentcfg: auto-migrated %s: non_interactive → headless: true", id)
+			}
+		}
+		if len(cfg.Tools.DeprecatedPreAuthGroups) > 0 {
+			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'pre_authorized_groups' field — use 'pre_authorize' instead.", id)
+			// Auto-migrate: merge into PreAuthorize if empty.
+			if len(cfg.Tools.PreAuthorize) == 0 {
+				cfg.Tools.PreAuthorize = cfg.Tools.DeprecatedPreAuthGroups
+				log.Printf("agentcfg: auto-migrated %s: pre_authorized_groups → pre_authorize: %v", id, cfg.Tools.PreAuthorize)
+			}
+		}
 	}
 
 	// memory.yaml — optional.
@@ -167,8 +190,11 @@ func SaveAgent(cfg *AgentConfig, dir string) error {
 		}
 	}
 
-	// tools.yaml — only write if tools are configured.
-	if len(cfg.Tools.Enabled) > 0 || len(cfg.Tools.Config) > 0 {
+	// tools.yaml — write if any tools settings are configured.
+	if len(cfg.Tools.Config) > 0 ||
+		cfg.Tools.Profile != "" || len(cfg.Tools.Deny) > 0 ||
+		len(cfg.Tools.ShellDenyGroups) > 0 || len(cfg.Tools.MCPServers) > 0 ||
+		cfg.Tools.Headless || len(cfg.Tools.PreAuthorize) > 0 {
 		data, _ := yaml.Marshal(&cfg.Tools)
 		if err := writeFileAtomic(filepath.Join(dir, "tools.yaml"), data); err != nil {
 			return err

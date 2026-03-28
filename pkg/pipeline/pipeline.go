@@ -104,21 +104,6 @@ func (p *Pipeline) InjectConsent(nonce string, granted bool, tier string) error 
 	return nil
 }
 
-// InjectConsentLegacy sends a consent response using the legacy group-based format.
-// Used for backward compatibility with the old web dashboard during M2→M6 transition.
-func (p *Pipeline) InjectConsentLegacy(group string, granted bool) {
-	if p.loopPool == nil {
-		return
-	}
-	action := "__consent_deny__"
-	if granted {
-		action = "__consent_grant__"
-	}
-	p.loopPool.InjectAll(canonical.Message{
-		Role:    "user",
-		Content: []canonical.Content{{Type: "text", Text: action + group}},
-	})
-}
 
 // resolveAgentName returns the display name for an agent ID.
 // Falls back to the raw ID if no provider is configured or agent not found.

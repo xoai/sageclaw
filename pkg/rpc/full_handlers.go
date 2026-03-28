@@ -1033,18 +1033,13 @@ func (s *Server) handleConsentResponse(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	if resolvedNonce != "" && s.consentHandler != nil {
-		// Use nonce path with "once" tier for legacy requests.
 		if err := s.consentHandler(resolvedNonce, req.Granted, "once"); err != nil {
-			// Nonce expired or already used — fall back to legacy broadcast.
 			log.Printf("consent: nonce resolution failed for legacy request: %v", err)
-			if s.consentHandlerLegacy != nil {
-				s.consentHandlerLegacy(req.Group, req.Granted)
-			}
+			http.Error(w, "consent nonce expired or already used", http.StatusGone)
+			return
 		}
-	} else if s.consentHandlerLegacy != nil {
-		s.consentHandlerLegacy(req.Group, req.Granted)
 	} else {
-		http.Error(w, "consent handler not configured", http.StatusServiceUnavailable)
+		http.Error(w, "consent handler not configured or no matching nonce", http.StatusServiceUnavailable)
 		return
 	}
 

@@ -31,12 +31,13 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func TestPersistentConsentStore_SafeAutoConsent(t *testing.T) {
+func TestPersistentConsentStore_NoAutoConsent(t *testing.T) {
 	db := setupTestDB(t)
 	cs := NewPersistentConsentStore(db)
 
-	if !cs.HasConsent("s1", "owner1", "telegram", GroupMemory) {
-		t.Error("safe group should auto-consent")
+	// HasConsent no longer auto-consents safe groups — profile handles that.
+	if cs.HasConsent("s1", "owner1", "telegram", GroupMemory) {
+		t.Error("HasConsent should not auto-consent without explicit grant")
 	}
 }
 
@@ -104,22 +105,22 @@ func TestPersistentConsentStore_PersistAcrossInstances(t *testing.T) {
 	}
 }
 
-func TestPersistentConsentStore_Deny(t *testing.T) {
+func TestPersistentConsentStore_Deny_Cooldown(t *testing.T) {
 	db := setupTestDB(t)
 	cs := NewPersistentConsentStore(db)
 
 	cs.Deny("s1", GroupMCP)
 
-	if !cs.IsDenied("s1", GroupMCP) {
-		t.Error("should be denied")
+	if !cs.InCooldown("s1", GroupMCP) {
+		t.Error("should be in cooldown after deny")
 	}
 	if cs.HasConsent("s1", "", "", GroupMCP) {
 		t.Error("denied group should not have consent")
 	}
 
-	// Different session not denied.
-	if cs.IsDenied("s2", GroupMCP) {
-		t.Error("different session should not be denied")
+	// Different session not in cooldown.
+	if cs.InCooldown("s2", GroupMCP) {
+		t.Error("different session should not be in cooldown")
 	}
 }
 
@@ -228,8 +229,35 @@ func TestPersistentConsentStore_ClearSession(t *testing.T) {
 	if cs.HasConsent("s1", "", "", GroupRuntime) {
 		t.Error("session grant should be cleared")
 	}
-	if cs.IsDenied("s1", GroupMCP) {
-		t.Error("session deny should be cleared")
+	if cs.InCooldown("s1", GroupMCP) {
+		t.Error("session cooldown should be cleared")
+	}
+}
+
+func TestPersistentConsentStore_InvalidateSessionGrants(t *testing.T) {
+	db := setupTestDB(t)
+	cs := NewPersistentConsentStore(db)
+
+	// Grant session consent for fs, web, and runtime.
+	cs.GrantOnce("s1", GroupFS)
+	cs.GrantOnce("s1", GroupWeb)
+	cs.GrantOnce("s1", GroupRuntime)
+
+	// Switch to messaging profile (web, memory, team).
+	newProfile := map[string]bool{GroupWeb: true, GroupMemory: true, GroupTeam: true}
+	cs.InvalidateSessionGrants("s1", newProfile)
+
+	// web should survive (still in new profile).
+	if !cs.HasConsent("s1", "", "", GroupWeb) {
+		t.Error("web grant should survive profile change (still in profile)")
+	}
+	// runtime should survive (always-consent group).
+	if !cs.HasConsent("s1", "", "", GroupRuntime) {
+		t.Error("runtime grant should survive (always-consent group)")
+	}
+	// fs should be gone (not in messaging profile, not always-consent).
+	if cs.HasConsent("s1", "", "", GroupFS) {
+		t.Error("fs grant should be invalidated (not in new profile)")
 	}
 }
 

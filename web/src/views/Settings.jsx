@@ -275,13 +275,11 @@ function TwoFactorSection() {
         </div>
       )}
 
-      <div style="display:flex;gap:8px;align-items:flex-end">
-        <div style="flex:1">
-          <label style="font-size:12px;color:var(--text-muted)">Password required</label>
-          <input type="password" class="search-input" placeholder="Enter password"
-            value={password} onInput={e => setPassword(e.target.value)}
-            style="margin-top:4px" />
-        </div>
+      <div>
+        <label style="font-size:12px;color:var(--text-muted)">Password required</label>
+        <input type="password" class="search-input" placeholder="Enter password"
+          value={password} onInput={e => setPassword(e.target.value)}
+          style="margin-top:4px;margin-bottom:12px" />
         {enabled ? (
           <button class="btn-danger btn-small" onClick={disable2FA} disabled={loading || !password}>
             {loading ? 'Disabling...' : 'Disable 2FA'}
@@ -347,7 +345,7 @@ function ConsentGrantsSection() {
             {grants.map(g => (
               <tr key={g.ID} style="border-bottom:1px solid var(--border)">
                 <td style="padding:6px 8px;text-transform:capitalize">{g.Platform}</td>
-                <td style="padding:6px 8px;font-family:var(--mono)">{g.ToolGroup}</td>
+                <td style="padding:6px 8px;font-family:var(--mono)">{g.ToolGroup.startsWith('mcp:') ? `MCP: ${g.ToolGroup.slice(4)}` : g.ToolGroup}</td>
                 <td style="padding:6px 8px;color:var(--text-muted);font-size:12px">{g.GrantedAt ? new Date(g.GrantedAt).toLocaleDateString() : '—'}</td>
                 <td style="padding:6px 8px;text-align:right">
                   <button class="btn-secondary" style="padding:3px 10px;font-size:12px;color:var(--error)"

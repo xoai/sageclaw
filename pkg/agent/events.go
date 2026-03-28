@@ -36,7 +36,8 @@ type Event struct {
 type ConsentRequest struct {
 	ToolName    string `json:"tool_name"`
 	Group       string `json:"group"`
-	RiskLevel   string `json:"risk_level"`
+	Source      string `json:"source"`      // "builtin", "mcp:weather", "skill:code"
+	RiskLevel   string `json:"risk_level"`  // Derived: "sensitive" for always-consent, "moderate" otherwise. For adapter compat.
 	Explanation string `json:"explanation"`
 	Nonce       string `json:"nonce"` // Unique nonce for this consent request.
 }

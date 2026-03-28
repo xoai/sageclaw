@@ -172,7 +172,10 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 		Model:         model,
 		MaxTokens:     maxTokens,
 		MaxIterations: maxIter,
-		Tools:         cfg.Tools.Enabled,
+		ToolProfile:   cfg.Tools.Profile,
+		ToolDeny:      cfg.Tools.Deny,
+		Headless:      cfg.Tools.Headless,
+		PreAuthorize:  cfg.Tools.PreAuthorize,
 	}
 
 	// Map voice config to runtime.

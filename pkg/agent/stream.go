@@ -69,6 +69,9 @@ func consumeStream(
 				if ev.Delta.ToolInput != "" {
 					b.inputBuf.WriteString(ev.Delta.ToolInput)
 				}
+				if len(ev.Delta.ToolMeta) > 0 {
+					b.meta = ev.Delta.ToolMeta
+				}
 			}
 
 		case "usage":
@@ -133,6 +136,7 @@ type toolCallBuilder struct {
 	id       string
 	name     string
 	inputBuf strings.Builder
+	meta     map[string]string // Provider metadata (e.g., Gemini thought_signature).
 }
 
 func (b *toolCallBuilder) build() canonical.ToolCall {
@@ -144,6 +148,7 @@ func (b *toolCallBuilder) build() canonical.ToolCall {
 		ID:    b.id,
 		Name:  b.name,
 		Input: []byte(input),
+		Meta:  b.meta,
 	}
 }
 

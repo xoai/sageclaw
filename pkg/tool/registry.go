@@ -116,42 +116,21 @@ func (r *Registry) List() []canonical.ToolDef {
 	return defs
 }
 
-// ListForAgent returns tool definitions filtered by profile, deny, and alsoAllow.
-// Resolution: start with profile set → intersect with enabled (if non-empty) →
-// remove deny → add back alsoAllow.
-func (r *Registry) ListForAgent(profile string, enabled, deny, alsoAllow []string) []canonical.ToolDef {
-	if profile == "" {
-		profile = ProfileFull
-	}
-
-	// Step 1: Get profile's allowed groups.
-	allowedGroups := ProfileGroups(profile)
-
+// ListForAgent returns tool definitions filtered by deny list only.
+// All registered tools are visible to the LLM regardless of profile.
+// Profile controls consent (in checkConsent), not visibility.
+// Deny list controls visibility (hard block — tool not shown to LLM).
+func (r *Registry) ListForAgent(profile string, deny []string) []canonical.ToolDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Step 2: Collect tools matching profile groups.
-	// "full" profile means all tools.
+	// Step 1: Start with all registered tools.
 	candidates := make(map[string]registeredTool)
 	for name, t := range r.tools {
-		if profile == ProfileFull {
-			candidates[name] = t
-		} else if allowedGroups[t.group] {
-			candidates[name] = t
-		}
+		candidates[name] = t
 	}
 
-	// Step 3: Intersect with enabled list (backward compat).
-	if len(enabled) > 0 {
-		enabledSet := toSet(enabled)
-		for name := range candidates {
-			if !enabledSet[name] {
-				delete(candidates, name)
-			}
-		}
-	}
-
-	// Step 4: Remove denied tools/groups.
+	// Step 2: Remove denied tools/groups (hard block).
 	for _, d := range deny {
 		if strings.HasPrefix(d, "group:") {
 			groupName := strings.TrimPrefix(d, "group:")
@@ -162,20 +141,6 @@ func (r *Registry) ListForAgent(profile string, enabled, deny, alsoAllow []strin
 			}
 		} else {
 			delete(candidates, d)
-		}
-	}
-
-	// Step 5: Add back alsoAllow tools.
-	for _, a := range alsoAllow {
-		if strings.HasPrefix(a, "group:") {
-			groupName := strings.TrimPrefix(a, "group:")
-			for name, t := range r.tools {
-				if t.group == groupName {
-					candidates[name] = t
-				}
-			}
-		} else if t, ok := r.tools[a]; ok {
-			candidates[a] = t
 		}
 	}
 
@@ -202,12 +167,4 @@ func (r *Registry) Names() []string {
 		names = append(names, name)
 	}
 	return names
-}
-
-func toSet(items []string) map[string]bool {
-	s := make(map[string]bool, len(items))
-	for _, item := range items {
-		s[item] = true
-	}
-	return s
 }

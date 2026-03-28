@@ -151,6 +151,7 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 		defer resp.Body.Close()
 		defer close(events)
 
+		hasToolCalls := false
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -159,7 +160,11 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 			}
 			data := line[6:]
 			if data == "[DONE]" {
-				events <- provider.StreamEvent{Type: "done"}
+				sr := "end_turn"
+				if hasToolCalls {
+					sr = "tool_use"
+				}
+				events <- provider.StreamEvent{Type: "done", StopReason: sr}
 				return
 			}
 
@@ -169,7 +174,7 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 			}
 
 			for _, candidate := range chunk.Candidates {
-				for _, part := range candidate.Content.Parts {
+				for i, part := range candidate.Content.Parts {
 					if part.Text != "" {
 						events <- provider.StreamEvent{
 							Type: "content_delta",
@@ -179,11 +184,34 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 							},
 						}
 					}
+					if part.FunctionCall != nil {
+						hasToolCalls = true
+						inputJSON, _ := json.Marshal(part.FunctionCall.Args)
+						callID := fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, i)
+						delta := &canonical.Content{
+							ToolCallID: callID,
+							ToolName:   part.FunctionCall.Name,
+							ToolInput:  string(inputJSON),
+						}
+						// Preserve Gemini thought signature for round-trip.
+						if part.ThoughtSignature != "" {
+							delta.ToolMeta = map[string]string{"thought_signature": part.ThoughtSignature}
+						}
+						events <- provider.StreamEvent{
+							Type:  "tool_call",
+							Index: i,
+							Delta: delta,
+						}
+					}
 				}
 			}
 		}
 
-		events <- provider.StreamEvent{Type: "done"}
+		sr := "end_turn"
+		if hasToolCalls {
+			sr = "tool_use"
+		}
+		events <- provider.StreamEvent{Type: "done", StopReason: sr}
 	}()
 
 	return events, nil
@@ -202,6 +230,16 @@ type geminiRequest struct {
 	Contents          []geminiContent         `json:"contents"`
 	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
 	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
+	Tools             []geminiToolDecl        `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig       `json:"toolConfig,omitempty"`
+}
+
+type geminiToolConfig struct {
+	FunctionCallingConfig *geminiFuncCallingConfig `json:"functionCallingConfig,omitempty"`
+}
+
+type geminiFuncCallingConfig struct {
+	Mode string `json:"mode"` // "AUTO", "ANY", "NONE"
 }
 
 type geminiContent struct {
@@ -210,7 +248,30 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text string `json:"text,omitempty"`
+	Text             string              `json:"text,omitempty"`
+	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFuncResponse `json:"functionResponse,omitempty"`
+	ThoughtSignature string              `json:"thoughtSignature,omitempty"` // Gemini 3: must be preserved on functionCall round-trip.
+}
+
+type geminiFunctionCall struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args,omitempty"`
+}
+
+type geminiFuncResponse struct {
+	Name     string         `json:"name"`
+	Response map[string]any `json:"response"`
+}
+
+type geminiToolDecl struct {
+	FunctionDeclarations []geminiFuncDecl `json:"functionDeclarations"`
+}
+
+type geminiFuncDecl struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 type geminiGenerationConfig struct {
@@ -239,6 +300,33 @@ func toGeminiRequest(req *canonical.Request) *geminiRequest {
 		}
 	}
 
+	// Convert tools to Gemini function declarations.
+	if len(req.Tools) > 0 {
+		var decls []geminiFuncDecl
+		for _, t := range req.Tools {
+			decl := geminiFuncDecl{
+				Name:        t.Name,
+				Description: t.Description,
+			}
+			if len(t.InputSchema) > 0 {
+				decl.Parameters = t.InputSchema
+			}
+			decls = append(decls, decl)
+		}
+		gr.Tools = []geminiToolDecl{{FunctionDeclarations: decls}}
+	}
+
+	// Build ToolCallID → function name lookup from history.
+	// Gemini's functionResponse requires the function name, not the call ID.
+	callIDToName := make(map[string]string)
+	for _, msg := range req.Messages {
+		for _, c := range msg.Content {
+			if c.ToolCall != nil {
+				callIDToName[c.ToolCall.ID] = c.ToolCall.Name
+			}
+		}
+	}
+
 	for _, msg := range req.Messages {
 		role := msg.Role
 		if role == "assistant" {
@@ -247,8 +335,41 @@ func toGeminiRequest(req *canonical.Request) *geminiRequest {
 
 		var parts []geminiPart
 		for _, c := range msg.Content {
-			if c.Type == "text" && c.Text != "" {
+			switch {
+			case c.Type == "text" && c.Text != "":
 				parts = append(parts, geminiPart{Text: c.Text})
+
+			case c.ToolCall != nil:
+				// Assistant's tool call → Gemini functionCall part.
+				var args map[string]any
+				if len(c.ToolCall.Input) > 0 {
+					json.Unmarshal(c.ToolCall.Input, &args)
+				}
+				p := geminiPart{
+					FunctionCall: &geminiFunctionCall{
+						Name: c.ToolCall.Name,
+						Args: args,
+					},
+				}
+				// Restore thought signature for Gemini 3 round-trip.
+				if c.ToolCall.Meta != nil {
+					p.ThoughtSignature = c.ToolCall.Meta["thought_signature"]
+				}
+				parts = append(parts, p)
+
+			case c.ToolResult != nil:
+				// Tool result → Gemini functionResponse part.
+				// Gemini requires the function name, not the call ID.
+				funcName := callIDToName[c.ToolResult.ToolCallID]
+				if funcName == "" {
+					funcName = c.ToolResult.ToolCallID // fallback — shouldn't happen
+				}
+				parts = append(parts, geminiPart{
+					FunctionResponse: &geminiFuncResponse{
+						Name:     funcName,
+						Response: map[string]any{"result": c.ToolResult.Content},
+					},
+				})
 			}
 		}
 
@@ -261,7 +382,99 @@ func toGeminiRequest(req *canonical.Request) *geminiRequest {
 		gr.GenerationConfig = &geminiGenerationConfig{MaxOutputTokens: req.MaxTokens}
 	}
 
+	// Sanitize turn ordering for Gemini's strict rules:
+	// 1. functionResponse must immediately follow functionCall
+	// 2. No consecutive turns with the same role
+	// 3. Strip orphaned functionCall/functionResponse parts
+	gr.Contents = sanitizeGeminiContents(gr.Contents)
+
 	return gr
+}
+
+// sanitizeGeminiContents repairs Gemini-specific turn ordering issues.
+// Gemini requires: model turn with functionCall → user turn with functionResponse,
+// and all functionCall parts must have a thoughtSignature (Gemini 3+).
+// Any violation causes HTTP 400.
+func sanitizeGeminiContents(contents []geminiContent) []geminiContent {
+	if len(contents) == 0 {
+		return contents
+	}
+
+	// First pass: identify turns to strip (functionCall without thought_signature,
+	// or unpaired functionCall/functionResponse).
+	strip := make(map[int]bool)
+
+	for i, turn := range contents {
+		// Check model turns with functionCall.
+		for _, p := range turn.Parts {
+			if p.FunctionCall != nil && turn.Role == "model" {
+				// Gemini requires thought_signature on all functionCall parts.
+				// Calls without signatures (from other providers or old history) must be stripped.
+				if p.ThoughtSignature == "" {
+					strip[i] = true
+					// Also strip the following functionResponse if present.
+					if i+1 < len(contents) {
+						for _, np := range contents[i+1].Parts {
+							if np.FunctionResponse != nil {
+								strip[i+1] = true
+								break
+							}
+						}
+					}
+					break
+				}
+				// Must have a matching functionResponse in the next turn.
+				hasResponse := false
+				if i+1 < len(contents) && contents[i+1].Role == "user" {
+					for _, np := range contents[i+1].Parts {
+						if np.FunctionResponse != nil {
+							hasResponse = true
+							break
+						}
+					}
+				}
+				if !hasResponse {
+					strip[i] = true
+				}
+				break
+			}
+		}
+	}
+
+	// Second pass: build result, stripping function parts from marked turns.
+	var result []geminiContent
+	for i, turn := range contents {
+		if strip[i] {
+			// Keep only text parts from stripped turns.
+			var textParts []geminiPart
+			for _, p := range turn.Parts {
+				if p.Text != "" {
+					textParts = append(textParts, geminiPart{Text: p.Text})
+				}
+			}
+			if len(textParts) > 0 {
+				result = append(result, geminiContent{Role: turn.Role, Parts: textParts})
+			}
+			continue
+		}
+		result = append(result, turn)
+	}
+
+	// Final pass: merge consecutive turns with the same role (Gemini forbids this).
+	if len(result) <= 1 {
+		return result
+	}
+	merged := []geminiContent{result[0]}
+	for _, turn := range result[1:] {
+		last := &merged[len(merged)-1]
+		if last.Role == turn.Role {
+			last.Parts = append(last.Parts, turn.Parts...)
+		} else {
+			merged = append(merged, turn)
+		}
+	}
+
+	return merged
 }
 
 func fromGeminiResponse(body []byte) (*canonical.Response, error) {
@@ -271,10 +484,29 @@ func fromGeminiResponse(body []byte) (*canonical.Response, error) {
 	}
 
 	var content []canonical.Content
+	stopReason := "end_turn"
+
 	for _, candidate := range gr.Candidates {
 		for _, part := range candidate.Content.Parts {
 			if part.Text != "" {
 				content = append(content, canonical.Content{Type: "text", Text: part.Text})
+			}
+			if part.FunctionCall != nil {
+				inputJSON, _ := json.Marshal(part.FunctionCall.Args)
+				tc := &canonical.ToolCall{
+					ID:    fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, len(content)),
+					Name:  part.FunctionCall.Name,
+					Input: inputJSON,
+				}
+				// Preserve Gemini thought signature for round-trip.
+				if part.ThoughtSignature != "" {
+					tc.Meta = map[string]string{"thought_signature": part.ThoughtSignature}
+				}
+				content = append(content, canonical.Content{
+					Type:     "tool_call",
+					ToolCall: tc,
+				})
+				stopReason = "tool_use"
 			}
 		}
 	}
@@ -284,7 +516,7 @@ func fromGeminiResponse(body []byte) (*canonical.Response, error) {
 			Role:    "assistant",
 			Content: content,
 		}},
-		StopReason: "end_turn",
+		StopReason: stopReason,
 	}, nil
 }
 

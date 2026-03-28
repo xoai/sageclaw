@@ -6,4 +6,4 @@ limits:
   max_tunnels: 100       # max simultaneous tunnel connections
   max_concurrent_requests: 50  # per tunnel
   max_body_size: 10485760      # 10MB
-db: /data/relay.db       # SQLite token store (persisted via Docker volume)
+db: /data/relay.db       # SQLite token store

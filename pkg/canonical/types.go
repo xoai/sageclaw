@@ -19,9 +19,10 @@ type Content struct {
 	Audio      *AudioSource `json:"audio,omitempty"` // type: "audio"
 
 	// Stream delta fields — used during streaming accumulation only.
-	ToolCallID string `json:"tool_call_id,omitempty"` // For tool_call start delta.
-	ToolName   string `json:"tool_name,omitempty"`    // For tool_call start delta.
-	ToolInput  string `json:"tool_input,omitempty"`   // For tool_call input_json_delta (partial JSON).
+	ToolCallID string            `json:"tool_call_id,omitempty"` // For tool_call start delta.
+	ToolName   string            `json:"tool_name,omitempty"`    // For tool_call start delta.
+	ToolInput  string            `json:"tool_input,omitempty"`   // For tool_call input_json_delta (partial JSON).
+	ToolMeta   map[string]string `json:"tool_meta,omitempty"`    // Provider metadata (e.g., Gemini thought_signature).
 }
 
 // AudioSource describes an audio file reference.
@@ -38,6 +39,7 @@ type ToolCall struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+	Meta  map[string]string `json:"meta,omitempty"` // Provider-specific metadata (e.g., Gemini thought_signature).
 }
 
 // ToolResult represents the output of a tool execution.

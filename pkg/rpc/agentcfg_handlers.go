@@ -37,7 +37,7 @@ func (s *Server) handleAgentsListV2(w http.ResponseWriter, r *http.Request) {
 			"has_soul": cfg.Soul != "",
 			"has_behavior": cfg.Behavior != "",
 			"has_bootstrap": cfg.Bootstrap != "",
-			"tools_count":  len(cfg.Tools.Enabled),
+			"tools_profile": cfg.Tools.Profile,
 			"heartbeat_count": len(cfg.Heartbeat.Schedules),
 			"channels_serve":  cfg.Channels.Serve,
 			"channels_count":  len(cfg.Channels.Serve),
@@ -155,6 +155,12 @@ func (s *Server) handleAgentUpdateV2(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
+	}
+
+	// Hot-reload: update the running agent loop with the new config.
+	if s.loopPool != nil {
+		runtimeCfg := agentcfg.ToRuntimeConfig(cfg)
+		s.loopPool.UpdateConfig(id, runtimeCfg)
 	}
 
 	writeJSON(w, map[string]string{"id": id, "status": "updated"})

@@ -122,22 +122,25 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 	}
 
 	for msgIdx, msg := range req.Messages {
-		am := apiMessage{Role: msg.Role}
-		var blocks []any
+		var textBlocks []any
+		var toolUseBlocks []any
+		var toolResultBlocks []any
 
 		for _, c := range msg.Content {
 			switch c.Type {
 			case "text":
+				if c.Text == "" {
+					continue
+				}
 				tb := apiTextBlock{Type: "text", Text: c.Text}
-				// Add cache breakpoint on designated conversation turns.
 				if enableCache && cachePoints[msgIdx] && turnCacheApplied < maxTurnCaches {
 					tb.CacheControl = &cacheCtrl{Type: "ephemeral"}
 					turnCacheApplied++
 				}
-				blocks = append(blocks, tb)
+				textBlocks = append(textBlocks, tb)
 			case "tool_call":
 				if c.ToolCall != nil {
-					blocks = append(blocks, apiToolUseBlock{
+					toolUseBlocks = append(toolUseBlocks, apiToolUseBlock{
 						Type:  "tool_use",
 						ID:    c.ToolCall.ID,
 						Name:  c.ToolCall.Name,
@@ -146,7 +149,7 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 				}
 			case "tool_result":
 				if c.ToolResult != nil {
-					blocks = append(blocks, apiToolResultBlock{
+					toolResultBlocks = append(toolResultBlocks, apiToolResultBlock{
 						Type:      "tool_result",
 						ToolUseID: c.ToolResult.ToolCallID,
 						Content:   c.ToolResult.Content,
@@ -155,7 +158,7 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 				}
 			case "image":
 				if c.Source != nil {
-					blocks = append(blocks, apiImageBlock{
+					textBlocks = append(textBlocks, apiImageBlock{
 						Type: "image",
 						Source: apiImageSource{
 							Type:      c.Source.Type,
@@ -165,30 +168,184 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 					})
 				}
 			case "audio":
-				// Audio not supported by Anthropic — convert to text placeholder.
 				text := "[Voice message]"
 				if c.Audio != nil && c.Audio.Transcript != "" {
 					text = c.Audio.Transcript
 				}
-				blocks = append(blocks, apiTextBlock{Type: "text", Text: text})
+				textBlocks = append(textBlocks, apiTextBlock{Type: "text", Text: text})
 			}
 		}
 
-		// If only one text block, use string shorthand.
-		if len(blocks) == 1 {
-			if tb, ok := blocks[0].(apiTextBlock); ok {
-				am.Content = tb.Text
-			} else {
-				am.Content = blocks
-			}
-		} else {
-			am.Content = blocks
-		}
+		// Anthropic structural rules:
+		// - tool_use blocks go in "assistant" messages
+		// - tool_result blocks go in "user" messages
+		// - tool_result must follow the assistant message with matching tool_use
+		// We split mixed messages into separate properly-roled messages.
 
-		ar.Messages = append(ar.Messages, am)
+		if len(toolUseBlocks) > 0 {
+			// Assistant message: text + tool_use blocks.
+			var blocks []any
+			blocks = append(blocks, textBlocks...)
+			blocks = append(blocks, toolUseBlocks...)
+			ar.Messages = append(ar.Messages, apiMessage{Role: "assistant", Content: blocks})
+		} else if len(toolResultBlocks) > 0 {
+			// User message with tool_result blocks.
+			// Emit any text blocks as a separate user message first if present.
+			if len(textBlocks) > 0 {
+				ar.Messages = append(ar.Messages, apiMessage{Role: "user", Content: makeContent(textBlocks)})
+			}
+			ar.Messages = append(ar.Messages, apiMessage{Role: "user", Content: any(toolResultBlocks)})
+		} else if len(textBlocks) > 0 {
+			// Pure text/image message — preserve original role.
+			role := msg.Role
+			if role == "tool" {
+				role = "user" // Normalize "tool" role to "user" for Anthropic.
+			}
+			ar.Messages = append(ar.Messages, apiMessage{Role: role, Content: makeContent(textBlocks)})
+		}
+		// Skip messages with no translatable content.
 	}
 
+	// Post-process 1: Validate tool_use/tool_result adjacency.
+	// Anthropic requires each tool_result to be in the message immediately
+	// after the assistant message containing the matching tool_use.
+	// Non-adjacent pairs (from cross-model history) are converted to plain text.
+	ar.Messages = flattenNonAdjacentToolPairs(ar.Messages)
+
+	// Post-process 2: Merge consecutive same-role messages.
+	// Anthropic doesn't allow two consecutive "user" or "assistant" messages.
+	ar.Messages = mergeConsecutiveRoles(ar.Messages)
+
 	return json.Marshal(ar)
+}
+
+// makeContent converts a block slice to the appropriate content format.
+// Single text block → string shorthand; otherwise → array.
+func makeContent(blocks []any) apiContent {
+	if len(blocks) == 1 {
+		if tb, ok := blocks[0].(apiTextBlock); ok {
+			return tb.Text
+		}
+	}
+	return blocks
+}
+
+// mergeConsecutiveRoles merges consecutive messages with the same role.
+// Anthropic rejects consecutive user or assistant messages.
+func mergeConsecutiveRoles(msgs []apiMessage) []apiMessage {
+	if len(msgs) <= 1 {
+		return msgs
+	}
+
+	var merged []apiMessage
+	for _, msg := range msgs {
+		if len(merged) > 0 && merged[len(merged)-1].Role == msg.Role {
+			// Merge into previous message — both must become arrays.
+			prev := &merged[len(merged)-1]
+			prevBlocks := toBlockSlice(prev.Content)
+			newBlocks := toBlockSlice(msg.Content)
+			prev.Content = append(prevBlocks, newBlocks...)
+		} else {
+			merged = append(merged, msg)
+		}
+	}
+	return merged
+}
+
+// toBlockSlice normalizes content (string or []any) to []any.
+func toBlockSlice(content apiContent) []any {
+	switch v := content.(type) {
+	case string:
+		return []any{apiTextBlock{Type: "text", Text: v}}
+	case []any:
+		return v
+	default:
+		return []any{content}
+	}
+}
+
+// flattenNonAdjacentToolPairs converts non-adjacent tool_use/tool_result pairs
+// into plain text. Anthropic requires tool_result in the message immediately
+// following the assistant message with the matching tool_use. Historical tool
+// pairs from other providers may not satisfy this — converting them to text
+// preserves the context without breaking the protocol.
+func flattenNonAdjacentToolPairs(msgs []apiMessage) []apiMessage {
+	// Build a map: tool_use ID → message index where it appears.
+	toolUseIndex := make(map[string]int)
+	for i, msg := range msgs {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, block := range toBlockSlice(msg.Content) {
+			if tu, ok := block.(apiToolUseBlock); ok {
+				toolUseIndex[tu.ID] = i
+			}
+		}
+	}
+
+	// Find tool_result blocks that are NOT in the message immediately after their tool_use.
+	orphanedResults := make(map[string]bool) // tool_use_id → orphaned
+	orphanedUses := make(map[string]bool)
+	for i, msg := range msgs {
+		for _, block := range toBlockSlice(msg.Content) {
+			if tr, ok := block.(apiToolResultBlock); ok {
+				useIdx, exists := toolUseIndex[tr.ToolUseID]
+				if !exists || useIdx+1 != i {
+					// tool_result is not adjacent to its tool_use — mark both for flattening.
+					orphanedResults[tr.ToolUseID] = true
+					orphanedUses[tr.ToolUseID] = true
+				}
+			}
+		}
+	}
+
+	if len(orphanedResults) == 0 {
+		return msgs // All pairs are adjacent — no changes needed.
+	}
+
+	// Rebuild messages, converting orphaned tool_use/tool_result to text.
+	var result []apiMessage
+	for _, msg := range msgs {
+		blocks := toBlockSlice(msg.Content)
+		var newBlocks []any
+
+		for _, block := range blocks {
+			switch b := block.(type) {
+			case apiToolUseBlock:
+				if orphanedUses[b.ID] {
+					// Convert to text: "[Used tool: name]"
+					newBlocks = append(newBlocks, apiTextBlock{
+						Type: "text",
+						Text: fmt.Sprintf("[Used tool: %s]", b.Name),
+					})
+				} else {
+					newBlocks = append(newBlocks, b)
+				}
+			case apiToolResultBlock:
+				if orphanedResults[b.ToolUseID] {
+					// Convert to text: "[Tool result: content]"
+					content := b.Content
+					if len(content) > 500 {
+						content = content[:500] + "..."
+					}
+					newBlocks = append(newBlocks, apiTextBlock{
+						Type: "text",
+						Text: fmt.Sprintf("[Tool result: %s]", content),
+					})
+				} else {
+					newBlocks = append(newBlocks, b)
+				}
+			default:
+				newBlocks = append(newBlocks, block)
+			}
+		}
+
+		if len(newBlocks) > 0 {
+			result = append(result, apiMessage{Role: msg.Role, Content: makeContent(newBlocks)})
+		}
+	}
+
+	return result
 }
 
 // --- Response translation: Anthropic → canonical ---

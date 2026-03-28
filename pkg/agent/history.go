@@ -310,24 +310,36 @@ func CompactionSplit(msgs []canonical.Message, keepRatio float64, minKeep int) (
 	splitAt := len(msgs) - keepCount
 
 	// Adjust split to not break tool_use/tool_result pairs.
+	// Move forward past orphaned tool_results at the split boundary.
 	for splitAt < len(msgs)-1 {
-		msg := msgs[splitAt]
-		// If this message is a tool result, include it in toCompact (don't split pair).
-		hasToolResult := false
-		for _, c := range msg.Content {
-			if c.ToolResult != nil {
-				hasToolResult = true
-				break
-			}
-		}
-		if hasToolResult {
-			splitAt++
-		} else {
+		if !hasToolResultContent(msgs[splitAt]) {
 			break
+		}
+		splitAt++ // Include orphaned tool_result in toCompact.
+	}
+
+	// Also move backward if split lands right after an assistant with tool_calls
+	// whose results are in toKeep. We want the tool_call to stay with its results.
+	if splitAt > 0 && splitAt < len(msgs) {
+		prev := msgs[splitAt-1]
+		if prev.Role == "assistant" && HasToolCalls(prev) {
+			// The assistant's tool results should be in the next message(s).
+			// Move split back to include the assistant message in toKeep.
+			splitAt--
 		}
 	}
 
 	return msgs[:splitAt], msgs[splitAt:]
+}
+
+// hasToolResultContent returns true if the message contains any tool_result content.
+func hasToolResultContent(msg canonical.Message) bool {
+	for _, c := range msg.Content {
+		if c.ToolResult != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // InjectSummary creates a summary message to replace compacted messages.

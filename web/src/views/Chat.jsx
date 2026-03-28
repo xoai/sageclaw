@@ -227,8 +227,13 @@ export function Chat() {
           setStreaming('Waiting for permission...');
         }
 
+        if (event.type === 'consent.result') {
+          setConsentPrompt(null); // Dismiss consent modal (may have been granted from another channel).
+        }
+
         if (event.type === 'run.completed') {
           completed = true;
+          setConsentPrompt(null);
           es.close();
           sseRef.current = null;
 
@@ -492,11 +497,7 @@ export function Chat() {
                   <div style="background:var(--bg);padding:14px;border-radius:6px;margin-bottom:16px">
                     <div style="font-weight:700;font-family:var(--mono);font-size:13px;margin-bottom:6px">{consentPrompt.tool_name}</div>
                     <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text-muted)">
-                      <span style="text-transform:capitalize">{consentPrompt.group}</span>
-                      <span>&middot;</span>
-                      <span class={`badge ${consentPrompt.risk_level === 'sensitive' ? 'badge-red' : 'badge-yellow'}`}>
-                        {consentPrompt.risk_level}
-                      </span>
+                      <span style="text-transform:capitalize">{consentPrompt.source && consentPrompt.source.startsWith('mcp:') ? consentPrompt.source : consentPrompt.group}</span>
                     </div>
                     {consentPrompt.explanation && (
                       <div style="color:var(--text-muted);font-size:12px;margin-top:8px;line-height:1.5">{consentPrompt.explanation}</div>

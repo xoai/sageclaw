@@ -56,18 +56,13 @@ type Identity struct {
 
 // ToolsConfig defines which tools the agent can use (tools.yaml).
 type ToolsConfig struct {
-	// Enabled lists tool names. Empty = all tools available (backward compat).
-	Enabled []string `json:"enabled" yaml:"enabled"`
-
 	// Profile sets the base tool set: full, coding, messaging, readonly, minimal.
 	// Default: "" (treated as "full").
 	Profile string `json:"profile,omitempty" yaml:"profile"`
 
 	// Deny removes tools or groups. Use "group:runtime" to deny an entire group.
+	// Tool-level: "write_file". Group-level: "group:runtime".
 	Deny []string `json:"deny,omitempty" yaml:"deny"`
-
-	// AlsoAllow adds tools back after deny. Use "group:fs" to re-allow a group.
-	AlsoAllow []string `json:"also_allow,omitempty" yaml:"also_allow"`
 
 	// ShellDenyGroups controls which deny pattern groups are active for exec.
 	// All groups are enabled by default. Set a group to false to disable it.
@@ -78,6 +73,20 @@ type ToolsConfig struct {
 
 	// Config holds per-tool configuration overrides.
 	Config map[string]map[string]any `json:"config,omitempty" yaml:"config"`
+
+	// Headless mode: no consent prompts. In-profile tools execute freely.
+	// Always-consent groups blocked unless listed in PreAuthorize.
+	Headless bool `json:"headless,omitempty" yaml:"headless"`
+
+	// PreAuthorize lists always-consent groups to auto-approve in headless mode.
+	// Examples: "runtime", "orchestration", "mcp:weather-server".
+	PreAuthorize []string `json:"pre_authorize,omitempty" yaml:"pre_authorize"`
+
+	// Deprecated fields — kept for YAML parsing so we can warn on load.
+	DeprecatedEnabled        []string `json:"-" yaml:"enabled,omitempty"`
+	DeprecatedAlsoAllow      []string `json:"-" yaml:"also_allow,omitempty"`
+	DeprecatedNonInteractive *bool    `json:"-" yaml:"non_interactive,omitempty"`
+	DeprecatedPreAuthGroups  []string `json:"-" yaml:"pre_authorized_groups,omitempty"`
 }
 
 // MCPServerConfig defines how to connect to an external MCP server.

@@ -71,7 +71,7 @@ export function Login({ onComplete }) {
                 value={password} onInput={e => setPassword(e.target.value)} style="margin-bottom:16px"
                 autofocus />
               {error && <div style="color:var(--error);font-size:13px;margin-bottom:12px">{error}</div>}
-              <button class="chat-send" style="width:100%" disabled={loading}>
+              <button class="btn-primary" style="width:100%" disabled={loading}>
                 {loading ? 'Logging in...' : 'Login'}
               </button>
             </form>
@@ -87,7 +87,7 @@ export function Login({ onComplete }) {
                 style="margin-bottom:16px;text-align:center;font-family:var(--mono);font-size:20px;letter-spacing:8px"
                 maxLength={6} pattern="[0-9]*" inputMode="numeric" autofocus />
               {error && <div style="color:var(--error);font-size:13px;margin-bottom:12px">{error}</div>}
-              <button class="chat-send" style="width:100%" disabled={loading || totpCode.length !== 6}>
+              <button class="btn-primary" style="width:100%" disabled={loading || totpCode.length !== 6}>
                 {loading ? 'Verifying...' : 'Verify'}
               </button>
               <button type="button" style="width:100%;margin-top:8px;background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px"

@@ -24,7 +24,7 @@ export function Layout({ children }) {
             group: c.group,
             risk_level: c.risk_level,
             explanation: c.explanation,
-            agentId: c.agent_id,
+            agentName: c.agent_name || c.agent_id,
             nonce: c.nonce,
           });
         }
@@ -70,7 +70,7 @@ export function Layout({ children }) {
                 <div style="flex:1">
                   <div style="font-weight:700;font-size:14px;margin-bottom:4px">Permission Required</div>
                   <div style="font-size:13px;color:var(--text-muted);margin-bottom:2px">
-                    {consent.agentId && <span>Agent <strong>{consent.agentId}</strong> wants to use </span>}
+                    {consent.agentName && <span>Agent <strong>{consent.agentName}</strong> wants to use </span>}
                     <strong style="font-family:var(--mono)">{consent.tool_name}</strong>
                   </div>
                   <div style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text-muted);margin-bottom:8px">

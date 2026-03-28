@@ -60,8 +60,7 @@ type Server struct {
 	router         *provider.Router
 	chanMgr        *channel.Manager
 	mcpMgr         *mcp.Manager
-	consentHandler       func(nonce string, granted bool, tier string) error // Nonce-based consent callback.
-	consentHandlerLegacy func(group string, granted bool)                   // Legacy consent callback (M2→M6 compat).
+	consentHandler func(nonce string, granted bool, tier string) error // Nonce-based consent callback.
 	consentStore         consentGrantStore                                  // For grant list/revoke endpoints.
 	pendingConsent []map[string]any                // Queued consent prompts awaiting response.
 	skillStore     *skillstore.Store
@@ -73,6 +72,7 @@ type Server struct {
 	totp           *auth.TOTP
 	loginLimiter   *auth.LoginLimiter
 	pendingTOTP    map[string]pendingTOTPEntry // nonce → entry
+	loopPool       *agent.LoopPool
 }
 
 // wsConn is a minimal WebSocket connection using the standard upgrade.
@@ -171,11 +171,6 @@ func WithConsentHandler(fn func(nonce string, granted bool, tier string) error) 
 	return func(s *Server) { s.consentHandler = fn }
 }
 
-// WithConsentHandlerLegacy sets the legacy group-based consent callback (M2→M6 compat).
-func WithConsentHandlerLegacy(fn func(group string, granted bool)) ServerOption {
-	return func(s *Server) { s.consentHandlerLegacy = fn }
-}
-
 // WithSkillStore adds skill marketplace management to the server.
 func WithSkillStore(ss *skillstore.Store) ServerOption {
 	return func(s *Server) { s.skillStore = ss }
@@ -250,6 +245,11 @@ func WithTOTP(t *auth.TOTP) ServerOption {
 // WithLoginLimiter adds login rate limiting to the server.
 func WithLoginLimiter(l *auth.LoginLimiter) ServerOption {
 	return func(s *Server) { s.loginLimiter = l }
+}
+
+// WithLoopPool adds the agent loop pool for live config updates.
+func WithLoopPool(lp *agent.LoopPool) ServerOption {
+	return func(s *Server) { s.loopPool = lp }
 }
 
 // NewServer creates a new RPC server.
@@ -534,8 +534,26 @@ func (s *Server) EventHandler() agent.EventHandler {
 				"explanation": e.Consent.Explanation,
 				"nonce":       e.Consent.Nonce,
 				"agent_id":    e.AgentID,
+				"agent_name":  s.resolveAgentName(e.AgentID),
 				"session_id":  e.SessionID,
 			})
+			s.mu.Unlock()
+		}
+		// Clear pending consent on result (consent may have been handled
+		// from any channel — Telegram, CLI, etc — not just the web UI).
+		if e.Type == agent.EventConsentResult {
+			s.mu.Lock()
+			filtered := s.pendingConsent[:0]
+			for _, c := range s.pendingConsent {
+				// Clear entries matching this agent+session.
+				aID, _ := c["agent_id"].(string)
+				sID, _ := c["session_id"].(string)
+				if aID == e.AgentID && sID == e.SessionID {
+					continue // Remove — consent was handled.
+				}
+				filtered = append(filtered, c)
+			}
+			s.pendingConsent = filtered
 			s.mu.Unlock()
 		}
 		data, _ := json.Marshal(payload)

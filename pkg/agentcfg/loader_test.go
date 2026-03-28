@@ -42,9 +42,9 @@ You are a helpful test bot.
 
 	// Write tools.yaml
 	os.WriteFile(filepath.Join(agentDir, "tools.yaml"), []byte(`
-enabled:
-  - web_search
-  - memory_search
+profile: coding
+deny:
+  - group:runtime
 config:
   web_search:
     max_results: 5
@@ -121,8 +121,11 @@ overrides:
 	}
 
 	// Tools
-	if len(cfg.Tools.Enabled) != 2 {
-		t.Errorf("Tools.Enabled = %v, want 2 tools", cfg.Tools.Enabled)
+	if cfg.Tools.Profile != "coding" {
+		t.Errorf("Tools.Profile = %q, want %q", cfg.Tools.Profile, "coding")
+	}
+	if len(cfg.Tools.Deny) != 1 || cfg.Tools.Deny[0] != "group:runtime" {
+		t.Errorf("Tools.Deny = %v, want [group:runtime]", cfg.Tools.Deny)
 	}
 	if cfg.Tools.Config["web_search"]["max_results"] != 5 {
 		t.Errorf("web_search.max_results = %v, want 5", cfg.Tools.Config["web_search"]["max_results"])
@@ -265,7 +268,7 @@ func TestSaveAndLoad_RoundTrip(t *testing.T) {
 		Soul:     "# Soul\n\nI am a test bot.",
 		Behavior: "# Behavior\n\nBe concise.",
 		Tools: ToolsConfig{
-			Enabled: []string{"web_search"},
+			Profile: "messaging",
 		},
 		Memory: MemoryConfig{
 			Scope:     "global",
@@ -302,8 +305,8 @@ func TestSaveAndLoad_RoundTrip(t *testing.T) {
 	if loaded.Behavior != original.Behavior {
 		t.Errorf("Behavior mismatch")
 	}
-	if len(loaded.Tools.Enabled) != 1 || loaded.Tools.Enabled[0] != "web_search" {
-		t.Errorf("Tools.Enabled = %v, want [web_search]", loaded.Tools.Enabled)
+	if loaded.Tools.Profile != "messaging" {
+		t.Errorf("Tools.Profile = %q, want %q", loaded.Tools.Profile, "messaging")
 	}
 	if loaded.Memory.Scope != "global" {
 		t.Errorf("Memory.Scope = %q, want global", loaded.Memory.Scope)
@@ -493,7 +496,10 @@ func TestToRuntimeConfig(t *testing.T) {
 			MaxIterations: 15,
 		},
 		Tools: ToolsConfig{
-			Enabled: []string{"web_search", "memory_search"},
+			Profile:  "coding",
+			Deny:     []string{"group:runtime"},
+			Headless: true,
+			PreAuthorize: []string{"mcp:weather"},
 		},
 	}
 
@@ -511,8 +517,17 @@ func TestToRuntimeConfig(t *testing.T) {
 	if rc.MaxIterations != 15 {
 		t.Errorf("MaxIterations = %d, want 15", rc.MaxIterations)
 	}
-	if len(rc.Tools) != 2 {
-		t.Errorf("Tools = %v, want 2", rc.Tools)
+	if rc.ToolProfile != "coding" {
+		t.Errorf("ToolProfile = %q, want coding", rc.ToolProfile)
+	}
+	if len(rc.ToolDeny) != 1 || rc.ToolDeny[0] != "group:runtime" {
+		t.Errorf("ToolDeny = %v, want [group:runtime]", rc.ToolDeny)
+	}
+	if !rc.Headless {
+		t.Error("Headless should be true")
+	}
+	if len(rc.PreAuthorize) != 1 || rc.PreAuthorize[0] != "mcp:weather" {
+		t.Errorf("PreAuthorize = %v, want [mcp:weather]", rc.PreAuthorize)
 	}
 	if rc.SystemPrompt == "" {
 		t.Error("SystemPrompt should not be empty")

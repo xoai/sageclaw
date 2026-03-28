@@ -4,9 +4,13 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+// DefaultCooldown is the time after a deny before the same group can be re-prompted.
+const DefaultCooldown = 60 * time.Second
 
 // ConsentGrant represents a persistent "always allow" consent grant.
 type ConsentGrant struct {
@@ -19,32 +23,27 @@ type ConsentGrant struct {
 }
 
 // PersistentConsentStore backs consent decisions with SQLite.
-// Session-scoped decisions (allow-once, deny) stay in-memory for speed.
+// Session-scoped decisions (allow-once) stay in-memory for speed.
 // "Always allow" decisions are persisted to survive restarts.
+// Denials are tracked as cooldown timestamps (soft deny).
 type PersistentConsentStore struct {
-	mu      sync.RWMutex
-	session map[string]map[string]bool // sessionID -> group -> granted
-	denied  map[string]map[string]bool // sessionID -> group -> denied (separate from grants)
-	db      *sql.DB
+	mu       sync.RWMutex
+	session  map[string]map[string]bool      // sessionID -> group -> granted
+	cooldown map[string]map[string]time.Time // sessionID -> group -> deny timestamp
+	db       *sql.DB
 }
 
 // NewPersistentConsentStore creates a consent store backed by SQLite.
 func NewPersistentConsentStore(db *sql.DB) *PersistentConsentStore {
 	return &PersistentConsentStore{
-		session: make(map[string]map[string]bool),
-		denied:  make(map[string]map[string]bool),
-		db:      db,
+		session:  make(map[string]map[string]bool),
+		cooldown: make(map[string]map[string]time.Time),
+		db:       db,
 	}
 }
 
-// HasConsent checks in order: safe auto-consent -> persistent "always" ->
-// session-scoped grant -> not consented.
+// HasConsent checks in order: persistent "always" -> session-scoped grant -> not consented.
 func (s *PersistentConsentStore) HasConsent(sessionID, ownerID, platform, group string) bool {
-	// Safe tools never need consent.
-	if GroupRisk[group] == RiskSafe {
-		return true
-	}
-
 	// Check persistent "always allow" grants.
 	if ownerID != "" && platform != "" && s.db != nil {
 		var count int
@@ -67,7 +66,7 @@ func (s *PersistentConsentStore) HasConsent(sessionID, ownerID, platform, group 
 	return groups[group]
 }
 
-// GrantOnce records session-scoped consent (current behavior).
+// GrantOnce records session-scoped consent.
 func (s *PersistentConsentStore) GrantOnce(sessionID, group string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,55 +77,43 @@ func (s *PersistentConsentStore) GrantOnce(sessionID, group string) {
 }
 
 // GrantAlways persists consent to SQLite (survives restarts).
-// Upsert: UPDATE existing row on re-grant (preserves row ID for audit), INSERT only if no row.
+// Uses upsert to prevent duplicate rows under concurrent calls.
 func (s *PersistentConsentStore) GrantAlways(ownerID, platform, group string) error {
 	if s.db == nil {
 		return fmt.Errorf("no database for persistent consent")
 	}
 
-	// Try update first (re-grant after revoke).
-	result, err := s.db.Exec(
-		`UPDATE consent_grants SET revoked_at = NULL, granted_at = datetime('now')
-		 WHERE owner_id = ? AND platform = ? AND tool_group = ?`,
-		ownerID, platform, group)
-	if err != nil {
-		return fmt.Errorf("updating consent grant: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	if n > 0 {
-		return nil
-	}
-
-	// Insert new grant.
-	_, err = s.db.Exec(
+	_, err := s.db.Exec(
 		`INSERT INTO consent_grants (id, owner_id, platform, tool_group)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(owner_id, platform, tool_group)
+		 DO UPDATE SET revoked_at = NULL, granted_at = datetime('now')`,
 		uuid.NewString(), ownerID, platform, group)
 	if err != nil {
-		return fmt.Errorf("inserting consent grant: %w", err)
+		return fmt.Errorf("upserting consent grant: %w", err)
 	}
 	return nil
 }
 
-// Deny records a session-scoped denial. Denials are NOT persisted.
+// Deny records a cooldown timestamp for a group. The agent can re-ask after the cooldown expires.
 func (s *PersistentConsentStore) Deny(sessionID, group string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.denied[sessionID] == nil {
-		s.denied[sessionID] = make(map[string]bool)
+	if s.cooldown[sessionID] == nil {
+		s.cooldown[sessionID] = make(map[string]time.Time)
 	}
-	s.denied[sessionID][group] = true
+	s.cooldown[sessionID][group] = time.Now()
 }
 
-// IsDenied checks if a group was explicitly denied in this session.
-func (s *PersistentConsentStore) IsDenied(sessionID, group string) bool {
+// InCooldown returns true if the group was denied within the cooldown window.
+func (s *PersistentConsentStore) InCooldown(sessionID, group string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	groups, ok := s.denied[sessionID]
+	deniedAt, ok := s.cooldown[sessionID][group]
 	if !ok {
 		return false
 	}
-	return groups[group]
+	return time.Since(deniedAt) < DefaultCooldown
 }
 
 // Revoke removes a persistent "always" grant (sets revoked_at).
@@ -203,10 +190,23 @@ func (s *PersistentConsentStore) ListGrants(ownerID, platform string) ([]Consent
 	return grants, nil
 }
 
-// ClearSession removes all session-scoped consent records.
+// ClearSession removes all session-scoped consent and cooldown records.
 func (s *PersistentConsentStore) ClearSession(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.session, sessionID)
-	delete(s.denied, sessionID)
+	delete(s.cooldown, sessionID)
+}
+
+// InvalidateSessionGrants clears session grants for groups not in the new profile.
+// Always-consent group grants are preserved (they're valid across profile changes).
+func (s *PersistentConsentStore) InvalidateSessionGrants(sessionID string, newProfileGroups map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	grants := s.session[sessionID]
+	for group := range grants {
+		if !newProfileGroups[group] && !AlwaysConsentGroups[group] {
+			delete(grants, group)
+		}
+	}
 }

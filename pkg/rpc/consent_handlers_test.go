@@ -95,16 +95,8 @@ func TestHandleConsentResponse_DefaultTierOnce(t *testing.T) {
 	}
 }
 
-func TestHandleConsentResponse_LegacyFormat(t *testing.T) {
-	var legacyCalled bool
-	var legacyGroup string
-
-	srv := &Server{
-		consentHandlerLegacy: func(group string, granted bool) {
-			legacyCalled = true
-			legacyGroup = group
-		},
-	}
+func TestHandleConsentResponse_NoNonce(t *testing.T) {
+	srv := &Server{}
 
 	body := `{"group":"runtime","granted":true}`
 	req := httptest.NewRequest("POST", "/api/consent", strings.NewReader(body))
@@ -113,14 +105,9 @@ func TestHandleConsentResponse_LegacyFormat(t *testing.T) {
 
 	srv.handleConsentResponse(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
-	}
-	if !legacyCalled {
-		t.Error("legacy handler should be called for group-based format")
-	}
-	if legacyGroup != "runtime" {
-		t.Errorf("group = %q, want runtime", legacyGroup)
+	// Without a nonce or consent handler, should return error.
+	if w.Code == http.StatusOK {
+		t.Error("should not return 200 without consent handler")
 	}
 }
 

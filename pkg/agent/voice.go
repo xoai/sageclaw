@@ -75,9 +75,7 @@ func (l *Loop) RunVoice(ctx context.Context, sessionID string, history []canonic
 	// Get tool definitions.
 	tools := l.toolRegistry.ListForAgent(
 		l.config.ToolProfile,
-		l.config.Tools,
 		l.config.ToolDeny,
-		l.config.ToolAlsoAllow,
 	)
 
 	// Build live session config.
@@ -458,9 +456,7 @@ func (l *Loop) VoiceSessionConfig() *provider.LiveSessionConfig {
 	}
 	tools := l.toolRegistry.ListForAgent(
 		l.config.ToolProfile,
-		l.config.Tools,
 		l.config.ToolDeny,
-		l.config.ToolAlsoAllow,
 	)
 	return &provider.LiveSessionConfig{
 		Model:              l.config.VoiceModel,

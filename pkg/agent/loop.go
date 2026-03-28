@@ -25,13 +25,11 @@ type Config struct {
 	Model         string
 	MaxTokens     int
 	MaxIterations int
-	Timeout       time.Duration // Wall clock timeout. Default: 300s.
-	Tools         []string      // Tool names to enable (legacy — intersected with profile).
-	ToolProfile   string        // Tool profile: full, coding, messaging, readonly, minimal.
-	ToolDeny      []string      // Tools or groups to deny (e.g. "group:runtime").
-	ToolAlsoAllow []string      // Tools to add back after deny.
-	PreAuthorizedGroups []string // Tool groups auto-consented (replaces NonInteractive). ["*"] = all.
-	NonInteractive      bool     // Deprecated: use PreAuthorizedGroups. Auto-migrated to ["*"].
+	Timeout      time.Duration // Wall clock timeout. Default: 300s.
+	ToolProfile  string        // Tool profile: full, coding, messaging, readonly, minimal.
+	ToolDeny     []string      // Tools or groups to deny (e.g. "group:runtime").
+	Headless     bool          // If true, no consent prompts — in-profile only, pre-authorize for always-consent.
+	PreAuthorize []string      // Always-consent groups to auto-approve in headless mode (e.g. "runtime", "mcp:weather").
 
 	// Voice configuration.
 	VoiceEnabled  bool   // If true, this loop can handle voice messages.
@@ -137,11 +135,6 @@ func NewLoop(
 	}
 	if onEvent == nil {
 		onEvent = func(Event) {}
-	}
-	// Migrate deprecated NonInteractive to PreAuthorizedGroups.
-	if config.NonInteractive && len(config.PreAuthorizedGroups) == 0 {
-		config.PreAuthorizedGroups = []string{"*"}
-		log.Printf("[%s] NonInteractive is deprecated; migrated to PreAuthorizedGroups: [\"*\"]", config.AgentID)
 	}
 	l := &Loop{
 		config:       config,
@@ -337,15 +330,18 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 	// Get tool definitions filtered by profile and access control.
 	tools := l.toolRegistry.ListForAgent(
 		l.config.ToolProfile,
-		l.config.Tools,
 		l.config.ToolDeny,
-		l.config.ToolAlsoAllow,
 	)
 
 	// Add MCP injection protection prompt when MCP tools are available.
 	if l.toolRegistry.HasMCPTools() {
 		system += "\n\n" + mcpInjectionWarning
 	}
+
+	// Note: capability restrictions via system prompt are no longer needed.
+	// All tools are visible to the LLM regardless of profile — the consent
+	// gate in checkConsent controls access. The LLM will use tools (which
+	// trigger consent) rather than native capabilities.
 
 	// Measure system prompt size and warn if large.
 	promptTokens := len(system) / 4 // chars/4 estimate
@@ -464,17 +460,9 @@ func (l *Loop) drainInjections(history *[]canonical.Message) {
 	}
 }
 
-// containsGroup checks if a group list contains the target or wildcard.
-func containsGroup(groups []string, target string) bool {
-	for _, g := range groups {
-		if g == "*" || g == target {
-			return true
-		}
-	}
-	return false
-}
-
 // checkConsent verifies the user has consented to the tool's group.
+// Profile-based model: in-profile tools execute freely, always-consent groups
+// always prompt, out-of-profile tools prompt. Deny list is defense-in-depth.
 // Returns a ToolResult if consent is missing or denied (skip execution),
 // or nil if consent is granted (proceed with execution).
 func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.ToolCall, iteration int) *canonical.ToolResult {
@@ -482,42 +470,68 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 		return nil // No consent store = all tools allowed.
 	}
 
-	group, risk, _, ok := l.toolRegistry.GetMeta(tc.Name)
+	group, _, source, ok := l.toolRegistry.GetMeta(tc.Name)
 	if !ok {
 		return nil // Unknown tool — let execution handle the error.
 	}
 
-	// Safe tools auto-consent.
-	if risk == tool.RiskSafe {
-		return nil
-	}
-
-	// PreAuthorizedGroups bypass consent (replaces NonInteractive).
-	if containsGroup(l.config.PreAuthorizedGroups, group) {
-		return nil
-	}
-
-	// Resolve owner for persistent consent lookup.
-	ownerID, platform := l.resolveOwner(sessionID)
-
-	// Check persistent "always" + session grants.
-	if l.consentStore.HasConsent(sessionID, ownerID, platform, group) {
-		return nil
-	}
-
-	// Previously denied — return error without re-prompting.
-	if l.consentStore.IsDenied(sessionID, group) {
+	// Step 1: Check deny list (defense-in-depth — ListForAgent already filters).
+	if l.isDenied(tc.Name, group) {
 		return &canonical.ToolResult{
 			ToolCallID: tc.ID,
-			Content:    fmt.Sprintf("Permission denied: %s tools were denied for this session. Do not attempt to use %s tools again.", group, group),
+			Content:    fmt.Sprintf("Tool %s is not available. The user can configure tool access via the dashboard or TUI.", tc.Name),
 			IsError:    true,
 		}
 	}
 
-	// Generate nonce for this consent request.
+	// Step 2: Determine if consent is needed.
+	needsConsent := false
+	if tool.AlwaysConsentGroups[group] {
+		needsConsent = true // Always-consent regardless of profile.
+	} else if !tool.IsInProfile(l.config.ToolProfile, group) {
+		needsConsent = true // Out-of-profile tool.
+	}
+	// In-profile + not always-consent = no consent needed.
+
+	if !needsConsent {
+		return nil // Execute freely.
+	}
+
+	// Step 3: Headless agents can't prompt — check pre-authorize or block.
+	if l.config.Headless {
+		if l.isPreAuthorized(group, source) {
+			return nil
+		}
+		return &canonical.ToolResult{
+			ToolCallID: tc.ID,
+			Content:    fmt.Sprintf("Headless agent cannot use %s tools without pre-authorization. Configure pre_authorize in agent settings.", group),
+			IsError:    true,
+		}
+	}
+
+	// Step 4: Check existing grants.
+	ownerID, platform := l.resolveOwner(sessionID)
+	consentKey := group
+	if strings.HasPrefix(source, "mcp:") {
+		consentKey = source // per-server: "mcp:weather"
+	}
+	if l.consentStore.HasConsent(sessionID, ownerID, platform, consentKey) {
+		return nil
+	}
+
+	// Step 5: Check cooldown from recent deny.
+	if l.consentStore.InCooldown(sessionID, consentKey) {
+		return &canonical.ToolResult{
+			ToolCallID: tc.ID,
+			Content:    fmt.Sprintf("Permission for %s was recently denied. Wait before asking again.", group),
+			IsError:    true,
+		}
+	}
+
+	// Step 6: Prompt for consent.
 	var nonce string
 	if l.nonceManager != nil {
-		pc, err := l.nonceManager.Generate(l.config.AgentID, sessionID, group)
+		pc, err := l.nonceManager.Generate(l.config.AgentID, sessionID, consentKey)
 		if err != nil {
 			log.Printf("[%s] consent nonce generation failed: %v", sessionID, err)
 			return &canonical.ToolResult{
@@ -529,7 +543,12 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 		nonce = pc.Nonce
 	}
 
-	// Emit consent request with nonce and wait for response via inject channel.
+	// Derive risk level for adapter compatibility.
+	riskLevel := "moderate"
+	if tool.AlwaysConsentGroups[group] {
+		riskLevel = "sensitive"
+	}
+
 	l.onEvent(Event{
 		Type:      EventConsentNeeded,
 		SessionID: sessionID,
@@ -538,19 +557,28 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 		Consent: &ConsentRequest{
 			ToolName:    tc.Name,
 			Group:       group,
-			RiskLevel:   risk,
-			Explanation: tool.RiskExplanation(group),
+			Source:      source,
+			RiskLevel:   riskLevel,
+			Explanation: tool.GroupExplanation(group, source),
 			Nonce:       nonce,
 		},
 	})
 
 	// Wait for consent response via inject channel (with timeout).
+	// Non-consent messages are buffered locally and re-injected on exit
+	// to avoid a tight spin loop from read-requeue cycles.
 	consentTimeout := 180 * time.Second
 	timer := time.NewTimer(consentTimeout)
 	defer timer.Stop()
 
-	// Expected token prefix for nonce-based matching.
 	noncePrefix := "__consent__" + nonce + "_"
+	var buffered []canonical.Message
+
+	requeue := func() {
+		for _, m := range buffered {
+			l.Inject(m)
+		}
+	}
 
 	for {
 		select {
@@ -576,53 +604,41 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 				case "grant":
 					switch tier {
 					case "always":
-						if err := l.consentStore.GrantAlways(ownerID, platform, group); err != nil {
+						if err := l.consentStore.GrantAlways(ownerID, platform, consentKey); err != nil {
 							log.Printf("[%s] persistent consent grant failed: %v — falling back to session grant", sessionID, err)
 						}
-						l.consentStore.GrantOnce(sessionID, group) // Also set session cache.
-					default: // "once"
-						l.consentStore.GrantOnce(sessionID, group)
+						l.consentStore.GrantOnce(sessionID, consentKey)
+					default:
+						l.consentStore.GrantOnce(sessionID, consentKey)
 					}
-					l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "granted:" + group + ":" + tier, Iteration: iteration})
+					l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "granted:" + consentKey + ":" + tier, Iteration: iteration})
+					requeue()
 					return nil
 
 				case "deny":
-					l.consentStore.Deny(sessionID, group)
-					l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "denied:" + group, Iteration: iteration})
+					l.consentStore.Deny(sessionID, consentKey)
+					l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "denied:" + consentKey, Iteration: iteration})
+					requeue()
 					return &canonical.ToolResult{
 						ToolCallID: tc.ID,
-						Content:    fmt.Sprintf("User denied permission for %s tools. Do not attempt to use %s tools again in this session.", group, group),
+						Content:    fmt.Sprintf("User denied permission for %s tools. Do not ask again immediately — wait before retrying.", group),
 						IsError:    true,
 					}
 				}
 			}
 
-			// Legacy matching (backward compat during M2→M6 transition).
-			switch text {
-			case "__consent_grant__" + group:
-				l.consentStore.GrantOnce(sessionID, group)
-				l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "granted:" + group, Iteration: iteration})
-				return nil
-			case "__consent_deny__" + group:
-				l.consentStore.Deny(sessionID, group)
-				l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "denied:" + group, Iteration: iteration})
-				return &canonical.ToolResult{
-					ToolCallID: tc.ID,
-					Content:    fmt.Sprintf("User denied permission for %s tools. Do not attempt to use %s tools again in this session.", group, group),
-					IsError:    true,
-				}
-			default:
-				// Not a consent message for this nonce — re-queue.
-				l.Inject(msg)
-			}
+			// Not a consent message — buffer locally (no re-queue spin).
+			buffered = append(buffered, msg)
 
 		case <-timer.C:
+			requeue()
 			return &canonical.ToolResult{
 				ToolCallID: tc.ID,
 				Content:    fmt.Sprintf("Consent timeout: no response for %s tool permission. Tool execution blocked.", group),
 				IsError:    true,
 			}
 		case <-ctx.Done():
+			requeue()
 			return &canonical.ToolResult{
 				ToolCallID: tc.ID,
 				Content:    "Context cancelled while waiting for consent.",
@@ -631,3 +647,31 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 		}
 	}
 }
+
+// isDenied checks if a tool or its group is in the deny list.
+func (l *Loop) isDenied(toolName, group string) bool {
+	for _, d := range l.config.ToolDeny {
+		if d == toolName {
+			return true
+		}
+		if strings.HasPrefix(d, "group:") && strings.TrimPrefix(d, "group:") == group {
+			return true
+		}
+	}
+	return false
+}
+
+// isPreAuthorized checks if a group or MCP server is in the pre-authorize list.
+func (l *Loop) isPreAuthorized(group, source string) bool {
+	for _, pa := range l.config.PreAuthorize {
+		if pa == group {
+			return true
+		}
+		// MCP per-server: "mcp:weather" matches source "mcp:weather"
+		if strings.HasPrefix(source, "mcp:") && pa == source {
+			return true
+		}
+	}
+	return false
+}
+

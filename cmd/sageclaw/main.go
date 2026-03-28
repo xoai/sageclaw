@@ -566,7 +566,6 @@ func run() error {
 					SystemPrompt: ac.SystemPrompt,
 					Model:        model,
 					MaxTokens:    maxTokens,
-					Tools:        ac.Tools,
 				}
 			}
 			log.Printf("agents: %d loaded from YAML config", len(agentConfigs))
@@ -829,6 +828,9 @@ Key behaviors:
 	// --- Bus + Pipeline ---
 	msgBus := localbus.New()
 
+	// Forward-declare pipeline for consent callbacks in channel factories.
+	var p *pipeline.Pipeline
+
 	// Channel manager for hot-reload.
 	chanMgr := channel.NewManager(ctx, msgBus)
 	chanMgr.RegisterFactory("telegram", func(cfg map[string]string) (channel.Channel, error) {
@@ -840,7 +842,16 @@ Key behaviors:
 		if connID == "" {
 			connID = "telegram"
 		}
-		return telegram.New(connID, token, telegram.WithAudioStore(audioStore)), nil
+		return telegram.New(connID, token,
+			telegram.WithAudioStore(audioStore),
+			telegram.WithConsentCallback(func(nonce string, granted bool, tier string) {
+				if p != nil {
+					if err := p.InjectConsent(nonce, granted, tier); err != nil {
+						log.Printf("telegram: consent inject failed: %v", err)
+					}
+				}
+			}),
+		), nil
 	})
 	chanMgr.RegisterFactory("discord", func(cfg map[string]string) (channel.Channel, error) {
 		token := cfg["DISCORD_BOT_TOKEN"]
@@ -851,7 +862,15 @@ Key behaviors:
 		if connID == "" {
 			connID = "discord"
 		}
-		return discord.New(connID, token), nil
+		d := discord.New(connID, token)
+		d.SetConsentCallback(func(nonce string, granted bool, tier string) {
+			if p != nil {
+				if err := p.InjectConsent(nonce, granted, tier); err != nil {
+					log.Printf("discord: consent inject failed: %v", err)
+				}
+			}
+		})
+		return d, nil
 	})
 	chanMgr.RegisterFactory("zalo", func(cfg map[string]string) (channel.Channel, error) {
 		connID := cfg["__conn_id"]
@@ -864,7 +883,15 @@ Key behaviors:
 			"secret_key":   firstNonEmpty(cfg["secret_key"], cfg["ZALO_SECRET_KEY"]),
 			"access_token": firstNonEmpty(cfg["access_token"], cfg["ZALO_ACCESS_TOKEN"]),
 		}
-		return zalo.NewFromCredentials(connID, creds), nil
+		return zalo.NewFromCredentials(connID, creds,
+			zalo.WithConsentCallback(func(nonce string, granted bool, tier string) {
+				if p != nil {
+					if err := p.InjectConsent(nonce, granted, tier); err != nil {
+						log.Printf("zalo: consent inject failed: %v", err)
+					}
+				}
+			}),
+		), nil
 	})
 	chanMgr.RegisterFactory("zalo_bot", func(cfg map[string]string) (channel.Channel, error) {
 		token := firstNonEmpty(cfg["token"], cfg["ZALO_BOT_TOKEN"])
@@ -875,7 +902,15 @@ Key behaviors:
 		if connID == "" {
 			connID = "zalo_bot"
 		}
-		return zalobot.New(connID, token), nil
+		return zalobot.New(connID, token,
+			zalobot.WithConsentCallback(func(nonce string, granted bool, tier string) {
+				if p != nil {
+					if err := p.InjectConsent(nonce, granted, tier); err != nil {
+						log.Printf("zalo_bot: consent inject failed: %v", err)
+					}
+				}
+			}),
+		), nil
 	})
 	chanMgr.RegisterFactory("whatsapp", func(cfg map[string]string) (channel.Channel, error) {
 		connID := cfg["__conn_id"]
@@ -889,10 +924,17 @@ Key behaviors:
 			"verify_token":    firstNonEmpty(cfg["verify_token"], cfg["WHATSAPP_VERIFY_TOKEN"]),
 			"app_secret":      firstNonEmpty(cfg["app_secret"], cfg["WHATSAPP_APP_SECRET"]),
 		}
-		return whatsapp.NewFromCredentials(connID, creds), nil
+		return whatsapp.NewFromCredentials(connID, creds,
+			whatsapp.WithConsentCallback(func(nonce string, granted bool, tier string) {
+				if p != nil {
+					if err := p.InjectConsent(nonce, granted, tier); err != nil {
+						log.Printf("whatsapp: consent inject failed: %v", err)
+					}
+				}
+			}),
+		), nil
 	})
 
-	var p *pipeline.Pipeline
 	scheduler := pipeline.NewLaneScheduler(pipeline.DefaultLaneLimits(), func(ctx context.Context, req pipeline.RunRequest) {
 		if p != nil {
 			p.RunAgent(ctx, req)
@@ -1043,9 +1085,9 @@ Key behaviors:
 		rpc.WithMCPManager(mcpMgr),
 		rpc.WithSkillStore(skillStore),
 		rpc.WithConsentHandler(p.InjectConsent),
-		rpc.WithConsentHandlerLegacy(p.InjectConsentLegacy),
 		rpc.WithConsentStore(consentStore),
 		rpc.WithAudioBasePath(audioStoragePath),
+		rpc.WithLoopPool(loopPool),
 	)
 	// Wire SSE broadcast now that rpcServer exists.
 	sseBroadcast = rpcServer.EventHandler()
@@ -1086,7 +1128,16 @@ Key behaviors:
 	}
 
 	if telegramToken != "" && !f.forceCLI && !dbPlatforms["telegram"] {
-		tg := telegram.New("telegram", telegramToken, telegram.WithAudioStore(audioStore))
+		tg := telegram.New("telegram", telegramToken,
+			telegram.WithAudioStore(audioStore),
+			telegram.WithConsentCallback(func(nonce string, granted bool, tier string) {
+				if p != nil {
+					if err := p.InjectConsent(nonce, granted, tier); err != nil {
+						log.Printf("telegram: consent inject failed: %v", err)
+					}
+				}
+			}),
+		)
 		if err := tg.Start(startCtx, msgBus); err != nil {
 			return fmt.Errorf("starting telegram: %w", err)
 		}
@@ -1243,26 +1294,53 @@ Key behaviors:
 		log.Println("SageClaw is running. Listening for messages...")
 	}
 
-	// --- Telegram streaming forwarder ---
-	// Forward EventChunk/EventRunCompleted events to Telegram adapters
-	// for progressive message editing.
+	// --- Channel event forwarder ---
+	// Forward streaming events to Telegram adapters and consent events
+	// to all channel adapters that implement ConsentPrompt.
 	telegramEventForwarder = func(e agent.Event) {
-		if e.Type != agent.EventChunk && e.Type != agent.EventRunCompleted && e.Type != agent.EventRunFailed {
-			return
-		}
 		if e.SessionID == "" {
 			return
 		}
-		// Look up the session to get channel and chatID.
+
+		// Consent events → route to the appropriate channel adapter's RenderConsent.
+		if e.Type == agent.EventConsentNeeded && e.Consent != nil {
+			sess, err := appStore.GetSession(startCtx, e.SessionID)
+			if err != nil || sess == nil {
+				log.Printf("consent: session %s not found for consent event", e.SessionID)
+				return
+			}
+			ch := chanMgr.GetChannel(sess.Channel)
+			if ch == nil {
+				return
+			}
+			if cp, ok := ch.(channel.ConsentPrompt); ok {
+				req := channel.ConsentPromptRequest{
+					ChatID:      sess.ChatID,
+					Nonce:       e.Consent.Nonce,
+					ToolName:    e.Consent.ToolName,
+					Group:       e.Consent.Group,
+					RiskLevel:   e.Consent.RiskLevel,
+					Explanation: e.Consent.Explanation,
+					Options:     channel.DefaultConsentOptions(e.Consent.Nonce),
+				}
+				if err := cp.RenderConsent(startCtx, req); err != nil {
+					log.Printf("consent: render failed on %s: %v", sess.Channel, err)
+				}
+			}
+			return
+		}
+
+		// Streaming events → forward to Telegram adapters only.
+		if e.Type != agent.EventChunk && e.Type != agent.EventRunCompleted && e.Type != agent.EventRunFailed {
+			return
+		}
 		sess, err := appStore.GetSession(startCtx, e.SessionID)
 		if err != nil || sess == nil {
 			return
 		}
-		// Only forward to Telegram channels.
 		if !strings.HasPrefix(sess.Channel, "tg_") && sess.Channel != "telegram" {
 			return
 		}
-		// Find the Telegram adapter via channel manager.
 		chanMgr.ForEachChannel(func(ch channel.Channel) {
 			if tg, ok := ch.(*telegram.Adapter); ok && (tg.ConnID() == sess.Channel) {
 				tg.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
