@@ -42,7 +42,7 @@ export default function Tools() {
   return (
     <div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
-        <h1 style="margin-bottom:0">Tool Registry</h1>
+        <span style="font-size:14px;font-weight:600">Tool Registry</span>
         <div style="display:flex;gap:4px">
           <button class={`btn-small ${viewMode === 'list' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setViewMode('list')}>List</button>

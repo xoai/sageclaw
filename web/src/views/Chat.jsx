@@ -1,5 +1,6 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
+import { SessionPanel } from '../components/SessionPanel';
 
 // Direct fetch wrapper.
 async function callRPC(method, params) {
@@ -22,7 +23,6 @@ async function callRPC(method, params) {
   }
 }
 
-// Extract text from canonical content blocks.
 function extractText(content) {
   if (!content) return '';
   if (typeof content === 'string') return content;
@@ -32,20 +32,23 @@ function extractText(content) {
   return content.text || String(content);
 }
 
-// Extract audio source from canonical content blocks.
 function extractAudio(content) {
   if (!content || !Array.isArray(content)) return null;
   for (const c of content) {
     if (c && c.type === 'audio' && c.audio) {
-      return c.audio; // { file_path, mime_type, duration_ms, transcript }
+      return c.audio;
     }
   }
   return null;
 }
 
 export function Chat() {
-  // View state: 'list' | 'pick-agent' | 'chat'
-  const [view, setView] = useState('list');
+  // Panel state: what the right panel shows.
+  // 'empty' | 'pick-agent' | 'chat'
+  const [rightPanel, setRightPanel] = useState('empty');
+
+  // Mobile: which panel is visible.
+  const [mobileView, setMobileView] = useState('list'); // 'list' | 'conversation'
 
   // Session list state
   const [webSessions, setWebSessions] = useState([]);
@@ -69,7 +72,6 @@ export function Chat() {
   const timerRef = useRef(null);
   const sseRef = useRef(null);
 
-  // Load web sessions for the list view.
   const loadSessions = useCallback(async () => {
     setListLoading(true);
     const { data: allSess } = await callRPC('sessions.list', { limit: 50 });
@@ -95,14 +97,13 @@ export function Chat() {
   const findWebSession = useCallback(async (agentId) => {
     const { data: sessions } = await callRPC('sessions.list', { limit: 50 });
     if (!sessions) return null;
-    // Find a web session for this specific agent, or any web session.
     const match = agentId
       ? sessions.find(s => s.channel === 'web' && s.chat_id === 'web-client' && s.agent_id === agentId)
       : sessions.find(s => s.channel === 'web' && s.chat_id === 'web-client');
     return match ? match.id : null;
   }, []);
 
-  // Init: load sessions + check provider status.
+  // Init: load sessions, check providers, handle ?session= param.
   useEffect(() => {
     loadSessions();
     fetch('/api/health').then(r => r.json()).then(h => {
@@ -112,39 +113,53 @@ export function Chat() {
       }
     }).catch(() => {});
 
+    // Check for ?session= query param (from redirect).
+    const params = new URLSearchParams(window.location.search);
+    const sessionParam = params.get('session');
+    if (sessionParam) {
+      callRPC('sessions.get', { id: sessionParam }).then(async ({ data: sess }) => {
+        if (sess) {
+          openSessionById(sessionParam, sess.agent_id, sess.agent_name || sess.agent_id);
+        }
+      }).catch(() => {});
+    }
+
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
       if (sseRef.current) sseRef.current.close();
     };
   }, []);
 
-  // Auto-scroll on messages or streaming update.
   useEffect(() => {
-    if (view === 'chat') {
+    if (rightPanel === 'chat') {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, streaming, view]);
+  }, [messages, streaming, rightPanel]);
 
-  // --- Session List Actions ---
+  // --- Session Actions ---
+
+  const openSessionById = async (id, agentId, agentName) => {
+    setSelectedSession(id);
+    setSelectedAgent(agentId);
+    setSelectedAgentName(agentName);
+    const msgs = await loadMessages(id);
+    setMessages(msgs);
+    setRightPanel('chat');
+    setMobileView('conversation');
+  };
 
   const openSession = async (session) => {
-    setSelectedSession(session.id);
-    setSelectedAgent(session.agent_id);
-    setSelectedAgentName(session.agent_name || session.agent_id);
-    const msgs = await loadMessages(session.id);
-    setMessages(msgs);
-    setView('chat');
+    await openSessionById(session.id, session.agent_id, session.agent_name || session.agent_id);
   };
 
   const showAgentPicker = async () => {
     setAgentsLoading(true);
-    setView('pick-agent');
+    setRightPanel('pick-agent');
+    setMobileView('conversation');
     try {
       const res = await fetch('/api/v2/agents', { credentials: 'include' });
       const data = await res.json();
       if (Array.isArray(data)) {
-        // Only show agents that serve the web channel.
-        // Empty serve list = serves all channels (including web).
         const webAgents = data.filter(a => {
           const serve = a.channels_serve;
           return !serve || serve.length === 0 || serve.includes('web');
@@ -163,17 +178,12 @@ export function Chat() {
     setInput('');
     setSending(false);
     setStreaming('');
-    setView('chat');
+    setRightPanel('chat');
+    setMobileView('conversation');
   };
 
   const backToList = () => {
-    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
-    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
-    setSending(false);
-    setStreaming('');
-    setConsentPrompt(null);
-    setView('list');
-    loadSessions();
+    setMobileView('list');
   };
 
   // --- Chat Actions ---
@@ -229,6 +239,8 @@ export function Chat() {
           } else {
             startPoll();
           }
+          // Refresh session list to show updated timestamp.
+          loadSessions();
         }
       } catch {}
     };
@@ -267,7 +279,7 @@ export function Chat() {
         if (attempts > 40) {
           setMessages(prev => [...prev, {
             role: 'assistant',
-            text: 'Timed out. The agent may still be processing \u2014 check Sessions.'
+            text: 'Timed out. The agent may still be processing.'
           }]);
           setSending(false);
           setStreaming('');
@@ -287,6 +299,7 @@ export function Chat() {
           setMessages(msgs);
           setSending(false);
           setStreaming('');
+          loadSessions();
           return;
         }
 
@@ -318,219 +331,197 @@ export function Chat() {
 
   // ==================== RENDER ====================
 
-  // --- Session List View ---
-  if (view === 'list') {
-    return (
-      <div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-          <div>
-            <h1 style="margin-bottom:2px">Chat</h1>
-            <p style="color:var(--text-muted);font-size:13px">Talk to your agents in real time.</p>
-          </div>
-          <button class="btn-primary" onClick={showAgentPicker}>+ New Chat</button>
-        </div>
-
-        {noProvider && (
-          <div class="card" style="padding:12px;margin-bottom:12px;border-color:var(--warning)">
-            <strong style="color:var(--warning)">No providers connected.</strong>
-            <span style="color:var(--text-muted);margin-left:8px">
-              Add a provider in <a href="/providers">Providers</a> and restart.
-            </span>
-          </div>
-        )}
-
-        {listLoading ? (
-          <div class="empty" role="status">Loading sessions...</div>
-        ) : webSessions.length === 0 ? (
-          <div class="card" style="padding:32px;text-align:center">
-            <p style="color:var(--text-muted);font-size:15px;margin-bottom:12px">No chat sessions yet.</p>
-            <button class="btn-primary" onClick={showAgentPicker}>Start Your First Chat</button>
-          </div>
-        ) : (
-          <div style="display:flex;flex-direction:column;gap:8px">
-            {webSessions.map(s => (
-              <div key={s.id} class="card clickable" style="padding:14px;cursor:pointer" role="button" tabIndex={0}
-                onClick={() => openSession(s)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSession(s); } }}>
-                <div style="display:flex;justify-content:space-between;align-items:center">
-                  <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0">
-                    <div style="flex:1;min-width:0">
-                      <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
-                        <span style="font-weight:600;font-size:14px">{s.agent_name || s.agent_id}</span>
-                        <span class="badge badge-blue" style="font-size:10px">{s.kind || 'dm'}</span>
-                      </div>
-                      <div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                        {s.title || s.label || s.id?.slice(0, 8)}
-                      </div>
-                    </div>
-                  </div>
-                  <div style="text-align:right;flex-shrink:0;margin-left:16px">
-                    <div style="font-size:12px;color:var(--text-muted)">
-                      {s.updated_at?.slice(0, 10)}
-                    </div>
-                    <div style="font-size:11px;color:var(--text-muted)">
-                      {s.message_count || 0} msgs
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // --- Agent Picker View ---
-  if (view === 'pick-agent') {
-    return (
-      <div>
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <button class="btn-secondary" onClick={() => setView('list')} style="padding:6px 12px">
-            {'\u2190'} Back
-          </button>
-          <div>
-            <h1 style="margin-bottom:2px">New Chat</h1>
-            <p style="color:var(--text-muted);font-size:13px">Choose an agent to chat with.</p>
-          </div>
-        </div>
-
-        {agentsLoading ? (
-          <div class="empty" role="status">Loading agents...</div>
-        ) : agents.length === 0 ? (
-          <div class="card" style="padding:24px;text-align:center">
-            <p style="color:var(--text-muted);margin-bottom:12px">No agents configured.</p>
-            <a href="/agents/create" class="btn-primary" style="text-decoration:none">Create an Agent</a>
-          </div>
-        ) : (
-          <div style="display:flex;flex-direction:column;gap:8px">
-            {agents.map(a => (
-              <div key={a.id} class="card clickable" style="padding:14px;cursor:pointer;display:flex;align-items:center;gap:12px"
-                role="button" tabIndex={0}
-                onClick={() => startNewChat(a)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startNewChat(a); } }}>
-                {a.avatar ? (
-                  <span style="font-size:24px">{a.avatar}</span>
-                ) : (
-                  <span style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:color-mix(in srgb, var(--primary) 15%, transparent);color:var(--primary);font-weight:700;font-size:14px;font-family:var(--mono);flex-shrink:0">
-                    {(a.name || a.id || '?').charAt(0).toUpperCase()}
-                  </span>
-                )}
-                <div style="flex:1">
-                  <div style="font-weight:600;font-size:14px">{a.name || a.id}</div>
-                  <div style="font-size:12px;color:var(--text-muted)">{a.role || 'No role defined'}</div>
-                </div>
-                <span class="badge badge-blue">{a.model || 'strong'}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // --- Chat View ---
   return (
-    <div class="chat-container" style="height:calc(100vh - 48px)">
-      <div class="chat-header">
-        <button class="btn-secondary" onClick={backToList} style="padding:6px 12px;flex-shrink:0" aria-label="Back to chat list">
-          {'\u2190'}
-        </button>
-        <div style="flex:1;min-width:0">
-          <h1 style="margin-bottom:0;font-size:18px">{selectedAgentName}</h1>
-        </div>
+    <div class="chat-split">
+      {/* Left: Session Panel */}
+      <div class={`chat-split-left ${mobileView === 'list' ? 'mobile-show' : 'mobile-hide'}`}>
+        <SessionPanel
+          sessions={webSessions}
+          loading={listLoading}
+          activeId={selectedSession}
+          onSelect={openSession}
+          onNewChat={showAgentPicker}
+        />
       </div>
 
-      {noProvider && (
-        <div class="card" style="padding:12px;margin-bottom:12px;border-color:var(--warning)">
-          <strong style="color:var(--warning)">No providers connected.</strong>
-          <span style="color:var(--text-muted);margin-left:8px">
-            Add a provider in <a href="/providers">Providers</a> and restart.
-          </span>
-        </div>
-      )}
+      {/* Right: Conversation or Agent Picker or Empty */}
+      <div class={`chat-split-right ${mobileView === 'conversation' ? 'mobile-show' : 'mobile-hide'}`}>
 
-      <div class="chat-messages" aria-live="polite" aria-relevant="additions">
-        {messages.length === 0 && !sending && (
-          <div class="empty">Send a message to start chatting with {selectedAgentName}.</div>
-        )}
-        {messages.map((msg, i) => (
-          <div key={i} class={`message ${msg.role}`}>
-            {msg.role !== 'user' && <div class="message-role">{msg.role}</div>}
-            {msg.audio && (
-              <div style="margin-bottom:4px">
-                <audio controls preload="none" style="max-width:100%;height:36px"
-                  src={`/api/audio/${msg.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
-                </audio>
-                {msg.audio.duration_ms > 0 && (
-                  <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
-                    {Math.round(msg.audio.duration_ms / 1000)}s
-                  </span>
-                )}
-              </div>
-            )}
-            {msg.text && <div class="message-text">{msg.text}</div>}
-          </div>
-        ))}
-
-        {streaming && (
-          <div class="message assistant">
-            <div class="message-role">assistant</div>
-            <div class="message-text">{streaming}<span class="cursor-blink">|</span></div>
-          </div>
-        )}
-
-        {sending && !streaming && (
-          <div class="message assistant">
-            <div class="message-role">assistant</div>
-            <div class="message-text" style="color:var(--text-muted)">
-              <span class="thinking-dots">Thinking</span>
-            </div>
-          </div>
-        )}
-
-        <div ref={bottomRef} />
-      </div>
-
-      {/* Consent modal */}
-      {consentPrompt && (
-        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100"
-          role="dialog" aria-modal="true" aria-labelledby="consent-title">
-          <div class="card" style="padding:24px;max-width:420px;width:100%">
-            <h3 id="consent-title" style="margin-top:0;font-size:16px;font-weight:700">Permission Required</h3>
-            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">The agent wants to use a tool that requires your approval.</p>
-            <div style="background:var(--bg);padding:14px;border-radius:6px;margin-bottom:16px">
-              <div style="font-weight:700;font-family:var(--mono);font-size:13px;margin-bottom:6px">{consentPrompt.tool_name}</div>
-              <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text-muted)">
-                <span style="text-transform:capitalize">{consentPrompt.group}</span>
-                <span>&middot;</span>
-                <span class={`badge ${consentPrompt.risk_level === 'sensitive' ? 'badge-red' : 'badge-yellow'}`}>
-                  {consentPrompt.risk_level}
-                </span>
-              </div>
-              {consentPrompt.explanation && (
-                <div style="color:var(--text-muted);font-size:12px;margin-top:8px;line-height:1.5">{consentPrompt.explanation}</div>
+        {/* Empty state */}
+        {rightPanel === 'empty' && (
+          <div class="chat-empty">
+            <div style="max-width:320px">
+              <div style="font-size:32px;margin-bottom:16px;opacity:0.3">{'\u2759'}</div>
+              <h2 style="font-size:18px;font-weight:600;margin-bottom:8px">Chat with your agents</h2>
+              <p style="color:var(--text-muted);font-size:13px;line-height:1.6;margin-bottom:24px">
+                Ask questions, run tasks, or explore ideas. Pick an agent
+                and start typing — your conversation history stays here.
+              </p>
+              <button class="btn-primary" onClick={showAgentPicker}>+ New Chat</button>
+              {webSessions.length > 0 && (
+                <p style="color:var(--text-muted);font-size:12px;margin-top:12px">
+                  or select a recent session from the left
+                </p>
               )}
             </div>
-            <div style="display:flex;gap:8px;justify-content:flex-end">
-              <button class="btn-secondary" onClick={() => respondConsent(false)}>Deny</button>
-              <button class="btn-primary" onClick={() => respondConsent(true)}>Allow</button>
+          </div>
+        )}
+
+        {/* Agent Picker */}
+        {rightPanel === 'pick-agent' && (
+          <div style="padding:4px" onKeyDown={(e) => { if (e.key === 'Escape') backToList(); }}>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+              <button class="btn-secondary chat-back-btn" onClick={backToList} style="padding:6px 12px">
+                {'\u2190'}
+              </button>
+              <div>
+                <h2 style="font-size:18px;font-weight:600;margin-bottom:2px">New Chat</h2>
+                <p style="color:var(--text-muted);font-size:13px">Choose an agent to chat with.</p>
+              </div>
+            </div>
+
+            {agentsLoading ? (
+              <div class="empty" role="status">Loading agents...</div>
+            ) : agents.length === 0 ? (
+              <div class="card" style="padding:24px;text-align:center">
+                <p style="color:var(--text-muted);margin-bottom:12px">No agents configured.</p>
+                <a href="/agents/create" class="btn-primary" style="text-decoration:none">Create an Agent</a>
+              </div>
+            ) : (
+              <div style="display:flex;flex-direction:column;gap:8px">
+                {agents.map(a => (
+                  <div key={a.id} class="card clickable" style="padding:14px;cursor:pointer;display:flex;align-items:center;gap:12px"
+                    role="button" tabIndex={0}
+                    onClick={() => startNewChat(a)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startNewChat(a); } }}>
+                    {a.avatar ? (
+                      <span style="font-size:24px">{a.avatar}</span>
+                    ) : (
+                      <span style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:color-mix(in srgb, var(--primary) 15%, transparent);color:var(--primary);font-weight:700;font-size:14px;font-family:var(--mono);flex-shrink:0">
+                        {(a.name || a.id || '?').charAt(0).toUpperCase()}
+                      </span>
+                    )}
+                    <div style="flex:1">
+                      <div style="font-weight:600;font-size:14px">{a.name || a.id}</div>
+                      <div style="font-size:12px;color:var(--text-muted)">{a.role || 'No role defined'}</div>
+                    </div>
+                    <span class="badge badge-blue">{a.model || 'strong'}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Chat View */}
+        {rightPanel === 'chat' && (
+          <div class="chat-container">
+            <div class="chat-header">
+              <button class="btn-secondary chat-back-btn" onClick={backToList} style="padding:6px 12px;flex-shrink:0" aria-label="Back to chat list">
+                {'\u2190'}
+              </button>
+              <div style="flex:1;min-width:0">
+                <span style="font-weight:600;font-size:15px">{selectedAgentName}</span>
+              </div>
+            </div>
+
+            {noProvider && (
+              <div class="card" style="padding:12px;margin-bottom:12px;border-color:var(--warning)">
+                <strong style="color:var(--warning)">No providers connected.</strong>
+                <span style="color:var(--text-muted);margin-left:8px">
+                  Add a provider in <a href="/settings?tab=ai-models">AI Models</a> settings.
+                </span>
+              </div>
+            )}
+
+            <div class="chat-messages" aria-live="polite" aria-relevant="additions">
+              {messages.length === 0 && !sending && (
+                <div class="empty" style="padding:48px 24px">
+                  <div style="font-size:15px;margin-bottom:4px">Chatting with <strong>{selectedAgentName}</strong></div>
+                  <div style="font-size:13px;color:var(--text-muted)">Type a message below to get started.</div>
+                </div>
+              )}
+              {messages.map((msg, i) => (
+                <div key={i} class={`message ${msg.role}`}>
+                  {msg.role !== 'user' && <div class="message-role">{msg.role}</div>}
+                  {msg.audio && (
+                    <div style="margin-bottom:4px">
+                      <audio controls preload="none" style="max-width:100%;height:36px"
+                        src={`/api/audio/${msg.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
+                      </audio>
+                      {msg.audio.duration_ms > 0 && (
+                        <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
+                          {Math.round(msg.audio.duration_ms / 1000)}s
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {msg.text && <div class="message-text">{msg.text}</div>}
+                </div>
+              ))}
+
+              {streaming && (
+                <div class="message assistant">
+                  <div class="message-role">assistant</div>
+                  <div class="message-text">{streaming}<span class="cursor-blink">|</span></div>
+                </div>
+              )}
+
+              {sending && !streaming && (
+                <div class="message assistant">
+                  <div class="message-role">assistant</div>
+                  <div class="message-text" style="color:var(--text-muted)">
+                    <span class="thinking-dots">Thinking</span>
+                  </div>
+                </div>
+              )}
+
+              <div ref={bottomRef} />
+            </div>
+
+            {/* Consent modal */}
+            {consentPrompt && (
+              <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:var(--z-modal)"
+                role="dialog" aria-modal="true" aria-labelledby="consent-title">
+                <div class="card" style="padding:24px;max-width:420px;width:100%">
+                  <h3 id="consent-title" style="margin-top:0;font-size:16px;font-weight:700">Permission Required</h3>
+                  <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">The agent wants to use a tool that requires your approval.</p>
+                  <div style="background:var(--bg);padding:14px;border-radius:6px;margin-bottom:16px">
+                    <div style="font-weight:700;font-family:var(--mono);font-size:13px;margin-bottom:6px">{consentPrompt.tool_name}</div>
+                    <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text-muted)">
+                      <span style="text-transform:capitalize">{consentPrompt.group}</span>
+                      <span>&middot;</span>
+                      <span class={`badge ${consentPrompt.risk_level === 'sensitive' ? 'badge-red' : 'badge-yellow'}`}>
+                        {consentPrompt.risk_level}
+                      </span>
+                    </div>
+                    {consentPrompt.explanation && (
+                      <div style="color:var(--text-muted);font-size:12px;margin-top:8px;line-height:1.5">{consentPrompt.explanation}</div>
+                    )}
+                  </div>
+                  <div style="display:flex;gap:8px;justify-content:flex-end">
+                    <button class="btn-secondary" onClick={() => respondConsent(false)}>Deny</button>
+                    <button class="btn-primary" onClick={() => respondConsent(true)}>Allow</button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div class="chat-input-row">
+              <input
+                type="text"
+                class="chat-input"
+                placeholder="Type a message..."
+                value={input}
+                onInput={e => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={sending}
+              />
+              <button class="btn-primary" onClick={send} disabled={sending}>
+                {sending ? '...' : 'Send'}
+              </button>
             </div>
           </div>
-        </div>
-      )}
-
-      <div class="chat-input-row">
-        <input
-          type="text"
-          class="chat-input"
-          placeholder="Type a message..."
-          value={input}
-          onInput={e => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={sending}
-        />
-        <button class="btn-primary" onClick={send} disabled={sending}>
-          {sending ? '...' : 'Send'}
-        </button>
+        )}
       </div>
     </div>
   );

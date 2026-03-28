@@ -1,7 +1,39 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
+import { TabBar } from '../components/TabBar';
+import Tools from './Tools';
+import MCPServers from './MCPServers';
+
+const TOP_TABS = [
+  { id: 'skills', label: 'Skills' },
+  { id: 'tools', label: 'Tools' },
+  { id: 'plugins', label: 'Plugins' },
+];
 
 export function Skills() {
+  const params = new URLSearchParams(window.location.search);
+  const [topTab, setTopTab] = useState(params.get('tab') || 'skills');
+
+  const changeTopTab = (id) => {
+    setTopTab(id);
+    const url = id === 'skills' ? '/skills' : `/skills?tab=${id}`;
+    history.replaceState(null, '', url);
+  };
+
+  return (
+    <div>
+      <h1>Skills</h1>
+      <TabBar tabs={TOP_TABS} active={topTab} onChange={changeTopTab} />
+      <div class="tab-content-enter" key={topTab}>
+        {topTab === 'skills' && <SkillsContent />}
+        {topTab === 'tools' && <Tools />}
+        {topTab === 'plugins' && <MCPServers />}
+      </div>
+    </div>
+  );
+}
+
+function SkillsContent() {
   const [tab, setTab] = useState('installed'); // 'installed' | 'browse'
   const [installed, setInstalled] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
@@ -197,22 +229,19 @@ export function Skills() {
 
   return (
     <div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-        <div>
-          <h1 style="margin-bottom:2px">Skills</h1>
-          <p style="color:var(--text-muted);font-size:13px">Extend your agents with community skills.</p>
-        </div>
+      <div style="margin-bottom:16px">
+        <p style="color:var(--text-muted);font-size:13px">Extend your agents with community skills.</p>
       </div>
 
       {/* Tabs */}
-      <div class="tab-bar" style="margin-bottom:20px">
-        <button class={`tab ${tab === 'installed' ? 'tab-active' : ''}`} onClick={() => setTab('installed')}>
-          Installed ({installed.length})
-        </button>
-        <button class={`tab ${tab === 'browse' ? 'tab-active' : ''}`} onClick={() => setTab('browse')}>
-          Browse Marketplace
-        </button>
-      </div>
+      <TabBar
+        tabs={[
+          { id: 'installed', label: `Installed (${installed.length})` },
+          { id: 'browse', label: 'Browse Marketplace' },
+        ]}
+        active={tab}
+        onChange={setTab}
+      />
 
       {msg && (
         <div class="card" style={`padding:10px 14px;margin-bottom:16px;font-size:13px;border-color:${msgType === 'error' ? 'var(--error)' : msgType === 'success' ? 'var(--success)' : 'var(--border)'};color:${msgType === 'error' ? 'var(--error)' : msgType === 'success' ? 'var(--success)' : 'var(--text)'}`}>
@@ -368,17 +397,16 @@ export function Skills() {
                 )}
 
                 {/* Tabs */}
-                <div class="tab-bar" style="margin-bottom:12px">
-                  <button class={`tab ${previewTab === 'readme' ? 'tab-active' : ''}`} onClick={() => setPreviewTab('readme')}>README</button>
-                  <button class={`tab ${previewTab === 'files' ? 'tab-active' : ''}`} onClick={() => setPreviewTab('files')}>Files ({preview.files?.length || 0})</button>
-                  {preview.hasScripts && (
-                    <button class={`tab ${previewTab === 'scripts' ? 'tab-active' : ''}`} onClick={() => setPreviewTab('scripts')}
-                      style={preview.hasScripts ? 'color:var(--warning)' : ''}>
-                      Scripts ({preview.scripts?.length || 0})
-                    </button>
-                  )}
-                  <button class={`tab ${previewTab === 'agents' ? 'tab-active' : ''}`} onClick={() => setPreviewTab('agents')}>Assign to Agents</button>
-                </div>
+                <TabBar
+                  tabs={[
+                    { id: 'readme', label: 'README' },
+                    { id: 'files', label: `Files (${preview.files?.length || 0})` },
+                    ...(preview.hasScripts ? [{ id: 'scripts', label: `Scripts (${preview.scripts?.length || 0})` }] : []),
+                    { id: 'agents', label: 'Assign to Agents' },
+                  ]}
+                  active={previewTab}
+                  onChange={setPreviewTab}
+                />
 
                 {/* Tab content */}
                 <div style="min-height:200px;max-height:350px;overflow-y:auto;margin-bottom:16px">

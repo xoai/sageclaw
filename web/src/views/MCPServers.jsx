@@ -103,7 +103,7 @@ export default function MCPServers() {
     <div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
         <div>
-          <h1 style="margin-bottom:0">MCP Servers</h1>
+          <span style="font-size:14px;font-weight:600">Plugins</span>
           <p style="color:var(--text-muted);margin-top:4px">{servers.length} server{servers.length !== 1 ? 's' : ''} connected</p>
         </div>
         <button class="btn-primary" onClick={() => setShowAdd(true)}>Add Server</button>

@@ -1,10 +1,12 @@
 import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { getCurrentUrl, route } from 'preact-router';
+import { IconChat, IconBot, IconSkills, IconKnowledge, IconDashboard, IconSettings, StatusDot } from './Icons';
 
 export function Nav({ open, onNavigate }) {
   const [url, setUrl] = useState(getCurrentUrl());
   const [theme, setTheme] = useState(localStorage.getItem('sageclaw-theme') || 'dark');
+  const [healthy, setHealthy] = useState(true);
 
   useEffect(() => {
     const update = () => setUrl(getCurrentUrl());
@@ -18,9 +20,20 @@ export function Nav({ open, onNavigate }) {
 
     document.documentElement.setAttribute('data-theme', theme);
 
+    // Check provider health for status dot.
+    const checkHealth = () => {
+      fetch('/api/health').then(r => r.json()).then(data => {
+        const connected = data?.providers && Object.values(data.providers).some(s => s === 'connected');
+        setHealthy(!!connected);
+      }).catch(() => setHealthy(false));
+    };
+    checkHealth();
+    const healthInterval = setInterval(checkHealth, 30000);
+
     return () => {
       window.removeEventListener('popstate', update);
       history.pushState = orig;
+      clearInterval(healthInterval);
     };
   }, []);
 
@@ -31,16 +44,25 @@ export function Nav({ open, onNavigate }) {
     document.documentElement.setAttribute('data-theme', next);
   };
 
-  const link = (href, label) => (
-    <a href={href}
-      class={url === href || (href !== '/' && url.startsWith(href)) ? 'active' : ''}
+  const isActive = (href) => {
+    const path = url.split('?')[0];
+    if (href === '/') return path === '/';
+    return path === href || path.startsWith(href + '/');
+  };
+
+  const link = (href, label, Icon) => (
+    <a
+      href={href}
+      class={`nav-item ${isActive(href) ? 'active' : ''}`}
       onClick={(e) => {
         e.preventDefault();
         route(href);
         setUrl(href);
         if (onNavigate) onNavigate();
-      }}>
-      {label}
+      }}
+    >
+      <Icon />
+      <span>{label}</span>
     </a>
   );
 
@@ -51,52 +73,30 @@ export function Nav({ open, onNavigate }) {
 
   return (
     <nav class={`sidebar ${open ? 'open' : ''}`}>
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:0 16px 16px;border-bottom:1px solid var(--border);margin-bottom:8px">
-        <div class="sidebar-logo" style="padding:0;border:none;margin:0">SageClaw</div>
+      <div class="sidebar-header">
+        <div class="sidebar-logo">
+          <StatusDot ok={healthy} />
+          <span>SageClaw</span>
+        </div>
         <button class="theme-toggle" onClick={toggleTheme} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
           {theme === 'dark' ? '\u2600' : '\u263D'}
         </button>
       </div>
 
-      <div class="nav-section-label">Core</div>
-      {link('/', 'Overview')}
-      {link('/chat', 'Chat')}
-      {link('/agents', 'Agents')}
-
-
-      <div class="nav-section-label">Conversations</div>
-      {link('/sessions', 'Sessions')}
-      {link('/activity', 'Activity')}
-
-
-      <div class="nav-section-label">Data</div>
-      {link('/memory', 'Memory')}
-      {link('/graph', 'Knowledge Graph')}
-      {link('/audit', 'Audit')}
-
-
-      <div class="nav-section-label">Connectivity</div>
-      {link('/providers', 'Providers')}
-      {link('/channels', 'Channels')}
-      {link('/tunnel', 'Tunnel')}
-
-
-      <div class="nav-section-label">Capabilities</div>
-      {link('/skills', 'Skills')}
-      {link('/tools', 'Tools')}
-      {link('/mcp', 'MCP Servers')}
-      {link('/cron', 'Cron')}
-      {link('/teams', 'Teams')}
-      {link('/delegation', 'Delegation')}
-
-
-      <div class="nav-section-label">System</div>
-      {link('/budget', 'Budget')}
-      {link('/health', 'Health')}
-      {link('/settings', 'Settings')}
+      <div class="nav-items">
+        {link('/chat', 'Chat', IconChat)}
+        {link('/agents', 'Agents', IconBot)}
+        {link('/skills', 'Skills', IconSkills)}
+        {link('/knowledge', 'Knowledge', IconKnowledge)}
+        {link('/', 'Dashboard', IconDashboard)}
+      </div>
 
       <div style="flex:1" />
-      <a href="#" onClick={logout} style="color:var(--error);font-size:12px;padding:8px 16px">Logout</a>
+
+      <div class="nav-items nav-bottom">
+        {link('/settings', 'Settings', IconSettings)}
+        <a href="#" onClick={(e) => { e.preventDefault(); logout(); }} class="nav-item nav-logout">Logout</a>
+      </div>
     </nav>
   );
 }

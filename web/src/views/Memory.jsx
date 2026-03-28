@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { rpc } from '../api';
 
-export function Memory() {
+export function Memory({ embedded } = {}) {
   const [query, setQuery] = useState('');
   const [memories, setMemories] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -68,13 +68,21 @@ export function Memory() {
 
   return (
     <div>
-      <h1>Memory</h1>
+      {!embedded && <h1>Memory</h1>}
 
       <input type="text" class="search-input" placeholder="Search memories..."
         value={query} onInput={e => setQuery(e.target.value)} />
 
       {loading && <div class="empty">Searching...</div>}
-      {!loading && memories.length === 0 && <div class="empty">No memories yet. Agents store learnings here automatically during conversations.</div>}
+      {!loading && memories.length === 0 && (
+        <div class="empty" style="padding:48px 24px">
+          <div style="font-size:15px;margin-bottom:8px;color:var(--text)">No memories stored</div>
+          <div style="font-size:13px;max-width:360px;margin:0 auto;line-height:1.6">
+            Memories are facts, preferences, and learnings your agents collect during conversations.
+            They build up automatically as you chat — or you can add them manually via the API.
+          </div>
+        </div>
+      )}
 
       {memories.map(mem => (
         <div key={mem.id} class="memory-card">

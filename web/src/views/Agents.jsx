@@ -2,8 +2,52 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
 import { Label } from '../components/InfoTip';
+import { TabBar } from '../components/TabBar';
+import { Teams } from './Teams';
+import Delegation from './Delegation';
+
+const TABS = [
+  { id: 'agents', label: 'Agents' },
+  { id: 'teams', label: 'Teams' },
+];
 
 export function Agents() {
+  const params = new URLSearchParams(window.location.search);
+  const [topTab, setTopTab] = useState(params.get('tab') || 'agents');
+
+  const changeTopTab = (id) => {
+    setTopTab(id);
+    const url = id === 'agents' ? '/agents' : `/agents?tab=${id}`;
+    history.replaceState(null, '', url);
+  };
+
+  return (
+    <div>
+      <h1>Agents</h1>
+      <TabBar tabs={TABS} active={topTab} onChange={changeTopTab} />
+      <div class="tab-content-enter" key={topTab}>
+        {topTab === 'agents' && <AgentsList />}
+        {topTab === 'teams' && <TeamsAndDelegation />}
+      </div>
+    </div>
+  );
+}
+
+function TeamsAndDelegation() {
+  const [section, setSection] = useState('teams');
+  return (
+    <div>
+      <div style="display:flex;gap:8px;margin-bottom:16px">
+        <button class={section === 'teams' ? 'btn-primary' : 'btn-secondary'} onClick={() => setSection('teams')}>Teams</button>
+        <button class={section === 'delegation' ? 'btn-primary' : 'btn-secondary'} onClick={() => setSection('delegation')}>Delegation</button>
+      </div>
+      {section === 'teams' && <Teams embedded />}
+      {section === 'delegation' && <Delegation />}
+    </div>
+  );
+}
+
+function AgentsList() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -63,8 +107,7 @@ export function Agents() {
 
   return (
     <div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-        <h1>Agents</h1>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
         <button class="btn-primary" onClick={openCreate}>+ New Agent</button>
       </div>
 
@@ -165,7 +208,7 @@ export function Agents() {
 
             {createError && <div style="color:var(--error);font-size:13px;margin-bottom:8px">{createError}</div>}
 
-            <div style="display:flex;gap:0.5rem;margin-top:1rem">
+            <div style="display:flex;gap:8px;margin-top:16px">
               <button class="btn-primary" onClick={createAgent} disabled={!createForm.id || !createForm.name}>
                 Create & Configure
               </button>

@@ -2,7 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { Label } from '../components/InfoTip';
 
-export function Teams() {
+export function Teams({ embedded } = {}) {
   const [teams, setTeams] = useState([]);
   const [tasks, setTasks] = useState({});
   const [showModal, setShowModal] = useState(false);
@@ -98,7 +98,7 @@ export function Teams() {
   return (
     <div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
-        <h1>Teams</h1>
+        {!embedded && <h1>Teams</h1>}
         <button class="btn-primary" onClick={openCreate}>+ Create Team</button>
       </div>
 
