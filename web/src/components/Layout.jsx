@@ -25,6 +25,7 @@ export function Layout({ children }) {
             risk_level: c.risk_level,
             explanation: c.explanation,
             agentId: c.agent_id,
+            nonce: c.nonce,
           });
         }
       } catch {}
@@ -35,14 +36,17 @@ export function Layout({ children }) {
     return () => clearInterval(pollRef.current);
   }, []);
 
-  const respondConsent = async (granted) => {
+  const respondConsent = async (granted, tier = 'once') => {
     if (!consent) return;
     try {
+      const payload = consent.nonce
+        ? { nonce: consent.nonce, granted, tier }
+        : { group: consent.group, granted }; // Legacy fallback.
       await fetch('/api/consent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ group: consent.group, granted }),
+        body: JSON.stringify(payload),
       });
     } catch {}
     setConsent(null);
@@ -80,8 +84,9 @@ export function Layout({ children }) {
                     <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">{consent.explanation}</div>
                   )}
                   <div style="display:flex;gap:8px">
-                    <button class="btn-primary" style="padding:6px 16px;font-size:13px" onClick={() => respondConsent(true)}>Allow</button>
-                    <button class="btn-secondary" style="padding:6px 16px;font-size:13px" onClick={() => respondConsent(false)}>Deny</button>
+                    <button class="btn-primary" style="padding:6px 16px;font-size:13px" onClick={() => respondConsent(true, 'once')}>Allow once</button>
+                    <button class="btn-primary" style="padding:6px 16px;font-size:13px;background:var(--success)" onClick={() => respondConsent(true, 'always')}>Always allow</button>
+                    <button class="btn-secondary" style="padding:6px 16px;font-size:13px" onClick={() => respondConsent(false, 'deny')}>Deny</button>
                   </div>
                 </div>
               </div>

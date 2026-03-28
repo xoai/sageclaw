@@ -15,6 +15,7 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
+	"github.com/xoai/sageclaw/pkg/channel"
 )
 
 const zaloAPIBase = "https://openapi.zalo.me/v3.0/oa/message/cs"
@@ -28,6 +29,9 @@ type Adapter struct {
 	msgBus      bus.MessageBus
 	client      *http.Client
 	cancel      context.CancelFunc
+	ownerUserID string             // Platform user ID of the connection owner.
+	consentCB   ConsentCallback    // Called when user responds to consent prompt.
+	ownerStore  channel.OwnerStore // For auto-capturing owner_user_id.
 }
 
 // Option configures the Zalo adapter.
@@ -62,6 +66,15 @@ func (a *Adapter) RegisterWebhook(mux *http.ServeMux) {
 	mux.HandleFunc("POST /webhook/zalo", a.handleWebhook)
 	mux.HandleFunc("GET /webhook/zalo", a.handleVerify)
 	log.Printf("zalo: webhook routes registered (connection %s)", a.connID)
+}
+
+// UpdateWebhookURL logs the webhook URL for manual Zalo OA configuration.
+// Zalo OA webhook registration requires the OA admin portal; programmatic
+// registration is not supported via API.
+func (a *Adapter) UpdateWebhookURL(ctx context.Context, webhookURL string) error {
+	log.Printf("zalo[%s]: webhook URL updated: %s", a.connID, webhookURL)
+	log.Printf("zalo[%s]: configure this URL in your Zalo OA admin portal → Webhook settings", a.connID)
+	return nil
 }
 
 // Start subscribes to the message bus for outbound delivery.
@@ -114,6 +127,18 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if event.EventName == "user_send_text" && event.Message.Text != "" {
+		// Auto-capture owner on first inbound message.
+		if event.Sender.ID != "" && a.ownerUserID == "" && a.ownerStore != nil {
+			channel.CaptureOwner(r.Context(), a.ownerStore, a.connID, a.ownerUserID, event.Sender.ID)
+			a.ownerUserID = event.Sender.ID
+		}
+
+		// Check for consent text reply.
+		if a.HandleConsentText(event.Sender.ID, event.Message.Text) {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		a.msgBus.PublishInbound(r.Context(), bus.Envelope{
 			Channel:   a.connID,
 			ChatID:    event.Sender.ID,

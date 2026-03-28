@@ -33,6 +33,7 @@ type Pipeline struct {
 	activityTracker  *activity.Tracker
 	agentProvider    agentcfg.Provider
 	liveSessionPool  agent.LiveSessionPool // Optional: for voice messaging.
+	nonceManager     *agent.NonceManager   // Optional: for nonce-based consent.
 }
 
 // Config for the pipeline.
@@ -44,6 +45,7 @@ type PipelineConfig struct {
 	CostRecorder    CostRecorderFunc                    // Optional: records cost after each agent run.
 	AgentProvider   agentcfg.Provider                   // Optional: agent config lookup for channel filtering.
 	LiveSessionPool agent.LiveSessionPool               // Optional: for voice messaging dispatch.
+	NonceManager    *agent.NonceManager                 // Optional: for nonce-based consent.
 }
 
 // New creates a new pipeline.
@@ -65,6 +67,7 @@ func New(
 		activityTracker: activity.NewTracker(store.DB()),
 		agentProvider:   config.AgentProvider,
 		liveSessionPool: config.LiveSessionPool,
+		nonceManager:    config.NonceManager,
 	}
 
 	// Create debouncer that feeds into intent classification.
@@ -73,8 +76,37 @@ func New(
 	return p
 }
 
-// InjectConsent sends a consent response into all active agent loops.
-func (p *Pipeline) InjectConsent(group string, granted bool) {
+// InjectConsent sends a nonce-based consent response to the correct agent loop.
+// Returns an error if the nonce is invalid, expired, or already consumed.
+func (p *Pipeline) InjectConsent(nonce string, granted bool, tier string) error {
+	if p.loopPool == nil || p.nonceManager == nil {
+		return fmt.Errorf("consent infrastructure not available")
+	}
+
+	pending, err := p.nonceManager.Validate(nonce)
+	if err != nil {
+		return fmt.Errorf("invalid consent nonce: %w", err)
+	}
+
+	action := "deny"
+	if granted {
+		action = "grant"
+	}
+	if tier == "" {
+		tier = "once"
+	}
+	token := fmt.Sprintf("__consent__%s_%s_%s", nonce, action, tier)
+
+	p.loopPool.InjectTo(pending.AgentID, canonical.Message{
+		Role:    "user",
+		Content: []canonical.Content{{Type: "text", Text: token}},
+	})
+	return nil
+}
+
+// InjectConsentLegacy sends a consent response using the legacy group-based format.
+// Used for backward compatibility with the old web dashboard during M2→M6 transition.
+func (p *Pipeline) InjectConsentLegacy(group string, granted bool) {
 	if p.loopPool == nil {
 		return
 	}
@@ -83,7 +115,7 @@ func (p *Pipeline) InjectConsent(group string, granted bool) {
 		action = "__consent_grant__"
 	}
 	p.loopPool.InjectAll(canonical.Message{
-		Role: "user",
+		Role:    "user",
 		Content: []canonical.Content{{Type: "text", Text: action + group}},
 	})
 }
@@ -463,6 +495,15 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 			}},
 		}
 	} else {
+		// Pre-warm voice session in background on text messages for voice-capable agents.
+		// When the user eventually sends voice, the WebSocket is already connected.
+		if p.liveSessionPool != nil && loop.CanVoice() {
+			if warmer, ok := p.liveSessionPool.(agent.LiveSessionWarmer); ok {
+				if vcfg := loop.VoiceSessionConfig(); vcfg != nil {
+					warmer.Warm(ctx, req.SessionID, *vcfg)
+				}
+			}
+		}
 		result = loop.Run(ctx, req.SessionID, allMsgs)
 	}
 

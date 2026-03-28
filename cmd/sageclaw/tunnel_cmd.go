@@ -5,22 +5,28 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
+	"github.com/xoai/sageclaw/pkg/config"
+	"github.com/xoai/sageclaw/pkg/store/sqlite"
 	"github.com/xoai/sageclaw/pkg/tunnel"
 )
 
 func runTunnelCommand(args []string) error {
 	if len(args) == 0 {
-		return runTunnelQuick()
+		return runTunnelStart()
 	}
 
 	switch args[0] {
 	case "start":
-		return runTunnelQuick()
+		return runTunnelStart()
 	case "status":
 		return runTunnelStatus()
+	case "token":
+		rotate := len(args) > 1 && args[1] == "--rotate"
+		return runTunnelToken(rotate)
 	case "stop":
 		fmt.Println("Tunnel runs in foreground — press Ctrl+C to stop.")
 		return nil
@@ -33,25 +39,10 @@ func runTunnelCommand(args []string) error {
 	}
 }
 
-func runTunnelQuick() error {
-	// Detect cloudflared.
-	installed, ver, _ := tunnel.Detect()
-	if !installed {
-		fmt.Println("cloudflared not found.")
-		fmt.Println()
-		fmt.Println("Install it:")
-		fmt.Println("  " + tunnel.InstallHint())
-		fmt.Println()
-		fmt.Println("Then run: sageclaw tunnel")
-		return fmt.Errorf("cloudflared not installed")
-	}
-
-	fmt.Printf("cloudflared found (version %s)\n", ver)
-
+func runTunnelStart() error {
 	// Determine port.
 	port := 9090
 	if p := os.Getenv("SAGECLAW_RPC_ADDR"); p != "" {
-		// Extract port from ":9090" or "0.0.0.0:9090"
 		for i := len(p) - 1; i >= 0; i-- {
 			if p[i] == ':' {
 				if n, err := strconv.Atoi(p[i+1:]); err == nil {
@@ -62,32 +53,60 @@ func runTunnelQuick() error {
 		}
 	}
 
-	fmt.Printf("Creating tunnel to localhost:%d...\n", port)
-	fmt.Println()
+	// Load config.
+	configDir := envOrDefault("SAGECLAW_CONFIG_DIR", ".")
+	cfg, _ := config.Load(configDir)
+	if cfg == nil {
+		cfg = &config.AppConfig{}
+	}
+
+	// Open database.
+	dbPath := envOrDefault("SAGECLAW_DB", filepath.Join("data", "sageclaw.db"))
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer store.Close()
+
+	tunnelCfg := tunnel.Config{
+		Mode:        cfg.Tunnel.Mode,
+		RelayURL:    cfg.Tunnel.RelayURL,
+		Token:       cfg.Tunnel.Token,
+		AutoWebhook: cfg.Tunnel.AutoWebhook,
+		LocalPort:   port,
+	}.Defaults()
+
+	fmt.Printf("Starting native tunnel (%s mode)...\n", tunnelCfg.Mode)
+	fmt.Printf("Relay: %s\n", tunnelCfg.RelayURL)
+	fmt.Printf("Forwarding to localhost:%d\n\n", port)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	t := tunnel.New(port, func(status tunnel.Status) {
+	client, err := tunnel.NewClient(store.DB(), tunnelCfg, func(status tunnel.Status) {
 		if status.URL != "" {
 			fmt.Println("─────────────────────────────────────────")
-			fmt.Printf("Public URL:           %s\n", status.URL)
+			fmt.Printf("Public URL:  %s\n", status.URL)
 			fmt.Println()
-			fmt.Println("Webhook URLs:")
-			for ch, url := range status.WebhookURLs() {
-				fmt.Printf("  %-10s  %s\n", ch+":", url)
-			}
+			fmt.Println("Webhook URLs (configure in channel settings):")
+			fmt.Printf("  whatsapp:  %s/webhook/whatsapp\n", status.URL)
+			fmt.Printf("  zalo:      %s/webhook/zalo\n", status.URL)
 			fmt.Println("─────────────────────────────────────────")
 			fmt.Println()
-			fmt.Println("Copy the webhook URL and paste it in your channel settings.")
 			fmt.Println("Press Ctrl+C to stop the tunnel.")
 		}
 		if !status.Running && status.Error != "" {
 			fmt.Printf("Tunnel error: %s\n", status.Error)
 		}
+		if status.Latency > 0 {
+			fmt.Printf("Relay latency: %dms\n", status.Latency)
+		}
 	})
+	if err != nil {
+		return fmt.Errorf("creating tunnel client: %w", err)
+	}
 
-	if err := t.StartQuick(ctx); err != nil {
+	if err := client.Start(ctx); err != nil {
 		return err
 	}
 
@@ -97,44 +116,84 @@ func runTunnelQuick() error {
 	<-sig
 
 	fmt.Println("\nStopping tunnel...")
-	t.Stop()
+	client.Stop()
 	fmt.Println("Tunnel stopped.")
 	return nil
 }
 
 func runTunnelStatus() error {
-	installed, ver, path := tunnel.Detect()
-	if !installed {
-		fmt.Println("cloudflared: not installed")
-		fmt.Println("Install: " + tunnel.InstallHint())
+	// Open database to check instance ID and token.
+	dbPath := envOrDefault("SAGECLAW_DB", filepath.Join("data", "sageclaw.db"))
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		fmt.Println("tunnel: database not accessible")
+		return nil
+	}
+	defer store.Close()
+
+	instanceID, _ := tunnel.EnsureInstanceID(store.DB())
+	token, _ := tunnel.EnsureToken(store.DB())
+
+	fmt.Println("SageClaw Native Tunnel")
+	fmt.Println()
+	fmt.Printf("  instance ID: %s\n", instanceID)
+	if len(token) > 8 {
+		fmt.Printf("  token:       %s...%s\n", token[:4], token[len(token)-4:])
+	}
+	fmt.Println()
+	fmt.Println("Run 'sageclaw tunnel' to start the tunnel.")
+	return nil
+}
+
+func runTunnelToken(rotate bool) error {
+	dbPath := envOrDefault("SAGECLAW_DB", filepath.Join("data", "sageclaw.db"))
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer store.Close()
+
+	if rotate {
+		tok, err := tunnel.RotateToken(store.DB())
+		if err != nil {
+			return fmt.Errorf("rotating token: %w", err)
+		}
+		fmt.Printf("Token rotated: %s\n", tok)
+		fmt.Println("Note: restart the tunnel for the new token to take effect.")
 		return nil
 	}
 
-	fmt.Printf("cloudflared: installed\n")
-	fmt.Printf("  version: %s\n", ver)
-	fmt.Printf("  path:    %s\n", path)
-	fmt.Println()
-	fmt.Println("Run 'sageclaw tunnel' to start a quick tunnel.")
+	tok, err := tunnel.EnsureToken(store.DB())
+	if err != nil {
+		return fmt.Errorf("loading token: %w", err)
+	}
+	fmt.Printf("Tunnel token: %s\n", tok)
 	return nil
 }
 
 func printTunnelHelp() {
-	fmt.Println(`sageclaw tunnel — Manage Cloudflare Tunnel
+	fmt.Println(`sageclaw tunnel — Native Reverse Tunnel
 
 Usage:
-  sageclaw tunnel           Start a quick tunnel (no account needed)
-  sageclaw tunnel start     Same as above
-  sageclaw tunnel status    Check if cloudflared is installed
-  sageclaw tunnel --help    Show this help
+  sageclaw tunnel              Start the tunnel (foreground)
+  sageclaw tunnel start        Same as above
+  sageclaw tunnel status       Show instance ID and token info
+  sageclaw tunnel token        Show current tunnel token
+  sageclaw tunnel token --rotate  Generate a new token
+  sageclaw tunnel --help       Show this help
 
-The quick tunnel creates a free trycloudflare.com URL that forwards
-webhook traffic to your local SageClaw instance. No Cloudflare account
-required.
+The native tunnel creates a persistent WebSocket connection to a relay
+server, forwarding webhook traffic to your local SageClaw instance.
+No external binaries required.
 
 Use the webhook URLs for WhatsApp and Zalo channel configuration.
 Telegram and Discord don't need tunnels (they use polling/WebSocket).
 
 The tunnel runs in the foreground. Press Ctrl+C to stop.
-The URL changes each time you restart — for a permanent URL,
-use 'cloudflared tunnel create' and configure a named tunnel.`)
+
+Configure in your config YAML:
+  tunnel:
+    mode: managed          # managed (default) or self-hosted
+    auto_start: false      # start tunnel on boot
+    auto_webhook: true     # auto-register webhooks`)
 }

@@ -30,7 +30,8 @@ type Config struct {
 	ToolProfile   string        // Tool profile: full, coding, messaging, readonly, minimal.
 	ToolDeny      []string      // Tools or groups to deny (e.g. "group:runtime").
 	ToolAlsoAllow []string      // Tools to add back after deny.
-	NonInteractive bool         // If true, auto-consent all tools (cron, heartbeat, non-web channels).
+	PreAuthorizedGroups []string // Tool groups auto-consented (replaces NonInteractive). ["*"] = all.
+	NonInteractive      bool     // Deprecated: use PreAuthorizedGroups. Auto-migrated to ["*"].
 
 	// Voice configuration.
 	VoiceEnabled  bool   // If true, this loop can handle voice messages.
@@ -38,16 +39,24 @@ type Config struct {
 	VoiceName     string // Voice preset (e.g. "Kore").
 }
 
+// OwnerResolver looks up connection owner and platform from a session's channel field.
+type OwnerResolver func(sessionID string) (ownerID, platform string)
+
 // Loop runs the agent's think-act-observe cycle.
 type Loop struct {
 	config       Config
 	provider     provider.Provider
 	router       *provider.Router // Optional: tier-based routing (v0.2+).
 	toolRegistry *tool.Registry
-	consentStore *tool.ConsentStore
+	consentStore *tool.PersistentConsentStore
+	nonceManager *NonceManager
 	preContext    middleware.Middleware
 	postTool     middleware.Middleware
 	onEvent      EventHandler
+
+	// Owner resolution (lazy-cached per session).
+	ownerResolver OwnerResolver
+	ownerCache    sync.Map // sessionID -> *ownerInfo
 
 	// Voice support.
 	liveProvider     provider.LiveProvider
@@ -59,6 +68,11 @@ type Loop struct {
 	injectChan chan canonical.Message // For steer/inject.
 }
 
+type ownerInfo struct {
+	ownerID  string
+	platform string
+}
+
 // LoopOption configures optional Loop features.
 type LoopOption func(*Loop)
 
@@ -67,9 +81,19 @@ func WithRouter(r *provider.Router) LoopOption {
 	return func(l *Loop) { l.router = r }
 }
 
-// WithConsentStore adds a consent store for first-use consent.
-func WithConsentStore(cs *tool.ConsentStore) LoopOption {
+// WithConsentStore adds a persistent consent store for first-use consent.
+func WithConsentStore(cs *tool.PersistentConsentStore) LoopOption {
 	return func(l *Loop) { l.consentStore = cs }
+}
+
+// WithNonceManager adds a nonce manager for consent request security.
+func WithNonceManager(nm *NonceManager) LoopOption {
+	return func(l *Loop) { l.nonceManager = nm }
+}
+
+// WithOwnerResolver sets the callback for resolving connection owner from session.
+func WithOwnerResolver(fn OwnerResolver) LoopOption {
+	return func(l *Loop) { l.ownerResolver = fn }
 }
 
 // WithLiveProvider adds a LiveProvider for voice messaging.
@@ -114,6 +138,11 @@ func NewLoop(
 	if onEvent == nil {
 		onEvent = func(Event) {}
 	}
+	// Migrate deprecated NonInteractive to PreAuthorizedGroups.
+	if config.NonInteractive && len(config.PreAuthorizedGroups) == 0 {
+		config.PreAuthorizedGroups = []string{"*"}
+		log.Printf("[%s] NonInteractive is deprecated; migrated to PreAuthorizedGroups: [\"*\"]", config.AgentID)
+	}
 	l := &Loop{
 		config:       config,
 		provider:     prov,
@@ -136,6 +165,21 @@ func (l *Loop) Inject(msg canonical.Message) {
 	default:
 		// Buffer full, drop.
 	}
+}
+
+// resolveOwner returns the cached ownerID and platform for a session.
+// Lazy-resolved on first consent check via the OwnerResolver callback.
+func (l *Loop) resolveOwner(sessionID string) (string, string) {
+	if v, ok := l.ownerCache.Load(sessionID); ok {
+		info := v.(*ownerInfo)
+		return info.ownerID, info.platform
+	}
+	if l.ownerResolver == nil {
+		return "", ""
+	}
+	ownerID, platform := l.ownerResolver(sessionID)
+	l.ownerCache.Store(sessionID, &ownerInfo{ownerID: ownerID, platform: platform})
+	return ownerID, platform
 }
 
 // RunResult holds the outcome of an agent loop execution.
@@ -420,12 +464,22 @@ func (l *Loop) drainInjections(history *[]canonical.Message) {
 	}
 }
 
+// containsGroup checks if a group list contains the target or wildcard.
+func containsGroup(groups []string, target string) bool {
+	for _, g := range groups {
+		if g == "*" || g == target {
+			return true
+		}
+	}
+	return false
+}
+
 // checkConsent verifies the user has consented to the tool's group.
 // Returns a ToolResult if consent is missing or denied (skip execution),
 // or nil if consent is granted (proceed with execution).
 func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.ToolCall, iteration int) *canonical.ToolResult {
-	if l.consentStore == nil || l.config.NonInteractive {
-		return nil // No consent store or non-interactive = all tools allowed.
+	if l.consentStore == nil {
+		return nil // No consent store = all tools allowed.
 	}
 
 	group, risk, _, ok := l.toolRegistry.GetMeta(tc.Name)
@@ -438,8 +492,16 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 		return nil
 	}
 
-	// Already consented for this session.
-	if l.consentStore.HasConsent(sessionID, group) {
+	// PreAuthorizedGroups bypass consent (replaces NonInteractive).
+	if containsGroup(l.config.PreAuthorizedGroups, group) {
+		return nil
+	}
+
+	// Resolve owner for persistent consent lookup.
+	ownerID, platform := l.resolveOwner(sessionID)
+
+	// Check persistent "always" + session grants.
+	if l.consentStore.HasConsent(sessionID, ownerID, platform, group) {
 		return nil
 	}
 
@@ -452,7 +514,22 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 		}
 	}
 
-	// Emit consent request and wait for response via inject channel.
+	// Generate nonce for this consent request.
+	var nonce string
+	if l.nonceManager != nil {
+		pc, err := l.nonceManager.Generate(l.config.AgentID, sessionID, group)
+		if err != nil {
+			log.Printf("[%s] consent nonce generation failed: %v", sessionID, err)
+			return &canonical.ToolResult{
+				ToolCallID: tc.ID,
+				Content:    "Internal error: could not generate consent request.",
+				IsError:    true,
+			}
+		}
+		nonce = pc.Nonce
+	}
+
+	// Emit consent request with nonce and wait for response via inject channel.
 	l.onEvent(Event{
 		Type:      EventConsentNeeded,
 		SessionID: sessionID,
@@ -463,18 +540,21 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 			Group:       group,
 			RiskLevel:   risk,
 			Explanation: tool.RiskExplanation(group),
+			Nonce:       nonce,
 		},
 	})
 
 	// Wait for consent response via inject channel (with timeout).
-	consentTimeout := 120 * time.Second
+	consentTimeout := 180 * time.Second
 	timer := time.NewTimer(consentTimeout)
 	defer timer.Stop()
+
+	// Expected token prefix for nonce-based matching.
+	noncePrefix := "__consent__" + nonce + "_"
 
 	for {
 		select {
 		case msg := <-l.injectChan:
-			// Check if this is a consent response.
 			text := ""
 			for _, c := range msg.Content {
 				if c.Type == "text" {
@@ -483,25 +563,60 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 				}
 			}
 
+			// Nonce-based matching: __consent__{nonce}_{grant|deny}_{tier}
+			if nonce != "" && strings.HasPrefix(text, noncePrefix) {
+				parts := strings.SplitN(text[len(noncePrefix):], "_", 2)
+				action := parts[0] // "grant" or "deny"
+				tier := "once"
+				if len(parts) > 1 {
+					tier = parts[1]
+				}
+
+				switch action {
+				case "grant":
+					switch tier {
+					case "always":
+						if err := l.consentStore.GrantAlways(ownerID, platform, group); err != nil {
+							log.Printf("[%s] persistent consent grant failed: %v — falling back to session grant", sessionID, err)
+						}
+						l.consentStore.GrantOnce(sessionID, group) // Also set session cache.
+					default: // "once"
+						l.consentStore.GrantOnce(sessionID, group)
+					}
+					l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "granted:" + group + ":" + tier, Iteration: iteration})
+					return nil
+
+				case "deny":
+					l.consentStore.Deny(sessionID, group)
+					l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "denied:" + group, Iteration: iteration})
+					return &canonical.ToolResult{
+						ToolCallID: tc.ID,
+						Content:    fmt.Sprintf("User denied permission for %s tools. Do not attempt to use %s tools again in this session.", group, group),
+						IsError:    true,
+					}
+				}
+			}
+
+			// Legacy matching (backward compat during M2→M6 transition).
 			switch text {
 			case "__consent_grant__" + group:
-				l.consentStore.Grant(sessionID, group)
-				l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, Text: "granted:" + group, Iteration: iteration})
-				return nil // Proceed with execution.
+				l.consentStore.GrantOnce(sessionID, group)
+				l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "granted:" + group, Iteration: iteration})
+				return nil
 			case "__consent_deny__" + group:
 				l.consentStore.Deny(sessionID, group)
-				l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, Text: "denied:" + group, Iteration: iteration})
+				l.onEvent(Event{Type: EventConsentResult, SessionID: sessionID, AgentID: l.config.AgentID, Text: "denied:" + group, Iteration: iteration})
 				return &canonical.ToolResult{
 					ToolCallID: tc.ID,
 					Content:    fmt.Sprintf("User denied permission for %s tools. Do not attempt to use %s tools again in this session.", group, group),
 					IsError:    true,
 				}
 			default:
-				// Not a consent message — re-queue as regular injection.
+				// Not a consent message for this nonce — re-queue.
 				l.Inject(msg)
 			}
+
 		case <-timer.C:
-			// Timeout waiting for consent — deny by default.
 			return &canonical.ToolResult{
 				ToolCallID: tc.ID,
 				Content:    fmt.Sprintf("Consent timeout: no response for %s tool permission. Tool execution blocked.", group),

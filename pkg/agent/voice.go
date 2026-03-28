@@ -89,21 +89,7 @@ func (l *Loop) RunVoice(ctx context.Context, sessionID string, history []canonic
 		ResponseModalities: []string{"AUDIO"},
 	}
 
-	// Get or create a live session.
-	sess, err := liveSessionPool.GetOrCreate(ctx, sessionID, cfg)
-	if err != nil {
-		errMsg := fmt.Errorf("voice session failed: %w", err)
-		l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: errMsg})
-		// Return a text fallback message.
-		return RunResult{
-			Messages: []canonical.Message{{
-				Role:    "assistant",
-				Content: []canonical.Content{{Type: "text", Text: "I'm having trouble with voice right now. Please try again or send a text message."}},
-			}},
-			Usage: totalUsage,
-			Error: errMsg,
-		}
-	}
+	voiceStart := time.Now()
 
 	// Find the last audio message in history to send.
 	var audioToSend *canonical.AudioSource
@@ -119,32 +105,82 @@ func (l *Loop) RunVoice(ctx context.Context, sessionID string, history []canonic
 	}
 
 	// Load the audio file.
+	loadStart := time.Now()
 	audioData, err := l.audioStore.Load(audioToSend.FilePath)
 	if err != nil {
 		return RunResult{Error: fmt.Errorf("load audio: %w", err)}
 	}
+	log.Printf("voice[%s]: load audio %dB in %dms", sessionID, len(audioData), time.Since(loadStart).Milliseconds())
 
 	mime := audioToSend.MimeType
 	if mime == "" {
 		mime = "audio/ogg"
 	}
 
-	// Strategy: Try local OGG→PCM conversion first (if codec available).
-	// If that fails, transcribe via REST API and send text to Live session.
+	// Pipeline: decode audio AND acquire session concurrently.
+	type decodeResult struct {
+		pcm []byte
+		err error
+	}
+	type sessionResult struct {
+		sess provider.LiveSession
+		err  error
+	}
+
+	decodeCh := make(chan decodeResult, 1)
+	sessCh := make(chan sessionResult, 1)
+
+	// Start decode in background.
+	go func() {
+		if l.audioCodec != nil && (mime == "audio/ogg" || strings.HasPrefix(mime, "audio/ogg")) {
+			decStart := time.Now()
+			pcm, decErr := l.audioCodec.DecodeOGGToPCM(audioData, 16000)
+			log.Printf("voice[%s]: decode OGG→PCM in %dms (%dB→%dB)", sessionID, time.Since(decStart).Milliseconds(), len(audioData), len(pcm))
+			decodeCh <- decodeResult{pcm: pcm, err: decErr}
+		} else {
+			decodeCh <- decodeResult{err: fmt.Errorf("no codec or wrong mime")}
+		}
+	}()
+
+	// Start session acquisition in background.
+	go func() {
+		sessStart := time.Now()
+		s, sErr := liveSessionPool.GetOrCreate(ctx, sessionID, cfg)
+		log.Printf("voice[%s]: session acquire in %dms", sessionID, time.Since(sessStart).Milliseconds())
+		sessCh <- sessionResult{sess: s, err: sErr}
+	}()
+
+	// Wait for both.
+	decRes := <-decodeCh
+	sessRes := <-sessCh
+
+	if sessRes.err != nil {
+		errMsg := fmt.Errorf("voice session failed: %w", sessRes.err)
+		l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: errMsg})
+		return RunResult{
+			Messages: []canonical.Message{{
+				Role:    "assistant",
+				Content: []canonical.Content{{Type: "text", Text: "I'm having trouble with voice right now. Please try again or send a text message."}},
+			}},
+			Usage: totalUsage,
+			Error: errMsg,
+		}
+	}
+	sess := sessRes.sess
+
+	// Send audio (or transcription fallback) to session.
 	var sendErr error
 	pcmSent := false
 
-	if l.audioCodec != nil && (mime == "audio/ogg" || strings.HasPrefix(mime, "audio/ogg")) {
-		pcmData, decErr := l.audioCodec.DecodeOGGToPCM(audioData, 16000)
-		if decErr == nil && len(pcmData) > 0 {
-			log.Printf("voice: converted %s (%d bytes) → PCM (%d bytes)", mime, len(audioData), len(pcmData))
-			sendErr = sess.Send(ctx, provider.LiveMessage{Audio: pcmData, AudioMime: "audio/pcm;rate=16000"})
-			if sendErr == nil {
-				pcmSent = true
-			}
-		} else {
-			log.Printf("voice: local decode failed (%v), falling back to transcription", decErr)
+	if decRes.err == nil && len(decRes.pcm) > 0 {
+		sendStart := time.Now()
+		sendErr = sess.Send(ctx, provider.LiveMessage{Audio: decRes.pcm, AudioMime: "audio/pcm;rate=16000"})
+		log.Printf("voice[%s]: send PCM in %dms", sessionID, time.Since(sendStart).Milliseconds())
+		if sendErr == nil {
+			pcmSent = true
 		}
+	} else {
+		log.Printf("voice[%s]: decode unavailable (%v), falling back to transcription", sessionID, decRes.err)
 	}
 
 	if !pcmSent {
@@ -152,14 +188,14 @@ func (l *Loop) RunVoice(ctx context.Context, sessionID string, history []canonic
 		if l.audioTranscriber == nil {
 			return RunResult{Error: fmt.Errorf("voice: cannot process audio — no codec and no transcriber configured")}
 		}
-		log.Printf("voice: transcribing %s (%d bytes) via REST API", mime, len(audioData))
+		trStart := time.Now()
 		transcript, trErr := l.audioTranscriber.TranscribeAudio(ctx, audioData, mime)
+		log.Printf("voice[%s]: transcribe in %dms", sessionID, time.Since(trStart).Milliseconds())
 		if trErr != nil {
 			return RunResult{Error: fmt.Errorf("voice transcribe: %w", trErr)}
 		}
-		log.Printf("voice: transcribed: %q", transcript)
+		log.Printf("voice[%s]: transcribed: %q", sessionID, transcript)
 
-		// Send transcribed text to Live session for audio response.
 		sendErr = sess.Send(ctx, provider.LiveMessage{Text: transcript})
 		if sendErr != nil {
 			return RunResult{Error: fmt.Errorf("send text to live: %w", sendErr)}
@@ -170,7 +206,10 @@ func (l *Loop) RunVoice(ctx context.Context, sessionID string, history []canonic
 		return RunResult{Error: fmt.Errorf("send audio: %w", sendErr)}
 	}
 
+	log.Printf("voice[%s]: input ready in %dms (decode+session+send)", sessionID, time.Since(voiceStart).Milliseconds())
+
 	// Collect response events until turn complete.
+	inferenceStart := time.Now()
 	var audioChunks [][]byte
 	var inputTranscript, outputTranscript string
 	var pendingToolCalls []canonical.ToolCall
@@ -330,7 +369,10 @@ func (l *Loop) RunVoice(ctx context.Context, sessionID string, history []canonic
 		}
 	}
 
+	log.Printf("voice[%s]: inference+streaming in %dms (%d audio chunks)", sessionID, time.Since(inferenceStart).Milliseconds(), len(audioChunks))
+
 	// Concatenate audio chunks and encode to OGG (if codec available).
+	encodeStart := time.Now()
 	var responseMessages []canonical.Message
 
 	if len(audioChunks) > 0 {
@@ -401,13 +443,42 @@ func (l *Loop) RunVoice(ctx context.Context, sessionID string, history []canonic
 		audioToSend.Transcript = inputTranscript
 	}
 
+	log.Printf("voice[%s]: encode+save in %dms", sessionID, time.Since(encodeStart).Milliseconds())
+	log.Printf("voice[%s]: total pipeline %dms", sessionID, time.Since(voiceStart).Milliseconds())
+
 	l.onEvent(Event{Type: EventRunCompleted, SessionID: sessionID, AgentID: l.config.AgentID})
 	return RunResult{Messages: responseMessages, Usage: totalUsage}
+}
+
+// VoiceSessionConfig returns the LiveSessionConfig for this loop, suitable for pre-warming.
+// Returns nil if voice is not enabled.
+func (l *Loop) VoiceSessionConfig() *provider.LiveSessionConfig {
+	if !l.CanVoice() {
+		return nil
+	}
+	tools := l.toolRegistry.ListForAgent(
+		l.config.ToolProfile,
+		l.config.Tools,
+		l.config.ToolDeny,
+		l.config.ToolAlsoAllow,
+	)
+	return &provider.LiveSessionConfig{
+		Model:              l.config.VoiceModel,
+		SystemPrompt:       l.config.SystemPrompt,
+		Tools:              tools,
+		VoiceName:          l.config.VoiceName,
+		ResponseModalities: []string{"AUDIO"},
+	}
 }
 
 // LiveSessionPool abstracts the session pool to avoid importing the concrete package.
 type LiveSessionPool interface {
 	GetOrCreate(ctx context.Context, sessionID string, cfg provider.LiveSessionConfig) (provider.LiveSession, error)
+}
+
+// LiveSessionWarmer is optionally implemented by pools that support pre-warming.
+type LiveSessionWarmer interface {
+	Warm(ctx context.Context, sessionID string, cfg provider.LiveSessionConfig)
 }
 
 // concatenateBytes joins multiple byte slices into one.

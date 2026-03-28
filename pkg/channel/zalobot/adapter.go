@@ -12,6 +12,7 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
+	"github.com/xoai/sageclaw/pkg/channel"
 )
 
 const (
@@ -30,6 +31,9 @@ type Adapter struct {
 	baseURL     string // For testing.
 	botID       string
 	botName     string
+	ownerUserID string             // Platform user ID of the connection owner.
+	consentCB   ConsentCallback    // Called when user responds to consent prompt.
+	ownerStore  channel.OwnerStore // For auto-capturing owner_user_id.
 }
 
 // New creates a new Zalo Bot adapter.
@@ -56,6 +60,13 @@ func WithBaseURL(url string) Option {
 
 func (a *Adapter) ID() string       { return a.connID }
 func (a *Adapter) Platform() string  { return "zalo_bot" }
+
+// UpdateWebhookURL logs the webhook URL. Zalobot uses long polling rather
+// than webhooks, but the URL is logged for informational purposes.
+func (a *Adapter) UpdateWebhookURL(ctx context.Context, webhookURL string) error {
+	log.Printf("zalo_bot[%s]: webhook URL available: %s (zalobot uses long polling, no registration needed)", a.connID, webhookURL)
+	return nil
+}
 
 // Start begins long polling for updates.
 func (a *Adapter) Start(ctx context.Context, msgBus bus.MessageBus) error {
@@ -184,6 +195,19 @@ func (a *Adapter) handleUpdate(ctx context.Context, update Update) {
 	msg := update.Message
 	if msg.MessageID == "" {
 		return
+	}
+
+	// Auto-capture owner on first inbound message.
+	if msg.From.ID != "" && a.ownerUserID == "" && a.ownerStore != nil {
+		channel.CaptureOwner(ctx, a.ownerStore, a.connID, a.ownerUserID, msg.From.ID)
+		a.ownerUserID = msg.From.ID
+	}
+
+	// Check for consent text reply (text messages only).
+	if update.EventName == "message.text.received" && msg.Text != "" {
+		if a.HandleConsentText(msg.From.ID, msg.Text) {
+			return
+		}
 	}
 
 	canonicalMsg := normalizeMessage(update.EventName, &msg)

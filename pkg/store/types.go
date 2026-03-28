@@ -126,6 +126,7 @@ type Connection struct {
 	Credentials   []byte    // Encrypted JSON blob: {"token": "...", ...}
 	DmEnabled     bool      // Allow DM messages
 	GroupEnabled  bool      // Allow group messages
+	OwnerUserID   string    // Platform user ID of the connection owner
 	Status        string    // "active", "stopped", "error"
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

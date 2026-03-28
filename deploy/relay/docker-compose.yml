@@ -1,0 +1,20 @@
+services:
+  relay:
+    build:
+      context: ../../
+      dockerfile: cmd/sageclaw-relay/Dockerfile
+    container_name: sageclaw-relay
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./relay.yaml:/etc/sageclaw-relay/relay.yaml:ro
+      - relay-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  relay-data:

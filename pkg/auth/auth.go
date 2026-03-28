@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -20,6 +21,7 @@ var (
 
 // Auth manages authentication state.
 type Auth struct {
+	mu     sync.RWMutex
 	db     *sql.DB
 	secret []byte // JWT signing secret.
 }
@@ -85,11 +87,15 @@ func (a *Auth) Login(password string) (string, error) {
 		return "", ErrWrongPassword
 	}
 
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return SignJWT(a.secret, 24*time.Hour)
 }
 
 // Verify checks a JWT token.
 func (a *Auth) Verify(token string) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	_, err := VerifyJWT(token, a.secret)
 	return err
 }
@@ -115,6 +121,45 @@ func (a *Auth) ChangePassword(oldPassword, newPassword string) error {
 	}
 
 	return a.setSetting("password_hash", string(newHash))
+}
+
+// RotateSecret generates a new JWT signing secret, persists it, and
+// updates the in-memory secret. All existing JWTs become invalid.
+func (a *Auth) RotateSecret() error {
+	s := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, s); err != nil {
+		return fmt.Errorf("generating new secret: %w", err)
+	}
+	secretStr := fmt.Sprintf("%x", s)
+	if err := a.setSetting("jwt_secret", secretStr); err != nil {
+		return fmt.Errorf("persisting new secret: %w", err)
+	}
+	a.mu.Lock()
+	a.secret = s
+	a.mu.Unlock()
+	return nil
+}
+
+// LoginWithExpiry verifies the password and returns a JWT with custom expiry.
+func (a *Auth) LoginWithExpiry(password string, expiry time.Duration) (string, error) {
+	hash, err := a.getSetting("password_hash")
+	if err != nil || hash == "" {
+		return "", ErrNotSetup
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+		return "", ErrWrongPassword
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return SignJWT(a.secret, expiry)
+}
+
+// SignToken creates a JWT with the given expiry without password verification.
+// Used after TOTP verification where password was already checked.
+func (a *Auth) SignToken(expiry time.Duration) (string, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return SignJWT(a.secret, expiry)
 }
 
 func (a *Auth) getSetting(key string) (string, error) {

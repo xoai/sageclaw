@@ -7,6 +7,16 @@ type AppConfig struct {
 	Teams      []TeamConfig             `yaml:"teams"`
 	Router     *RouterConfig            `yaml:"router"`
 	Audio      AudioConfig              `yaml:"audio"`
+	Tunnel     TunnelConfig             `yaml:"tunnel"`
+}
+
+// TunnelConfig configures the native reverse tunnel.
+type TunnelConfig struct {
+	Mode        string `yaml:"mode"`         // "managed" (default), "self-hosted", "disabled"
+	RelayURL    string `yaml:"relay_url"`    // WebSocket URL of the relay server
+	Token       string `yaml:"token"`        // Self-hosted: shared secret token
+	AutoStart   bool   `yaml:"auto_start"`   // Start tunnel on SageClaw boot
+	AutoWebhook bool   `yaml:"auto_webhook"` // Auto-register webhooks on tunnel start
 }
 
 // AudioConfig configures voice message audio storage.

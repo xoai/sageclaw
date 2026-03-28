@@ -90,6 +90,11 @@ func main() {
 				log.Fatalf("tunnel: %v", err)
 			}
 			return
+		case "auth":
+			if err := runAuthCommand(os.Args[2:]); err != nil {
+				log.Fatalf("auth: %v", err)
+			}
+			return
 		case "doctor":
 			runDoctor()
 			return
@@ -152,7 +157,7 @@ Commands:
   sageclaw backup      Backup the database
   sageclaw restore     Restore from a backup file
   sageclaw skill       Manage skills (install, uninstall)
-  sageclaw tunnel      Manage Cloudflare Tunnel for webhook channels
+  sageclaw tunnel      Manage native tunnel for webhook channels
 `, version)
 }
 
@@ -705,7 +710,8 @@ Key behaviors:
 	)
 
 	// --- Consent ---
-	consentStore := tool.NewConsentStore()
+	consentStore := tool.NewPersistentConsentStore(appStore.DB())
+	nonceManager := agent.NewNonceManager(ctx)
 
 	// --- Agent ---
 	appStore.DB().Exec(`INSERT OR IGNORE INTO agents (id, name, model) VALUES ('default', 'SageClaw', 'strong')`)
@@ -754,6 +760,18 @@ Key behaviors:
 	loopOpts := []agent.LoopOption{
 		agent.WithRouter(router),
 		agent.WithConsentStore(consentStore),
+		agent.WithNonceManager(nonceManager),
+		agent.WithOwnerResolver(func(sessionID string) (string, string) {
+			sess, err := appStore.GetSession(ctx, sessionID)
+			if err != nil || sess == nil || sess.Channel == "" {
+				return "", ""
+			}
+			conn, err := appStore.GetConnection(ctx, sess.Channel)
+			if err != nil || conn == nil {
+				return "", ""
+			}
+			return conn.OwnerUserID, conn.Platform
+		}),
 	}
 	if liveClient != nil {
 		loopOpts = append(loopOpts, agent.WithLiveProvider(liveClient))
@@ -887,6 +905,7 @@ Key behaviors:
 		Pairing:         pairingMgr,
 		AgentProvider:   agentProvider,
 		LiveSessionPool: livePool,
+		NonceManager:    nonceManager,
 		CostRecorder: func(ctx context.Context, sessionID, agentID, provName, model string, usage canonical.Usage) {
 			budgetEngine.RecordCost(ctx, provider.CostEntry{
 				SessionID:     sessionID,
@@ -973,9 +992,24 @@ Key behaviors:
 			rpcPort = p
 		}
 	}
-	tunnelMgr := tunnel.New(rpcPort, func(status tunnel.Status) {
-		log.Printf("tunnel: running=%v url=%s", status.Running, status.URL)
-	})
+	tunnelCfg := tunnel.Config{
+		Mode:        cfg.Tunnel.Mode,
+		RelayURL:    cfg.Tunnel.RelayURL,
+		Token:       cfg.Tunnel.Token,
+		AutoStart:   cfg.Tunnel.AutoStart,
+		AutoWebhook: cfg.Tunnel.AutoWebhook,
+		LocalPort:   rpcPort,
+	}.Defaults()
+	var tunnelMgr *tunnel.Client
+	if tunnelCfg.Enabled() {
+		var err error
+		tunnelMgr, err = tunnel.NewClient(appStore.DB(), tunnelCfg, func(status tunnel.Status) {
+			log.Printf("tunnel: running=%v url=%s", status.Running, status.URL)
+		})
+		if err != nil {
+			log.Printf("warning: tunnel init failed: %v", err)
+		}
+	}
 
 	// --- MCP Manager ---
 	mcpMgr := mcp.NewManager(toolReg)
@@ -1009,6 +1043,8 @@ Key behaviors:
 		rpc.WithMCPManager(mcpMgr),
 		rpc.WithSkillStore(skillStore),
 		rpc.WithConsentHandler(p.InjectConsent),
+		rpc.WithConsentHandlerLegacy(p.InjectConsentLegacy),
+		rpc.WithConsentStore(consentStore),
 		rpc.WithAudioBasePath(audioStoragePath),
 	)
 	// Wire SSE broadcast now that rpcServer exists.
@@ -1019,6 +1055,22 @@ Key behaviors:
 	} else {
 		log.Printf("dashboard: http://localhost%s", rpcAddr)
 		defer rpcServer.Stop(startCtx)
+	}
+
+	// Wire session invalidation: rotate JWT secret when tunnel starts.
+	// This forces all existing sessions to re-login (with TOTP if enabled).
+	rpcServer.WireTunnelAuth()
+
+	// Wire auto-webhook: register webhook URLs when tunnel is ready.
+	rpcServer.WireTunnelWebhooks()
+
+	// Auto-start tunnel if configured.
+	if tunnelMgr != nil && tunnelCfg.AutoStart {
+		if err := tunnelMgr.Start(startCtx); err != nil {
+			log.Printf("warning: tunnel auto-start failed: %v", err)
+		} else {
+			log.Printf("tunnel: auto-started in %s mode", tunnelCfg.Mode)
+		}
 	}
 
 	// --- Channels ---

@@ -13,6 +13,7 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
+	"github.com/xoai/sageclaw/pkg/channel"
 )
 
 const (
@@ -23,13 +24,16 @@ const (
 
 // Adapter implements channel.Channel for Discord.
 type Adapter struct {
-	connID  string // Connection ID: "dc_abc123"
-	token   string
-	msgBus  bus.MessageBus
-	client  *http.Client
-	botID   string
-	cancel  context.CancelFunc
-	mu      sync.Mutex
+	connID      string // Connection ID: "dc_abc123"
+	token       string
+	msgBus      bus.MessageBus
+	client      *http.Client
+	botID       string
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	ownerUserID string              // Platform user ID of the connection owner.
+	consentCB   ConsentCallback    // Called when user responds to consent prompt.
+	ownerStore  channel.OwnerStore // For auto-capturing owner_user_id.
 }
 
 // New creates a new Discord adapter.
@@ -222,6 +226,12 @@ func (a *Adapter) ToEnvelope(msg DiscordMessage) bus.Envelope {
 	mentioned := kind == "dm"
 	if kind == "group" {
 		mentioned = DetectMentioned(msg, a.botID)
+	}
+
+	// Auto-capture owner on first inbound message.
+	if a.ownerUserID == "" && msg.Author.ID != "" && a.ownerStore != nil {
+		channel.CaptureOwner(context.Background(), a.ownerStore, a.connID, a.ownerUserID, msg.Author.ID)
+		a.ownerUserID = msg.Author.ID
 	}
 
 	return bus.Envelope{

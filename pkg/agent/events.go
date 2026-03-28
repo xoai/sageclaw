@@ -38,6 +38,7 @@ type ConsentRequest struct {
 	Group       string `json:"group"`
 	RiskLevel   string `json:"risk_level"`
 	Explanation string `json:"explanation"`
+	Nonce       string `json:"nonce"` // Unique nonce for this consent request.
 }
 
 // EventHandler is a callback for agent events.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
+	"github.com/xoai/sageclaw/pkg/channel"
 )
 
 const cloudAPIBase = "https://graph.facebook.com/v18.0"
@@ -29,6 +30,9 @@ type Adapter struct {
 	msgBus        bus.MessageBus
 	client        *http.Client
 	cancel        context.CancelFunc
+	ownerUserID   string             // Platform user ID of the connection owner.
+	consentCB     ConsentCallback    // Called when user responds to consent prompt.
+	ownerStore    channel.OwnerStore // For auto-capturing owner_user_id.
 }
 
 // Option configures the WhatsApp adapter.
@@ -138,6 +142,17 @@ func (a *Adapter) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			for _, msg := range change.Value.Messages {
+				// Auto-capture owner on first inbound message.
+				if msg.From != "" && a.ownerUserID == "" && a.ownerStore != nil {
+					channel.CaptureOwner(r.Context(), a.ownerStore, a.connID, a.ownerUserID, msg.From)
+					a.ownerUserID = msg.From
+				}
+
+				// Check for consent button reply.
+				if msg.Type == "interactive" && a.HandleConsentReply(msg) {
+					continue
+				}
+
 				if msg.Type == "text" && msg.Text.Body != "" {
 					kind := DetectKind(msg.From)
 					a.msgBus.PublishInbound(r.Context(), bus.Envelope{
@@ -218,6 +233,16 @@ func (a *Adapter) sendMessage(to, text string) error {
 	return nil
 }
 
+// UpdateWebhookURL attempts to register the webhook URL with the WhatsApp
+// Business API. WhatsApp webhook configuration is typically done via the
+// App Dashboard, not the Cloud API. This method logs the URL for manual
+// configuration and returns nil (best-effort — manual setup may be required).
+func (a *Adapter) UpdateWebhookURL(ctx context.Context, webhookURL string) error {
+	log.Printf("whatsapp[%s]: webhook URL updated: %s", a.connID, webhookURL)
+	log.Printf("whatsapp[%s]: configure this URL in your WhatsApp App Dashboard → Webhooks", a.connID)
+	return nil
+}
+
 // WhatsApp webhook types.
 
 type WebhookPayload struct {
@@ -246,4 +271,17 @@ type WAMessage struct {
 	Text struct {
 		Body string `json:"body"`
 	} `json:"text"`
+	Interactive *WAInteractive `json:"interactive,omitempty"`
+}
+
+// WAInteractive represents a WhatsApp interactive message response.
+type WAInteractive struct {
+	Type        string          `json:"type"`
+	ButtonReply *WAButtonReply  `json:"button_reply,omitempty"`
+}
+
+// WAButtonReply represents a button reply from the user.
+type WAButtonReply struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }

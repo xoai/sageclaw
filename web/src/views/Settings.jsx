@@ -180,7 +180,184 @@ function SecurityTab() {
   return (
     <div>
       <PasswordSection />
+      <TwoFactorSection />
+      <ConsentGrantsSection />
       <CredentialsSection />
+    </div>
+  );
+}
+
+function TwoFactorSection() {
+  const [enabled, setEnabled] = useState(null);
+  const [setupData, setSetupData] = useState(null);
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/auth/check', { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => setEnabled(data.totp_enabled || false));
+  }, []);
+
+  const setup2FA = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/auth/totp/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.error) { setError(data.error); return; }
+      setSetupData(data);
+      setEnabled(true);
+      setPassword('');
+    } catch { setError('Connection failed'); }
+    finally { setLoading(false); }
+  };
+
+  const disable2FA = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/auth/totp/disable', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.error) { setError(data.error); return; }
+      setEnabled(false);
+      setSetupData(null);
+      setPassword('');
+    } catch { setError('Connection failed'); }
+    finally { setLoading(false); }
+  };
+
+  if (enabled === null) return null;
+
+  return (
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3>Two-Factor Authentication</h3>
+        <span class={`badge ${enabled ? 'badge-green' : 'badge-gray'}`}>
+          {enabled ? 'Enabled' : 'Disabled'}
+        </span>
+      </div>
+
+      {setupData && (
+        <div style="margin-bottom:16px;padding:12px;background:var(--bg);border-radius:8px">
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">
+            Add this to your authenticator app (Google Authenticator, Authy, etc):
+          </p>
+          <div class="form-group">
+            <label>Secret</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="text" value={setupData.secret} readOnly
+                style="flex:1;font-family:var(--mono);font-size:12px" />
+              <button class="btn-small" onClick={() => navigator.clipboard?.writeText(setupData.secret)}>
+                Copy
+              </button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>URI (for manual entry)</label>
+            <input type="text" value={setupData.uri} readOnly
+              style="font-family:var(--mono);font-size:11px;width:100%" />
+          </div>
+          <p style="font-size:12px;color:var(--warning);margin-top:8px">
+            Save this secret — you'll need it if you lose access to your authenticator.
+          </p>
+        </div>
+      )}
+
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <div style="flex:1">
+          <label style="font-size:12px;color:var(--text-muted)">Password required</label>
+          <input type="password" class="search-input" placeholder="Enter password"
+            value={password} onInput={e => setPassword(e.target.value)}
+            style="margin-top:4px" />
+        </div>
+        {enabled ? (
+          <button class="btn-danger btn-small" onClick={disable2FA} disabled={loading || !password}>
+            {loading ? 'Disabling...' : 'Disable 2FA'}
+          </button>
+        ) : (
+          <button class="btn-primary btn-small" onClick={setup2FA} disabled={loading || !password}>
+            {loading ? 'Setting up...' : 'Enable 2FA'}
+          </button>
+        )}
+      </div>
+
+      {error && <div style="color:var(--error);font-size:13px;margin-top:8px">{error}</div>}
+    </div>
+  );
+}
+
+function ConsentGrantsSection() {
+  const [grants, setGrants] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const loadGrants = async () => {
+    try {
+      const res = await fetch('/api/consent/grants', { credentials: 'include' });
+      const data = await res.json();
+      setGrants(Array.isArray(data) ? data : []);
+    } catch {}
+    setLoading(false);
+  };
+
+  useEffect(() => { loadGrants(); }, []);
+
+  const revoke = async (id) => {
+    try {
+      await fetch(`/api/consent/grants/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      setGrants(grants.filter(g => g.ID !== id));
+    } catch {}
+  };
+
+  return (
+    <div class="memory-card" style="margin-bottom:16px">
+      <h3 style="margin-bottom:4px">Persistent Consent Grants</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+        Tools you've permanently allowed. Revoke any time.
+      </p>
+      {loading && <div style="color:var(--text-muted);font-size:13px">Loading...</div>}
+      {!loading && grants.length === 0 && (
+        <div style="color:var(--text-muted);font-size:13px">No persistent grants. When you click "Always allow" on a tool permission prompt, it will appear here.</div>
+      )}
+      {grants.length > 0 && (
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="text-align:left;border-bottom:1px solid var(--border)">
+              <th style="padding:6px 8px">Platform</th>
+              <th style="padding:6px 8px">Tool Group</th>
+              <th style="padding:6px 8px">Granted</th>
+              <th style="padding:6px 8px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {grants.map(g => (
+              <tr key={g.ID} style="border-bottom:1px solid var(--border)">
+                <td style="padding:6px 8px;text-transform:capitalize">{g.Platform}</td>
+                <td style="padding:6px 8px;font-family:var(--mono)">{g.ToolGroup}</td>
+                <td style="padding:6px 8px;color:var(--text-muted);font-size:12px">{g.GrantedAt ? new Date(g.GrantedAt).toLocaleDateString() : '—'}</td>
+                <td style="padding:6px 8px;text-align:right">
+                  <button class="btn-secondary" style="padding:3px 10px;font-size:12px;color:var(--error)"
+                    onClick={() => revoke(g.ID)}>Revoke</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

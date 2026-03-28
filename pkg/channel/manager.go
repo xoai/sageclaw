@@ -161,6 +161,13 @@ func (m *Manager) Running() []string {
 	return ids
 }
 
+// GetChannel returns the running channel for a connection ID, or nil.
+func (m *Manager) GetChannel(connID string) Channel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.channels[connID]
+}
+
 // ForEachChannel calls fn for each active channel.
 func (m *Manager) ForEachChannel(fn func(Channel)) {
 	m.mu.RLock()

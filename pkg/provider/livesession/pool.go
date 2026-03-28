@@ -108,6 +108,31 @@ func (p *Pool) GetOrCreate(ctx context.Context, sessionID string, cfg provider.L
 	return sess, nil
 }
 
+// Warm pre-creates a session in the background so it's ready when voice arrives.
+// No-op if a session already exists for the given ID. Safe to call repeatedly.
+func (p *Pool) Warm(ctx context.Context, sessionID string, cfg provider.LiveSessionConfig) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	if _, ok := p.sessions[sessionID]; ok {
+		p.mu.Unlock()
+		return // Already warm.
+	}
+	p.mu.Unlock()
+
+	go func() {
+		start := time.Now()
+		_, err := p.GetOrCreate(ctx, sessionID, cfg)
+		if err != nil {
+			log.Printf("livesession pool: warm failed for %s: %v", sessionID, err)
+		} else {
+			log.Printf("livesession pool: pre-warmed session %s in %dms", sessionID, time.Since(start).Milliseconds())
+		}
+	}()
+}
+
 // Reconnect removes a stale session and creates a fresh one.
 // Use this when a session errors out (WebSocket disconnect, GoAway, etc.).
 func (p *Pool) Reconnect(ctx context.Context, sessionID string, cfg provider.LiveSessionConfig) (provider.LiveSession, error) {

@@ -10,10 +10,10 @@ import (
 
 func (s *Store) CreateConnection(ctx context.Context, conn store.Connection) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO connections (id, platform, agent_id, label, metadata, credential_key, credentials, dm_enabled, group_enabled, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO connections (id, platform, agent_id, label, metadata, credential_key, credentials, dm_enabled, group_enabled, owner_user_id, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		conn.ID, conn.Platform, conn.AgentID, conn.Label, conn.Metadata, conn.CredentialKey, conn.Credentials,
-		boolToInt(conn.DmEnabled), boolToInt(conn.GroupEnabled), conn.Status)
+		boolToInt(conn.DmEnabled), boolToInt(conn.GroupEnabled), conn.OwnerUserID, conn.Status)
 	if err != nil {
 		return fmt.Errorf("creating connection: %w", err)
 	}
@@ -34,11 +34,11 @@ func (s *Store) GetConnection(ctx context.Context, id string) (*store.Connection
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, platform, COALESCE(agent_id,''), label, metadata, credential_key,
 		        COALESCE(credentials, X''), COALESCE(dm_enabled,1), COALESCE(group_enabled,1),
-		        status, created_at, updated_at
+		        COALESCE(owner_user_id,''), status, created_at, updated_at
 		 FROM connections WHERE id = ?`, id).
 		Scan(&c.ID, &c.Platform, &agentID, &c.Label, &c.Metadata, &c.CredentialKey,
 			&c.Credentials, &dmEnabled, &groupEnabled,
-			&c.Status, &createdAt, &updatedAt)
+			&c.OwnerUserID, &c.Status, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("connection not found: %w", err)
 	}
@@ -53,7 +53,7 @@ func (s *Store) GetConnection(ctx context.Context, id string) (*store.Connection
 func (s *Store) ListConnections(ctx context.Context, filter store.ConnectionFilter) ([]store.Connection, error) {
 	query := `SELECT id, platform, COALESCE(agent_id,''), label, metadata, credential_key,
 		COALESCE(credentials, X''), COALESCE(dm_enabled,1), COALESCE(group_enabled,1),
-		status, created_at, updated_at
+		COALESCE(owner_user_id,''), status, created_at, updated_at
 		FROM connections WHERE 1=1`
 	var args []any
 
@@ -84,7 +84,7 @@ func (s *Store) ListConnections(ctx context.Context, filter store.ConnectionFilt
 		var dmEnabled, groupEnabled int
 		if err := rows.Scan(&c.ID, &c.Platform, &agentID, &c.Label, &c.Metadata, &c.CredentialKey,
 			&c.Credentials, &dmEnabled, &groupEnabled,
-			&c.Status, &createdAt, &updatedAt); err != nil {
+			&c.OwnerUserID, &c.Status, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scanning connection: %w", err)
 		}
 		c.AgentID = agentID
@@ -107,7 +107,7 @@ func (s *Store) UpdateConnection(ctx context.Context, id string, fields map[stri
 
 	for key, val := range fields {
 		switch key {
-		case "agent_id", "label", "metadata", "status", "credentials", "dm_enabled", "group_enabled":
+		case "agent_id", "label", "metadata", "status", "credentials", "dm_enabled", "group_enabled", "owner_user_id":
 			query += fmt.Sprintf(`, %s = ?`, key)
 			args = append(args, val)
 		default:

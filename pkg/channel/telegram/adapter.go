@@ -17,6 +17,7 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
+	"github.com/xoai/sageclaw/pkg/channel"
 )
 
 const (
@@ -59,6 +60,11 @@ type Adapter struct {
 	botUsername string // Bot username without @ (from getMe).
 	audioStore  AudioStore // Optional: for voice message handling.
 
+	// Consent support.
+	ownerUserID string                // Platform user ID of the connection owner.
+	consentCB   consentCallback       // Called when user responds to consent prompt.
+	ownerStore  channel.OwnerStore    // For auto-capturing owner_user_id.
+
 	// Streaming: progressive message editing.
 	streamMu      sync.Mutex
 	streams       map[string]*streamMsg    // sessionID → active stream
@@ -95,6 +101,21 @@ func WithBaseURL(url string) Option {
 // WithAudioStore enables voice message handling.
 func WithAudioStore(store AudioStore) Option {
 	return func(a *Adapter) { a.audioStore = store }
+}
+
+// WithOwnerUserID sets the owner user ID for consent verification.
+func WithOwnerUserID(id string) Option {
+	return func(a *Adapter) { a.ownerUserID = id }
+}
+
+// WithConsentCallback sets the function called when consent is granted/denied.
+func WithConsentCallback(cb func(nonce string, granted bool, tier string)) Option {
+	return func(a *Adapter) { a.consentCB = cb }
+}
+
+// WithOwnerStore enables auto-capture of owner_user_id on first inbound message.
+func WithOwnerStore(s channel.OwnerStore) Option {
+	return func(a *Adapter) { a.ownerStore = s }
 }
 
 func (a *Adapter) ID() string       { return a.connID }
@@ -185,7 +206,9 @@ func (a *Adapter) pollLoop(ctx context.Context) {
 		}
 
 		for _, update := range updates {
-			if update.Message != nil {
+			if update.CallbackQuery != nil {
+				a.handleCallbackQuery(ctx, update.CallbackQuery)
+			} else if update.Message != nil {
 				a.handleMessage(ctx, update.Message)
 			}
 			offset = update.UpdateID + 1
@@ -194,8 +217,8 @@ func (a *Adapter) pollLoop(ctx context.Context) {
 }
 
 func (a *Adapter) getUpdates(ctx context.Context, offset int) ([]Update, error) {
-	reqURL := fmt.Sprintf("%s/getUpdates?timeout=%d&offset=%d",
-		a.baseURL, pollTimeout, offset)
+	reqURL := fmt.Sprintf("%s/getUpdates?timeout=%d&offset=%d&allowed_updates=%s",
+		a.baseURL, pollTimeout, offset, url.QueryEscape(`["message","callback_query"]`))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
@@ -231,6 +254,13 @@ func (a *Adapter) getUpdates(ctx context.Context, offset int) ([]Update, error) 
 const maxVoiceDurationSec = 600 // 10 minutes max voice message.
 
 func (a *Adapter) handleMessage(ctx context.Context, msg *TelegramMessage) {
+	// Auto-capture owner on first inbound message.
+	if msg.From != nil && a.ownerUserID == "" && a.ownerStore != nil {
+		userID := strconv.FormatInt(msg.From.ID, 10)
+		channel.CaptureOwner(ctx, a.ownerStore, a.connID, a.ownerUserID, userID)
+		a.ownerUserID = userID
+	}
+
 	// Handle voice messages.
 	hasAudio := false
 	canonicalMsg := a.normalizeMessageWithAudio(ctx, msg, &hasAudio)
@@ -808,8 +838,9 @@ func (a *Adapter) sendVoiceMultipart(chatID string, oggData []byte, durationSec 
 // Telegram API types.
 
 type Update struct {
-	UpdateID int              `json:"update_id"`
-	Message  *TelegramMessage `json:"message"`
+	UpdateID      int              `json:"update_id"`
+	Message       *TelegramMessage `json:"message"`
+	CallbackQuery *CallbackQuery   `json:"callback_query"`
 }
 
 type TelegramMessage struct {

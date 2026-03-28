@@ -20,3 +20,11 @@ type Channel interface {
 type WebhookRegistrar interface {
 	RegisterWebhook(mux *http.ServeMux)
 }
+
+// WebhookURLUpdater is implemented by adapters that can programmatically
+// register/update their webhook URL with the platform's API.
+// This is NOT the same as WebhookRegistrar (which registers local HTTP routes).
+// Used by the tunnel client to auto-register webhooks when the tunnel starts.
+type WebhookURLUpdater interface {
+	UpdateWebhookURL(ctx context.Context, webhookURL string) error
+}

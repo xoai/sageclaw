@@ -54,13 +54,15 @@ type Server struct {
 	httpServer     *http.Server
 	clients        map[*wsConn]bool
 	mu             sync.RWMutex
-	tunnel         *tunnel.Tunnel
+	tunnel         *tunnel.Client
 	pairing        *security.PairingManager
 	budgetEngine   *provider.BudgetEngine
 	router         *provider.Router
 	chanMgr        *channel.Manager
 	mcpMgr         *mcp.Manager
-	consentHandler func(group string, granted bool) // Callback for consent responses.
+	consentHandler       func(nonce string, granted bool, tier string) error // Nonce-based consent callback.
+	consentHandlerLegacy func(group string, granted bool)                   // Legacy consent callback (M2→M6 compat).
+	consentStore         consentGrantStore                                  // For grant list/revoke endpoints.
 	pendingConsent []map[string]any                // Queued consent prompts awaiting response.
 	skillStore     *skillstore.Store
 	agentsDir      string
@@ -68,6 +70,9 @@ type Server struct {
 	startTime      time.Time
 	providerHealth map[string]string
 	audioBasePath  string // Base path for audio file serving (e.g. "data/audio").
+	totp           *auth.TOTP
+	loginLimiter   *auth.LoginLimiter
+	pendingTOTP    map[string]pendingTOTPEntry // nonce → entry
 }
 
 // wsConn is a minimal WebSocket connection using the standard upgrade.
@@ -105,7 +110,7 @@ func WithProviderHealth(h map[string]string) ServerOption {
 }
 
 // WithTunnel adds tunnel management to the server.
-func WithTunnel(t *tunnel.Tunnel) ServerOption {
+func WithTunnel(t *tunnel.Client) ServerOption {
 	return func(s *Server) { s.tunnel = t }
 }
 
@@ -126,7 +131,13 @@ func WithBudgetEngine(be *provider.BudgetEngine) ServerOption {
 
 // WithEncryptionKey sets the credential encryption key.
 func WithEncryptionKey(key []byte) ServerOption {
-	return func(s *Server) { s.encKey = key }
+	return func(s *Server) {
+		s.encKey = key
+		// Update TOTP encryption key if TOTP was already created.
+		if s.totp != nil {
+			s.totp = auth.NewTOTP(s.store.DB(), key)
+		}
+	}
 }
 
 // WithRouter adds the model router for hot-reload of providers.
@@ -144,9 +155,25 @@ func WithMCPManager(m *mcp.Manager) ServerOption {
 	return func(s *Server) { s.mcpMgr = m }
 }
 
-// WithConsentHandler sets the callback for consent responses from the dashboard.
-func WithConsentHandler(fn func(group string, granted bool)) ServerOption {
+// consentGrantStore is the interface for consent grant CRUD (subset of PersistentConsentStore).
+type consentGrantStore interface {
+	ListGrants(ownerID, platform string) ([]tool.ConsentGrant, error)
+	RevokeByID(id string) error
+}
+
+// WithConsentStore sets the consent grant store for listing/revoking persistent grants.
+func WithConsentStore(cs consentGrantStore) ServerOption {
+	return func(s *Server) { s.consentStore = cs }
+}
+
+// WithConsentHandler sets the nonce-based consent callback.
+func WithConsentHandler(fn func(nonce string, granted bool, tier string) error) ServerOption {
 	return func(s *Server) { s.consentHandler = fn }
+}
+
+// WithConsentHandlerLegacy sets the legacy group-based consent callback (M2→M6 compat).
+func WithConsentHandlerLegacy(fn func(group string, granted bool)) ServerOption {
+	return func(s *Server) { s.consentHandlerLegacy = fn }
 }
 
 // WithSkillStore adds skill marketplace management to the server.
@@ -157,6 +184,72 @@ func WithSkillStore(ss *skillstore.Store) ServerOption {
 // WithAudioBasePath sets the base path for serving audio files.
 func WithAudioBasePath(path string) ServerOption {
 	return func(s *Server) { s.audioBasePath = path }
+}
+
+// pendingTOTPEntry stores a verified-password session awaiting TOTP completion.
+type pendingTOTPEntry struct {
+	expiresAt time.Time
+}
+
+// WireTunnelAuth sets up session invalidation: rotates the JWT secret
+// on the first tunnel ready event (not on reconnects). This forces all
+// existing sessions to re-login, enforcing TOTP if enabled.
+// Reconnects reuse the same secret — no spurious logouts on transient disconnects.
+func (s *Server) WireTunnelAuth() {
+	if s.tunnel == nil || s.auth == nil {
+		return
+	}
+	var rotated sync.Once
+	s.tunnel.OnReady(func(url string) {
+		rotated.Do(func() {
+			if err := s.auth.RotateSecret(); err != nil {
+				log.Printf("tunnel: failed to rotate JWT secret: %v", err)
+			} else {
+				log.Printf("tunnel: JWT secret rotated — existing sessions invalidated")
+			}
+		})
+	})
+}
+
+// WireTunnelWebhooks sets up auto-webhook registration: when the tunnel
+// becomes ready, iterates webhook-needing connections and logs the URL
+// for each adapter that implements WebhookURLUpdater.
+func (s *Server) WireTunnelWebhooks() {
+	if s.tunnel == nil || s.chanMgr == nil {
+		return
+	}
+	s.tunnel.OnReady(func(url string) {
+		conns, err := s.store.ListConnections(context.Background(), store.ConnectionFilter{Status: "active"})
+		if err != nil {
+			log.Printf("tunnel: auto-webhook: failed to list connections: %v", err)
+			return
+		}
+		for _, conn := range conns {
+			if conn.Platform != "whatsapp" && conn.Platform != "zalo" && conn.Platform != "zalobot" {
+				continue
+			}
+			ch := s.chanMgr.GetChannel(conn.ID)
+			if ch == nil {
+				continue
+			}
+			if updater, ok := ch.(channel.WebhookURLUpdater); ok {
+				webhookURL := url + "/webhook/" + conn.Platform
+				if err := updater.UpdateWebhookURL(context.Background(), webhookURL); err != nil {
+					log.Printf("tunnel: auto-webhook failed for %s (%s): %v", conn.ID, conn.Platform, err)
+				}
+			}
+		}
+	})
+}
+
+// WithTOTP adds TOTP management to the server.
+func WithTOTP(t *auth.TOTP) ServerOption {
+	return func(s *Server) { s.totp = t }
+}
+
+// WithLoginLimiter adds login rate limiting to the server.
+func WithLoginLimiter(l *auth.LoginLimiter) ServerOption {
+	return func(s *Server) { s.loginLimiter = l }
 }
 
 // NewServer creates a new RPC server.
@@ -176,6 +269,9 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 		memEngine:      mem,
 		msgBus:         msgBus,
 		auth:           authMgr,
+		totp:           auth.NewTOTP(s.DB(), nil), // encKey set via WithEncryptionKey
+		loginLimiter:   auth.NewLoginLimiter(),
+		pendingTOTP:    make(map[string]pendingTOTPEntry),
 		clients:        make(map[*wsConn]bool),
 		startTime:      time.Now(),
 		providerHealth: map[string]string{},
@@ -190,7 +286,10 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("GET /api/auth/check", srv.handleAuthCheck)
 	mux.HandleFunc("POST /api/auth/setup", srv.handleAuthSetup)
 	mux.HandleFunc("POST /api/auth/login", srv.handleAuthLogin)
+	mux.HandleFunc("POST /api/auth/login/totp", srv.handleAuthLoginTOTP)
 	mux.HandleFunc("POST /api/auth/logout", srv.handleAuthLogout)
+	mux.HandleFunc("POST /api/auth/totp/setup", srv.authGuard(srv.handleTOTPSetup))
+	mux.HandleFunc("POST /api/auth/totp/disable", srv.authGuard(srv.handleTOTPDisable))
 
 	// Status (public for health checks).
 	mux.HandleFunc("GET /api/status", srv.authGuard(srv.handleStatus))
@@ -271,6 +370,8 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	// Consent (authenticated).
 	mux.HandleFunc("POST /api/consent", srv.authGuard(srv.handleConsentResponse))
 	mux.HandleFunc("GET /api/consent/pending", srv.authGuard(srv.handleConsentPending))
+	mux.HandleFunc("GET /api/consent/grants", srv.authGuard(srv.handleConsentGrants))
+	mux.HandleFunc("DELETE /api/consent/grants/", srv.authGuard(srv.handleConsentRevokeGrant))
 
 	// Credentials (authenticated).
 	mux.HandleFunc("GET /api/credentials", srv.authGuard(srv.handleCredentialsList))
@@ -427,12 +528,13 @@ func (s *Server) EventHandler() agent.EventHandler {
 			// Queue for polling — SSE may be missed.
 			s.mu.Lock()
 			s.pendingConsent = append(s.pendingConsent, map[string]any{
-				"tool_name":  e.Consent.ToolName,
-				"group":      e.Consent.Group,
-				"risk_level": e.Consent.RiskLevel,
+				"tool_name":   e.Consent.ToolName,
+				"group":       e.Consent.Group,
+				"risk_level":  e.Consent.RiskLevel,
 				"explanation": e.Consent.Explanation,
-				"agent_id":   e.AgentID,
-				"session_id": e.SessionID,
+				"nonce":       e.Consent.Nonce,
+				"agent_id":    e.AgentID,
+				"session_id":  e.SessionID,
 			})
 			s.mu.Unlock()
 		}

@@ -3,6 +3,7 @@ package rpc
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -967,25 +968,85 @@ func (s *Server) handleMCPServersRemove(w http.ResponseWriter, r *http.Request) 
 // --- Consent ---
 
 func (s *Server) handleConsentResponse(w http.ResponseWriter, r *http.Request) {
-	if s.consentHandler == nil {
-		http.Error(w, "consent handler not configured", http.StatusServiceUnavailable)
-		return
-	}
-
 	var req struct {
-		Group   string `json:"group"`
+		// New nonce-based format.
+		Nonce   string `json:"nonce"`
 		Granted bool   `json:"granted"`
+		Tier    string `json:"tier"` // "once", "always", "deny"
+
+		// Legacy format (backward compat).
+		Group string `json:"group"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.Group == "" {
-		http.Error(w, "group is required", http.StatusBadRequest)
+
+	// New nonce-based path.
+	if req.Nonce != "" {
+		if s.consentHandler == nil {
+			http.Error(w, "consent handler not configured", http.StatusServiceUnavailable)
+			return
+		}
+		if req.Tier == "" {
+			req.Tier = "once"
+		}
+		if err := s.consentHandler(req.Nonce, req.Granted, req.Tier); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Clear pending consent by nonce.
+		s.mu.Lock()
+		filtered := s.pendingConsent[:0]
+		for _, c := range s.pendingConsent {
+			if n, _ := c["nonce"].(string); n != req.Nonce {
+				filtered = append(filtered, c)
+			}
+		}
+		s.pendingConsent = filtered
+		s.mu.Unlock()
+
+		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
 
-	s.consentHandler(req.Group, req.Granted)
+	// Legacy group-based path (backward compat during M2→M6 transition).
+	if req.Group == "" {
+		http.Error(w, "nonce or group is required", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("consent: legacy group-based request for %q (deprecated — use nonce format)", req.Group)
+
+	// Try to resolve nonce from pending consents.
+	var resolvedNonce string
+	s.mu.RLock()
+	for _, c := range s.pendingConsent {
+		if g, _ := c["group"].(string); g == req.Group {
+			if n, _ := c["nonce"].(string); n != "" {
+				resolvedNonce = n
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	if resolvedNonce != "" && s.consentHandler != nil {
+		// Use nonce path with "once" tier for legacy requests.
+		if err := s.consentHandler(resolvedNonce, req.Granted, "once"); err != nil {
+			// Nonce expired or already used — fall back to legacy broadcast.
+			log.Printf("consent: nonce resolution failed for legacy request: %v", err)
+			if s.consentHandlerLegacy != nil {
+				s.consentHandlerLegacy(req.Group, req.Granted)
+			}
+		}
+	} else if s.consentHandlerLegacy != nil {
+		s.consentHandlerLegacy(req.Group, req.Granted)
+	} else {
+		http.Error(w, "consent handler not configured", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Clear pending consent for this group.
 	s.mu.Lock()
@@ -1010,4 +1071,45 @@ func (s *Server) handleConsentPending(w http.ResponseWriter, r *http.Request) {
 		pending = []map[string]any{}
 	}
 	writeJSON(w, pending)
+}
+
+// handleConsentGrants returns persistent "always allow" grants.
+func (s *Server) handleConsentGrants(w http.ResponseWriter, r *http.Request) {
+	if s.consentStore == nil {
+		writeJSON(w, []any{})
+		return
+	}
+
+	ownerID := r.URL.Query().Get("owner_id")
+	platform := r.URL.Query().Get("platform")
+
+	grants, err := s.consentStore.ListGrants(ownerID, platform)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if grants == nil {
+		grants = []tool.ConsentGrant{}
+	}
+	writeJSON(w, grants)
+}
+
+// handleConsentRevokeGrant revokes a persistent grant by ID.
+func (s *Server) handleConsentRevokeGrant(w http.ResponseWriter, r *http.Request) {
+	if s.consentStore == nil {
+		http.Error(w, "consent store not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/consent/grants/")
+	if id == "" {
+		http.Error(w, "grant ID is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.consentStore.RevokeByID(id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "revoked"})
 }

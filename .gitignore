@@ -39,4 +39,4 @@ sage/
 CLAUDE.md
 docs/adr/
 .impeccable.md
-.skills-lock.json
+skills-lock.json

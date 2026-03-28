@@ -19,11 +19,12 @@ const (
 
 // Adapter implements channel.Channel for interactive terminal chat.
 type Adapter struct {
-	connID string
-	reader *bufio.Scanner
-	writer io.Writer
-	msgBus bus.MessageBus
-	cancel context.CancelFunc
+	connID    string
+	reader    *bufio.Scanner
+	writer    io.Writer
+	msgBus    bus.MessageBus
+	cancel    context.CancelFunc
+	consentCB ConsentCallback // Called when user responds to consent prompt.
 }
 
 // Option configures the CLI adapter.

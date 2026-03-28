@@ -104,6 +104,15 @@ func (p *LoopPool) InjectAll(msg canonical.Message) {
 	}
 }
 
+// InjectTo sends a message to a specific agent loop (targeted injection).
+func (p *LoopPool) InjectTo(agentID string, msg canonical.Message) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if l, ok := p.loops[agentID]; ok {
+		l.Inject(msg)
+	}
+}
+
 // ProviderAndModel returns the provider name and model for a specific agent.
 func (p *LoopPool) ProviderAndModel(agentID string) (string, string) {
 	l := p.Get(agentID)

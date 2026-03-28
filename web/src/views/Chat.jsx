@@ -317,16 +317,20 @@ export function Chat() {
     }
   };
 
-  const respondConsent = async (granted) => {
+  const respondConsent = async (granted, tier = 'once') => {
     if (!consentPrompt) return;
+    const payload = consentPrompt.nonce
+      ? { nonce: consentPrompt.nonce, granted, tier }
+      : { group: consentPrompt.group, granted }; // Legacy fallback.
     await fetch('/api/consent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ group: consentPrompt.group, granted }),
+      body: JSON.stringify(payload),
     });
     setConsentPrompt(null);
-    setStreaming(granted ? 'Permission granted, continuing...' : 'Permission denied.');
+    const msg = !granted ? 'Permission denied.' : tier === 'always' ? 'Always allowed, continuing...' : 'Permission granted, continuing...';
+    setStreaming(msg);
   };
 
   // ==================== RENDER ====================
@@ -499,8 +503,9 @@ export function Chat() {
                     )}
                   </div>
                   <div style="display:flex;gap:8px;justify-content:flex-end">
-                    <button class="btn-secondary" onClick={() => respondConsent(false)}>Deny</button>
-                    <button class="btn-primary" onClick={() => respondConsent(true)}>Allow</button>
+                    <button class="btn-secondary" onClick={() => respondConsent(false, 'deny')}>Deny</button>
+                    <button class="btn-primary" onClick={() => respondConsent(true, 'once')}>Allow once</button>
+                    <button class="btn-primary" style="background:var(--success)" onClick={() => respondConsent(true, 'always')}>Always allow</button>
                   </div>
                 </div>
               </div>
