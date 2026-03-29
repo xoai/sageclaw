@@ -31,6 +31,7 @@ import (
 	"github.com/xoai/sageclaw/pkg/channel/zalobot"
 	"github.com/xoai/sageclaw/pkg/config"
 	"github.com/xoai/sageclaw/pkg/mcp"
+	mcpregistry "github.com/xoai/sageclaw/pkg/mcp/registry"
 	"github.com/xoai/sageclaw/pkg/memory"
 	"github.com/xoai/sageclaw/pkg/memory/fts5"
 	"github.com/xoai/sageclaw/pkg/middleware"
@@ -83,6 +84,11 @@ func main() {
 		case "skill":
 			if err := runSkillCommand(os.Args[2:]); err != nil {
 				log.Fatalf("skill: %v", err)
+			}
+			return
+		case "mcp":
+			if err := runMCPCommand(os.Args[2:]); err != nil {
+				log.Fatalf("mcp: %v", err)
 			}
 			return
 		case "tunnel":
@@ -505,6 +511,9 @@ func run() error {
 	// --- Agent configs (file-first, with DB/YAML fallback) ---
 	agentsDir := filepath.Join(f.workspace, "agents")
 	agentConfigs := map[string]agent.Config{}
+
+	// Migrate deprecated tools.yaml fields once at startup.
+	agentcfg.MigrateToolsConfig(agentsDir)
 
 	// Try file-based agent configs first.
 	fileAgents, err := agentcfg.LoadAll(agentsDir)
@@ -1071,6 +1080,30 @@ Key behaviors:
 		defer mcpMgr.Stop()
 	}
 
+	// --- MCP Marketplace Registry ---
+	mcpRegistry, err := mcpregistry.NewRegistry(appStore, appStore, encKey, mcpMgr)
+	if err != nil {
+		log.Printf("mcp-registry: failed to initialize: %v", err)
+	} else {
+		mcpRegistry.SetDataDir(filepath.Dir(f.dbPath))
+		if indexURL := os.Getenv("SAGECLAW_MCP_INDEX_URL"); indexURL != "" {
+			mcpRegistry.SetIndexURL(indexURL)
+		}
+		mcpRegistry.LoadLocalOverride()
+		if err := mcpRegistry.SeedFromCurated(startCtx); err != nil {
+			log.Printf("mcp-registry: seed failed: %v", err)
+		}
+		mcpRegistry.StartInstalled(startCtx)
+
+		// Populate AllowedMCPServers for each agent based on registry assignments.
+		for id, cfg := range agentConfigs {
+			if allowed, err := mcpRegistry.GetInstalledForAgent(startCtx, id); err == nil && len(allowed) > 0 {
+				cfg.AllowedMCPServers = allowed
+				agentConfigs[id] = cfg
+			}
+		}
+	}
+
 	rpcServer := rpc.NewServer(appStore, memEngine, msgBus, rpc.Config{ListenAddr: rpcAddr},
 		rpc.WithGraphEngine(graphOps),
 		rpc.WithToolRegistry(toolReg),
@@ -1083,6 +1116,7 @@ Key behaviors:
 		rpc.WithRouter(router),
 		rpc.WithChannelManager(chanMgr),
 		rpc.WithMCPManager(mcpMgr),
+		rpc.WithMCPRegistry(mcpRegistry),
 		rpc.WithSkillStore(skillStore),
 		rpc.WithConsentHandler(p.InjectConsent),
 		rpc.WithConsentStore(consentStore),
@@ -1372,6 +1406,9 @@ Key behaviors:
 
 	log.Println("Shutting down...")
 	cronRunner.Stop()
+	if mcpRegistry != nil {
+		mcpRegistry.Close()
+	}
 	cancel()
 	log.Println("Goodbye.")
 	return nil

@@ -63,18 +63,23 @@ func (m *Manager) AddServer(name string, cfg MCPServerConfig) error {
 }
 
 // RemoveServer disconnects and removes an MCP server.
+// Returns nil if the server doesn't exist (safe for defensive calls).
 func (m *Manager) RemoveServer(name string) error {
 	m.mu.Lock()
 	client, ok := m.clients[name]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("mcp server %q not found", name)
+		return nil // safe no-op for defensive callers (e.g., registry)
 	}
 	delete(m.clients, name)
 	delete(m.configs, name)
 	m.mu.Unlock()
 
 	client.Stop()
+	// Deregister tools from the shared tool registry.
+	if m.toolReg != nil {
+		m.toolReg.UnregisterBySource("mcp:" + name)
+	}
 	log.Printf("mcp-manager: %s removed", name)
 	return nil
 }

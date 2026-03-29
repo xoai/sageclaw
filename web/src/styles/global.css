@@ -527,6 +527,54 @@ button { font-family: var(--sans); }
 .settings-embed > div > h1,
 .settings-embed > div > div:first-child > h1 { display: none; }
 
+/* Marketplace layout */
+.marketplace-layout { display: flex; gap: 0; min-height: calc(100vh - 160px); }
+.marketplace-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding: 8px 0;
+  overflow-y: auto;
+}
+.marketplace-sidebar-section {
+  padding: 12px 16px 4px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.marketplace-sidebar-item {
+  padding: 6px 16px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-muted);
+  transition: background 0.15s, color 0.15s;
+  border-radius: 0;
+}
+.marketplace-sidebar-item:hover { color: var(--text); background: var(--surface-hover); }
+.marketplace-sidebar-item.active { color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); font-weight: 500; }
+.marketplace-sidebar-count { font-size: 11px; opacity: 0.6; }
+.marketplace-content { flex: 1; padding: 0 16px; min-width: 0; }
+.marketplace-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.mcp-card { padding: 16px; }
+.mcp-card:hover { border-color: var(--primary); }
+
+@media (max-width: 768px) {
+  .marketplace-layout { flex-direction: column; }
+  .marketplace-sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); padding: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .marketplace-sidebar-section { padding: 4px 8px; }
+  .marketplace-sidebar-item { padding: 4px 8px; font-size: 12px; border-radius: 4px; }
+  .marketplace-content { padding: 16px 0; }
+}
+
 /* Clickable rows */
 .clickable { cursor: pointer; }
 
@@ -640,6 +688,7 @@ button { font-family: var(--sans); }
 /* Streaming cursor blink */
 .cursor-blink { animation: blink 0.8s infinite; color: var(--primary); }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 /* Thinking dots animation */
 .thinking-dots::after { content: ''; animation: dots 1.5s infinite; }

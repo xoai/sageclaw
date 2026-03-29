@@ -83,6 +83,7 @@ func (t *HTTPTransport) Call(ctx context.Context, method string, params any) (*J
 		return nil, fmt.Errorf("http %s: create request: %w", t.name, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
 	for k, v := range t.headers {
 		httpReq.Header.Set(k, v)
 	}
@@ -136,6 +137,7 @@ func (t *HTTPTransport) callIgnoreResponse(ctx context.Context, method string, p
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
 	for k, v := range t.headers {
 		httpReq.Header.Set(k, v)
 	}

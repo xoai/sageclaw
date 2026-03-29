@@ -79,6 +79,22 @@ type TeamStore interface {
 	MarkMessageRead(ctx context.Context, messageID string) error
 }
 
+// MCPRegistryStore manages the MCP marketplace registry.
+type MCPRegistryStore interface {
+	UpsertMCPEntry(ctx context.Context, entry MCPRegistryEntry) error
+	GetMCPEntry(ctx context.Context, id string) (*MCPRegistryEntry, error)
+	DeleteMCPEntry(ctx context.Context, id string) error
+	DeleteMCPCredential(ctx context.Context, name string) error
+	ListMCPEntries(ctx context.Context, filter MCPFilter) ([]MCPRegistryEntry, error)
+	SearchMCPEntries(ctx context.Context, query string, limit int) ([]MCPRegistryEntry, error)
+	SetMCPStatus(ctx context.Context, id, status, statusError string) error
+	SetMCPAgents(ctx context.Context, id string, agentIDs []string) error
+	CountMCPByCategory(ctx context.Context) (map[string]int, error)
+	CountMCPInstalled(ctx context.Context) (int, error)
+	GetMCPSeedVersion(ctx context.Context) (int, error)
+	SetMCPSeedVersion(ctx context.Context, version int) error
+}
+
 // Store composes all store interfaces.
 type Store interface {
 	SessionStore
@@ -88,6 +104,7 @@ type Store interface {
 	DelegationStore
 	TeamStore
 	ConnectionStore
+	MCPRegistryStore
 	DB() *sql.DB
 	Close() error
 }

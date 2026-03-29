@@ -141,3 +141,37 @@ type ConnectionFilter struct {
 
 // Message re-export for convenience.
 type Message = canonical.Message
+
+// MCPRegistryEntry represents an MCP server in the marketplace registry.
+type MCPRegistryEntry struct {
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Description  string     `json:"description,omitempty"`
+	Category     string     `json:"category,omitempty"`
+	Connection   string     `json:"connection"`            // JSON string
+	FallbackConn string     `json:"fallback_connection,omitempty"` // JSON string
+	ConfigSchema string     `json:"config_schema,omitempty"`       // JSON string
+	GitHubURL    string     `json:"github_url,omitempty"`
+	Stars        int        `json:"stars,omitempty"`
+	Tags         []string   `json:"tags,omitempty"`
+	Source       string     `json:"source"`    // "curated" | "custom"
+	Installed    bool       `json:"installed"`
+	Enabled      bool       `json:"enabled"`
+	Status       string     `json:"status"`        // available | installing | connected | disabled | failed
+	StatusError  string     `json:"status_error,omitempty"`
+	AgentIDs     []string   `json:"agent_ids,omitempty"`
+	InstalledAt  *time.Time `json:"installed_at,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// MCPFilter for listing MCP registry entries.
+type MCPFilter struct {
+	Category  string
+	Installed *bool
+	Enabled   *bool
+	Status    []string // Filter by status values (e.g., ["connected", "disabled"])
+	Source    string
+	Query     string
+	Limit     int
+	Offset    int
+}

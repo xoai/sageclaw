@@ -5,7 +5,7 @@ import { route } from 'preact-router';
 import { Layout } from './components/Layout';
 import { Chat } from './views/Chat';
 import { Agents } from './views/Agents';
-import { Skills } from './views/Skills';
+import { Marketplace } from './views/Marketplace';
 import Knowledge from './views/Knowledge';
 import Dashboard from './views/Dashboard';
 import { Settings } from './views/Settings';
@@ -69,7 +69,7 @@ export function App() {
         <AgentCreator path="/agents/create" />
         <AgentCreator path="/agents/:id/edit" />
         <AgentEditor path="/agents/:id" />
-        <Skills path="/skills" />
+        <Marketplace path="/marketplace" />
         <Knowledge path="/knowledge" />
         <Settings path="/settings" />
         <Onboarding path="/onboarding" />
@@ -82,8 +82,9 @@ export function App() {
         {/* M2: Page merges */}
         <Redir path="/memory" to="/knowledge" />
         <Redir path="/graph" to="/knowledge?tab=graph" />
-        <Redir path="/tools" to="/skills?tab=tools" />
-        <Redir path="/mcp" to="/skills?tab=plugins" />
+        <Redir path="/skills" to="/marketplace" />
+        <Redir path="/tools" to="/settings?tab=tools" />
+        <Redir path="/mcp" to="/marketplace?section=mcp" />
         <Redir path="/teams" to="/agents?tab=teams" />
         <Redir path="/delegation" to="/agents?tab=teams" />
 

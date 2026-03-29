@@ -205,9 +205,9 @@ func TestManagerListServers_Empty(t *testing.T) {
 func TestManagerAddRemove(t *testing.T) {
 	mgr := NewManager(nil)
 
-	// Remove non-existent server.
+	// Remove non-existent server — should be safe no-op (nil, not error).
 	err := mgr.RemoveServer("nonexistent")
-	if err == nil {
-		t.Error("expected error removing nonexistent server")
+	if err != nil {
+		t.Errorf("RemoveServer on nonexistent should return nil, got %v", err)
 	}
 }

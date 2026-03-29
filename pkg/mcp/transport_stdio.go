@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -14,6 +15,31 @@ import (
 
 	"github.com/xoai/sageclaw/pkg/security"
 )
+
+// stderrBuffer captures child process stderr (capped at 4KB).
+type stderrBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (b *stderrBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.buf) < 4096 {
+		remaining := 4096 - len(b.buf)
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		b.buf = append(b.buf, p...)
+	}
+	return len(p), nil
+}
+
+func (b *stderrBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.TrimSpace(string(b.buf))
+}
 
 // StdioTransport implements Transport over stdin/stdout of a child process.
 type StdioTransport struct {
@@ -23,9 +49,14 @@ type StdioTransport struct {
 	name    string
 
 	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	reader *bufio.Scanner
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	reader   *bufio.Scanner
+	stderrBuf *stderrBuffer
+
+	// StderrWriter receives a copy of stderr in real-time (optional).
+	// Set before calling Connect. Used for streaming install progress.
+	StderrWriter io.Writer
 
 	mu      sync.Mutex
 	nextID  atomic.Int64
@@ -69,11 +100,22 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 
 	t.cmd = exec.CommandContext(ctx, t.command, t.args...)
 
-	// Inject environment variables.
+	// Inject environment variables — MERGE with parent env, don't replace.
+	// Go's exec.Cmd.Env=nil inherits parent env. If we set any entries,
+	// it replaces the entire env. So we must copy os.Environ() first.
 	if len(t.env) > 0 {
+		t.cmd.Env = os.Environ()
 		for k, v := range t.env {
 			t.cmd.Env = append(t.cmd.Env, k+"="+v)
 		}
+	}
+
+	// Capture stderr so npx/node errors are visible in logs.
+	t.stderrBuf = &stderrBuffer{}
+	if t.StderrWriter != nil {
+		t.cmd.Stderr = io.MultiWriter(t.stderrBuf, t.StderrWriter)
+	} else {
+		t.cmd.Stderr = t.stderrBuf
 	}
 
 	var err error
@@ -88,6 +130,10 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 	}
 
 	if err := t.cmd.Start(); err != nil {
+		stderr := t.stderrBuf.String()
+		if stderr != "" {
+			return fmt.Errorf("stdio %s: start: %w\nstderr: %s", t.name, err, stderr)
+		}
 		return fmt.Errorf("stdio %s: start: %w", t.name, err)
 	}
 
@@ -103,6 +149,10 @@ func (t *StdioTransport) Connect(ctx context.Context) error {
 		"capabilities":    map[string]any{},
 	})
 	if err != nil {
+		stderr := t.stderrBuf.String()
+		if stderr != "" {
+			return fmt.Errorf("stdio %s: initialize: %w\nstderr: %s", t.name, err, stderr)
+		}
 		return fmt.Errorf("stdio %s: initialize: %w", t.name, err)
 	}
 

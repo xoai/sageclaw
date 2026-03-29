@@ -4,11 +4,13 @@ import { Providers } from './Providers';
 import { Channels } from './Channels';
 import Cron from './Cron';
 import Tunnel from './Tunnel';
+import Tools from './Tools';
 
 const TABS = [
   { id: 'general', label: 'General' },
   { id: 'ai-models', label: 'AI Models' },
   { id: 'channels', label: 'Channels' },
+  { id: 'tools', label: 'Tools' },
   { id: 'scheduled-tasks', label: 'Scheduled Tasks' },
   { id: 'external-access', label: 'External Access' },
   { id: 'budget-alerts', label: 'Budget & Alerts' },
@@ -60,6 +62,7 @@ export function Settings() {
           {tab === 'general' && <GeneralTab />}
           {tab === 'ai-models' && <div class="settings-embed"><Providers /></div>}
           {tab === 'channels' && <div class="settings-embed"><Channels /></div>}
+          {tab === 'tools' && <div class="settings-embed"><Tools /></div>}
           {tab === 'scheduled-tasks' && <div class="settings-embed"><Cron /></div>}
           {tab === 'external-access' && <div class="settings-embed"><Tunnel /></div>}
           {tab === 'budget-alerts' && <BudgetAlertsTab />}

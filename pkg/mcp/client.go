@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"time"
 
@@ -190,4 +191,12 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments json.RawMe
 // Tools returns the list of tools from the external server.
 func (c *Client) Tools() []ToolDef {
 	return c.tools
+}
+
+// SetStderrWriter sets a writer to receive real-time stderr output from
+// stdio transports. Must be called before Start. No-op for non-stdio.
+func (c *Client) SetStderrWriter(w io.Writer) {
+	if st, ok := c.transport.(*StdioTransport); ok {
+		st.StderrWriter = w
+	}
 }

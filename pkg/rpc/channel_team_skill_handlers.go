@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 )
@@ -311,38 +312,52 @@ func (s *Server) handleSkillsList(w http.ResponseWriter, r *http.Request) {
 		skillsDir = "skills"
 	}
 
-	entries, err := os.ReadDir(skillsDir)
-	if err != nil {
-		writeJSON(w, []any{})
-		return
+	seen := map[string]bool{}
+	var skills []map[string]any
+
+	// Scan skill directories — primary (CWD/skills) and executable-relative.
+	dirs := []string{skillsDir}
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		exeSkills := filepath.Join(exeDir, "skills")
+		if exeSkills != skillsDir {
+			dirs = append(dirs, exeSkills)
+		}
 	}
 
-	var skills []map[string]any
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
 			continue
 		}
-		skillMd := skillsDir + "/" + entry.Name() + "/SKILL.md"
-		if _, err := os.Stat(skillMd); err != nil {
-			continue
-		}
+		for _, entry := range entries {
+			if !entry.IsDir() || seen[entry.Name()] {
+				continue
+			}
+			skillMd := filepath.Join(dir, entry.Name(), "SKILL.md")
+			if _, err := os.Stat(skillMd); err != nil {
+				continue
+			}
 
-		toolCount := 0
-		toolsDir := skillsDir + "/" + entry.Name() + "/tools"
-		if toolEntries, err := os.ReadDir(toolsDir); err == nil {
-			for _, te := range toolEntries {
-				if len(te.Name()) > 5 && te.Name()[len(te.Name())-5:] == ".yaml" {
-					toolCount++
+			toolCount := 0
+			toolsDir := filepath.Join(dir, entry.Name(), "tools")
+			if toolEntries, err := os.ReadDir(toolsDir); err == nil {
+				for _, te := range toolEntries {
+					if len(te.Name()) > 5 && te.Name()[len(te.Name())-5:] == ".yaml" {
+						toolCount++
+					}
 				}
 			}
-		}
 
-		skills = append(skills, map[string]any{
-			"name":        entry.Name(),
-			"tools":       toolCount,
-			"has_skillmd": true,
-		})
+			skills = append(skills, map[string]any{
+				"name":        entry.Name(),
+				"tools":       toolCount,
+				"has_skillmd": true,
+			})
+			seen[entry.Name()] = true
+		}
 	}
+
 	if skills == nil {
 		skills = []map[string]any{}
 	}

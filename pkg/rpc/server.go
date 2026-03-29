@@ -22,6 +22,7 @@ import (
 	"github.com/xoai/sageclaw/pkg/memory"
 	"github.com/xoai/sageclaw/pkg/provider"
 	"github.com/xoai/sageclaw/pkg/security"
+	mcpregistry "github.com/xoai/sageclaw/pkg/mcp/registry"
 	"github.com/xoai/sageclaw/pkg/skillstore"
 	"github.com/xoai/sageclaw/pkg/store"
 	"github.com/xoai/sageclaw/pkg/tool"
@@ -64,6 +65,7 @@ type Server struct {
 	consentStore         consentGrantStore                                  // For grant list/revoke endpoints.
 	pendingConsent []map[string]any                // Queued consent prompts awaiting response.
 	skillStore     *skillstore.Store
+	mcpRegistry    *mcpregistry.Registry
 	agentsDir      string
 	encKey         []byte // Credential encryption key.
 	startTime      time.Time
@@ -174,6 +176,11 @@ func WithConsentHandler(fn func(nonce string, granted bool, tier string) error) 
 // WithSkillStore adds skill marketplace management to the server.
 func WithSkillStore(ss *skillstore.Store) ServerOption {
 	return func(s *Server) { s.skillStore = ss }
+}
+
+// WithMCPRegistry adds MCP marketplace registry to the server.
+func WithMCPRegistry(reg *mcpregistry.Registry) ServerOption {
+	return func(s *Server) { s.mcpRegistry = reg }
 }
 
 // WithAudioBasePath sets the base path for serving audio files.
@@ -367,6 +374,20 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("POST /api/mcp/servers", srv.authGuard(srv.handleMCPServersAdd))
 	mux.HandleFunc("DELETE /api/mcp/servers/", srv.authGuard(srv.handleMCPServersRemove))
 
+	// MCP marketplace (authenticated).
+	mux.HandleFunc("GET /api/mcp/marketplace/categories", srv.authGuard(srv.handleMCPMarketCategories))
+	mux.HandleFunc("GET /api/mcp/marketplace/list", srv.authGuard(srv.handleMCPMarketList))
+	mux.HandleFunc("GET /api/mcp/marketplace/detail/", srv.authGuard(srv.handleMCPMarketDetail))
+	mux.HandleFunc("POST /api/mcp/marketplace/install", srv.authGuard(srv.handleMCPMarketInstall))
+	mux.HandleFunc("POST /api/mcp/marketplace/retry", srv.authGuard(srv.handleMCPMarketRetry))
+	mux.HandleFunc("POST /api/mcp/marketplace/enable", srv.authGuard(srv.handleMCPMarketEnable))
+	mux.HandleFunc("POST /api/mcp/marketplace/disable", srv.authGuard(srv.handleMCPMarketDisable))
+	mux.HandleFunc("POST /api/mcp/marketplace/remove", srv.authGuard(srv.handleMCPMarketRemove))
+	mux.HandleFunc("POST /api/mcp/marketplace/test", srv.authGuard(srv.handleMCPMarketTest))
+	mux.HandleFunc("GET /api/mcp/marketplace/search", srv.authGuard(srv.handleMCPMarketSearch))
+	mux.HandleFunc("POST /api/mcp/marketplace/assign", srv.authGuard(srv.handleMCPMarketAssign))
+	mux.HandleFunc("POST /api/mcp/marketplace/update", srv.authGuard(srv.handleMCPMarketUpdate))
+
 	// Consent (authenticated).
 	mux.HandleFunc("POST /api/consent", srv.authGuard(srv.handleConsentResponse))
 	mux.HandleFunc("GET /api/consent/pending", srv.authGuard(srv.handleConsentPending))
@@ -380,6 +401,8 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 
 	// Skill management (authenticated).
 	mux.HandleFunc("POST /api/skills/install", srv.authGuard(srv.handleSkillInstall))
+	mux.HandleFunc("POST /api/skills/upload", srv.authGuard(srv.handleSkillUpload))
+	mux.HandleFunc("POST /api/skills/upload/approve", srv.authGuard(srv.handleSkillUploadApprove))
 	mux.HandleFunc("POST /api/skills/reload", srv.authGuard(srv.handleSkillReload))
 	mux.HandleFunc("DELETE /api/skills/", srv.authGuard(srv.handleSkillDelete))
 

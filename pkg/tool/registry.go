@@ -116,11 +116,13 @@ func (r *Registry) List() []canonical.ToolDef {
 	return defs
 }
 
-// ListForAgent returns tool definitions filtered by deny list only.
+// ListForAgent returns tool definitions filtered by deny list and MCP server allowlist.
 // All registered tools are visible to the LLM regardless of profile.
 // Profile controls consent (in checkConsent), not visibility.
 // Deny list controls visibility (hard block — tool not shown to LLM).
-func (r *Registry) ListForAgent(profile string, deny []string) []canonical.ToolDef {
+// allowedMCPServers filters MCP tools: if non-nil, only MCP tools from listed servers
+// are included. nil means no MCP filtering (all MCP tools pass through).
+func (r *Registry) ListForAgent(profile string, deny []string, allowedMCPServers []string) []canonical.ToolDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -144,6 +146,22 @@ func (r *Registry) ListForAgent(profile string, deny []string) []canonical.ToolD
 		}
 	}
 
+	// Step 3: Filter MCP tools by allowed server list.
+	if allowedMCPServers != nil {
+		allowed := make(map[string]bool, len(allowedMCPServers))
+		for _, s := range allowedMCPServers {
+			allowed[s] = true
+		}
+		for name, t := range candidates {
+			if strings.HasPrefix(t.source, "mcp:") {
+				server := strings.TrimPrefix(t.source, "mcp:")
+				if !allowed[server] {
+					delete(candidates, name)
+				}
+			}
+		}
+	}
+
 	defs := make([]canonical.ToolDef, 0, len(candidates))
 	for _, t := range candidates {
 		defs = append(defs, t.def)
@@ -156,6 +174,19 @@ func (r *Registry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.tools, name)
+}
+
+// UnregisterBySource removes all tools matching the given source prefix.
+// For example, UnregisterBySource("mcp:brave-search") removes all tools
+// registered by the brave-search MCP server.
+func (r *Registry) UnregisterBySource(source string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, t := range r.tools {
+		if t.source == source {
+			delete(r.tools, name)
+		}
+	}
 }
 
 // Names returns all registered tool names.

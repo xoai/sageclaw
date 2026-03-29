@@ -55,29 +55,6 @@ func LoadAgent(dir string) (*AgentConfig, error) {
 		if err := yaml.Unmarshal(data, &cfg.Tools); err != nil {
 			log.Printf("agentcfg: %s/tools.yaml parse error: %v (using defaults)", id, err)
 		}
-		// Warn about deprecated fields so users know to update their configs.
-		if len(cfg.Tools.DeprecatedEnabled) > 0 {
-			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'enabled' field — tool access is now profile-based (profile: full/coding/messaging/readonly/minimal). Remove 'enabled' from your config.", id)
-		}
-		if len(cfg.Tools.DeprecatedAlsoAllow) > 0 {
-			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'also_allow' field — use 'profile' and 'deny' instead. Remove 'also_allow' from your config.", id)
-		}
-		if cfg.Tools.DeprecatedNonInteractive != nil {
-			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'non_interactive' field — use 'headless: true' with 'pre_authorize' instead. Remove 'non_interactive' from your config.", id)
-			// Auto-migrate: set headless if non_interactive was true.
-			if *cfg.Tools.DeprecatedNonInteractive && !cfg.Tools.Headless {
-				cfg.Tools.Headless = true
-				log.Printf("agentcfg: auto-migrated %s: non_interactive → headless: true", id)
-			}
-		}
-		if len(cfg.Tools.DeprecatedPreAuthGroups) > 0 {
-			log.Printf("agentcfg: WARNING: %s/tools.yaml uses deprecated 'pre_authorized_groups' field — use 'pre_authorize' instead.", id)
-			// Auto-migrate: merge into PreAuthorize if empty.
-			if len(cfg.Tools.PreAuthorize) == 0 {
-				cfg.Tools.PreAuthorize = cfg.Tools.DeprecatedPreAuthGroups
-				log.Printf("agentcfg: auto-migrated %s: pre_authorized_groups → pre_authorize: %v", id, cfg.Tools.PreAuthorize)
-			}
-		}
 	}
 
 	// memory.yaml — optional.
@@ -152,6 +129,55 @@ func LoadAll(baseDir string) (map[string]*AgentConfig, error) {
 	}
 
 	return agents, nil
+}
+
+// MigrateToolsConfig migrates deprecated tools.yaml fields for all agents.
+// Call once at startup, not on every load. Rewrites files in-place.
+func MigrateToolsConfig(baseDir string) {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(baseDir, entry.Name())
+		toolsPath := filepath.Join(dir, "tools.yaml")
+		data, err := os.ReadFile(toolsPath)
+		if err != nil {
+			continue
+		}
+		var tools ToolsConfig
+		if err := yaml.Unmarshal(data, &tools); err != nil {
+			continue
+		}
+
+		needsMigration := len(tools.DeprecatedEnabled) > 0 ||
+			len(tools.DeprecatedAlsoAllow) > 0 ||
+			tools.DeprecatedNonInteractive != nil ||
+			len(tools.DeprecatedPreAuthGroups) > 0
+		if !needsMigration {
+			continue
+		}
+
+		if tools.DeprecatedNonInteractive != nil && *tools.DeprecatedNonInteractive && !tools.Headless {
+			tools.Headless = true
+		}
+		if len(tools.DeprecatedPreAuthGroups) > 0 && len(tools.PreAuthorize) == 0 {
+			tools.PreAuthorize = tools.DeprecatedPreAuthGroups
+		}
+		tools.DeprecatedEnabled = nil
+		tools.DeprecatedAlsoAllow = nil
+		tools.DeprecatedNonInteractive = nil
+		tools.DeprecatedPreAuthGroups = nil
+
+		if out, err := yaml.Marshal(&tools); err == nil {
+			if err := os.WriteFile(toolsPath, out, 0644); err == nil {
+				log.Printf("agentcfg: migrated %s/tools.yaml — removed deprecated fields", entry.Name())
+			}
+		}
+	}
 }
 
 // SaveAgent writes an AgentConfig to a directory, creating files as needed.

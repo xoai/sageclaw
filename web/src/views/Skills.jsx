@@ -33,7 +33,7 @@ export function Skills() {
   );
 }
 
-function SkillsContent() {
+export function SkillsContent() {
   const [tab, setTab] = useState('installed'); // 'installed' | 'browse'
   const [installed, setInstalled] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
@@ -59,6 +59,9 @@ function SkillsContent() {
   const [updates, setUpdates] = useState({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
 
+  // Built-in skills (on disk but not from marketplace).
+  const [builtinSkills, setBuiltinSkills] = useState([]);
+
   const searchTimer = useRef(null);
 
   const showMsg = (text, type = 'info') => {
@@ -67,13 +70,30 @@ function SkillsContent() {
     setTimeout(() => setMsg(''), 4000);
   };
 
-  // Load installed skills.
+  // Load installed skills (marketplace).
   const loadInstalled = async () => {
     try {
       const res = await fetch('/api/skills/marketplace/installed', { credentials: 'include' });
       const data = await res.json();
       setInstalled(Array.isArray(data) ? data : []);
     } catch { setInstalled([]); }
+  };
+
+  // Load all on-disk skills, then filter to find built-ins (not in marketplace lock file).
+  const loadBuiltinSkills = async () => {
+    try {
+      const [allRes, installedRes] = await Promise.all([
+        fetch('/api/skills', { credentials: 'include' }),
+        fetch('/api/skills/marketplace/installed', { credentials: 'include' }),
+      ]);
+      const allSkills = await allRes.json();
+      const marketplaceSkills = await installedRes.json();
+      const marketplaceNames = new Set((Array.isArray(marketplaceSkills) ? marketplaceSkills : []).map(s => s.name));
+      const builtins = (Array.isArray(allSkills) ? allSkills : [])
+        .filter(s => !marketplaceNames.has(s.name))
+        .map(s => ({ ...s, builtin: true }));
+      setBuiltinSkills(builtins);
+    } catch { setBuiltinSkills([]); }
   };
 
   // Load agents.
@@ -85,7 +105,7 @@ function SkillsContent() {
     } catch {}
   };
 
-  useEffect(() => { loadInstalled(); loadAgents(); }, []);
+  useEffect(() => { loadInstalled(); loadBuiltinSkills(); loadAgents(); }, []);
 
   // Search with debounce.
   const doSearch = async (q) => {
@@ -225,6 +245,66 @@ function SkillsContent() {
   // false positives when different repos have skills with the same name.
   const isInstalled = (source, name) => installed.some(s => s.name === name && s.source === source);
 
+  // --- UPLOAD ---
+
+  const fileInputRef = useRef(null);
+  const [uploadReview, setUploadReview] = useState(null); // pending upload review data
+  const [uploading, setUploading] = useState(false);
+
+  const doUpload = async (file) => {
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('/api/skills/upload', {
+        method: 'POST',
+        credentials: 'include',
+        body: form,
+      });
+      const data = await res.json();
+      if (data.error) {
+        showMsg(data.error, 'error');
+      } else if (data.status === 'review') {
+        // Has scripts — show review modal.
+        setUploadReview(data);
+        setPreviewTab('scripts');
+      } else if (data.status === 'installed') {
+        showMsg(`Skill "${data.name}" installed!`, 'success');
+        loadInstalled();
+        loadBuiltinSkills();
+      }
+    } catch (e) {
+      showMsg(e.message || 'Upload failed', 'error');
+    }
+    setUploading(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const approveUpload = async () => {
+    if (!uploadReview) return;
+    setInstalling(true);
+    try {
+      const agentIds = Object.entries(selectedAgents).filter(([, v]) => v).map(([k]) => k);
+      const res = await fetch('/api/skills/upload/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ upload_id: uploadReview.upload_id, agents: agentIds }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        showMsg(data.error, 'error');
+      } else {
+        showMsg(`Skill "${data.name}" installed!`, 'success');
+        loadInstalled();
+        loadBuiltinSkills();
+      }
+    } catch { showMsg('Approval failed', 'error'); }
+    setUploadReview(null);
+    setInstalling(false);
+    setSelectedAgents({});
+  };
+
   // --- RENDER ---
 
   return (
@@ -253,6 +333,11 @@ function SkillsContent() {
       {tab === 'installed' && (
         <div>
           <div style="display:flex;gap:8px;margin-bottom:16px">
+            <button class="btn-primary" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+              {uploading ? 'Uploading...' : 'Upload Skill'}
+            </button>
+            <input ref={fileInputRef} type="file" accept=".md,.zip" style="display:none"
+              onChange={e => e.target.files[0] && doUpload(e.target.files[0])} />
             <button class="btn-secondary" onClick={checkUpdates} disabled={checkingUpdates}>
               {checkingUpdates ? 'Checking...' : 'Check for Updates'}
             </button>
@@ -261,15 +346,42 @@ function SkillsContent() {
             </button>
           </div>
 
-          {installed.length === 0 ? (
+          {/* Built-in skills */}
+          {builtinSkills.length > 0 && (
+            <div style="margin-bottom:16px">
+              <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Built-in Skills</div>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                {builtinSkills.map(sk => (
+                  <div key={sk.name} class="card" style="padding:14px">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                      <div style="flex:1;min-width:0">
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <span style="font-weight:600;font-size:14px">{sk.name}</span>
+                          <span class="badge badge-gray" style="font-size:10px">built-in</span>
+                          {sk.tools > 0 && <span style="font-size:11px;color:var(--text-muted)">{sk.tools} tools</span>}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Marketplace-installed skills */}
+          {installed.length === 0 && builtinSkills.length === 0 ? (
             <div class="card" style="padding:32px;text-align:center">
               <p style="color:var(--text-muted);font-size:14px;margin-bottom:12px">
-                No marketplace skills installed yet.
+                No skills installed yet.
               </p>
               <button class="btn-primary" onClick={() => setTab('browse')}>Browse Marketplace</button>
             </div>
-          ) : (
-            <div style="display:flex;flex-direction:column;gap:8px">
+          ) : installed.length > 0 && (
+            <div>
+              {builtinSkills.length > 0 && (
+                <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">Marketplace Skills</div>
+              )}
+              <div style="display:flex;flex-direction:column;gap:8px">
               {installed.map(sk => (
                 <div key={sk.name} class="card" style="padding:14px">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -300,6 +412,7 @@ function SkillsContent() {
                   </div>
                 </div>
               ))}
+              </div>
             </div>
           )}
         </div>
@@ -488,6 +601,72 @@ function SkillsContent() {
       )}
 
       {/* ==================== ASSIGN MODAL ==================== */}
+      {/* ==================== UPLOAD REVIEW MODAL ==================== */}
+      {uploadReview && (
+        <div class="modal-overlay" onClick={() => setUploadReview(null)}>
+          <div class="modal-content" style="max-width:640px" onClick={e => e.stopPropagation()}>
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+              <div>
+                <h2 style="margin:0 0 4px 0">{uploadReview.name}</h2>
+                <p style="font-size:13px;color:var(--text-muted);margin:0">This skill contains executable scripts. Review before installing.</p>
+              </div>
+              <button class="btn-secondary" onClick={() => setUploadReview(null)} style="padding:4px 10px;font-size:18px;line-height:1">&times;</button>
+            </div>
+
+            {/* Warning banner */}
+            <div class="card" style="padding:10px 14px;margin-bottom:12px;border-color:var(--warning)">
+              <div style="font-size:12px;color:var(--warning);font-weight:600">This skill contains scripts that will execute on your system.</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Review the scripts below before approving.</div>
+            </div>
+
+            {/* Tabs */}
+            <TabBar
+              tabs={[
+                { id: 'scripts', label: `Scripts (${uploadReview.scripts?.length || 0})` },
+                { id: 'readme', label: 'README' },
+                { id: 'files', label: `Files (${uploadReview.files?.length || 0})` },
+                { id: 'agents', label: 'Agents' },
+              ]}
+              active={previewTab}
+              onChange={setPreviewTab}
+            />
+
+            <div style="margin-top:12px;max-height:300px;overflow-y:auto">
+              {previewTab === 'scripts' && uploadReview.scripts?.map(sc => (
+                <div key={sc.path} style="margin-bottom:12px">
+                  <div style="font-size:12px;font-weight:600;margin-bottom:4px;color:var(--warning)">{sc.path}</div>
+                  <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;overflow-x:auto;max-height:200px;margin:0">{sc.content}</pre>
+                </div>
+              ))}
+              {previewTab === 'readme' && (
+                <pre style="white-space:pre-wrap;font-size:12px;color:var(--text-muted)">{uploadReview.readme || 'No README'}</pre>
+              )}
+              {previewTab === 'files' && (
+                <div style="font-size:12px">{uploadReview.files?.map(f => <div key={f} style="padding:4px 0;color:var(--text-muted)">{f}</div>)}</div>
+              )}
+              {previewTab === 'agents' && (
+                <div>
+                  {agents.map(a => (
+                    <label key={a.id} style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer">
+                      <input type="checkbox" checked={selectedAgents[a.id] || false}
+                        onChange={() => setSelectedAgents(prev => ({ ...prev, [a.id]: !prev[a.id] }))} />
+                      <span style="font-size:13px">{a.name || a.id}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px;display:flex;gap:8px">
+              <button class="btn-primary" style="flex:1" onClick={approveUpload} disabled={installing}>
+                {installing ? 'Installing...' : 'Approve & Install'}
+              </button>
+              <button class="btn-secondary" onClick={() => setUploadReview(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {assignSkill && (
         <div class="modal-overlay" onClick={() => setAssignSkill(null)} role="dialog" aria-modal="true">
           <div class="modal-content" style="max-width:420px" onClick={e => e.stopPropagation()}>

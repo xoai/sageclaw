@@ -68,13 +68,13 @@ func TestListForAgent_FullProfile(t *testing.T) {
 	reg.RegisterWithGroup("memory_search", "Search", nil, GroupMemory, RiskSafe, "builtin", noop)
 
 	// Full profile = all tools.
-	tools := reg.ListForAgent(ProfileFull, nil)
+	tools := reg.ListForAgent(ProfileFull, nil, nil)
 	if len(tools) != 3 {
 		t.Errorf("full profile should return 3 tools, got %d", len(tools))
 	}
 
 	// Empty profile defaults to full.
-	tools = reg.ListForAgent("", nil)
+	tools = reg.ListForAgent("", nil, nil)
 	if len(tools) != 3 {
 		t.Errorf("empty profile should default to full, got %d", len(tools))
 	}
@@ -90,7 +90,7 @@ func TestListForAgent_AllProfilesShowAllTools(t *testing.T) {
 
 	// All profiles show all tools — profile controls consent, not visibility.
 	for _, profile := range []string{ProfileFull, ProfileCoding, ProfileMessaging, ProfileReadonly, ProfileMinimal} {
-		tools := reg.ListForAgent(profile, nil)
+		tools := reg.ListForAgent(profile, nil, nil)
 		if len(tools) != 3 {
 			t.Errorf("%s profile should return 3 tools (all visible), got %d", profile, len(tools))
 		}
@@ -105,7 +105,7 @@ func TestListForAgent_DenyGroup(t *testing.T) {
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 
 	// Deny runtime group.
-	tools := reg.ListForAgent(ProfileFull, []string{"group:runtime"})
+	tools := reg.ListForAgent(ProfileFull, []string{"group:runtime"}, nil)
 	if len(tools) != 1 {
 		t.Errorf("should have 1 tool after denying runtime, got %d", len(tools))
 	}
@@ -123,7 +123,7 @@ func TestListForAgent_DenyGroupAndTool(t *testing.T) {
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 
 	// Deny entire fs group.
-	tools := reg.ListForAgent(ProfileFull, []string{"group:fs"})
+	tools := reg.ListForAgent(ProfileFull, []string{"group:fs"}, nil)
 	if len(tools) != 1 {
 		t.Errorf("expected 1 tool (exec only), got %d", len(tools))
 	}
@@ -140,7 +140,7 @@ func TestListForAgent_DenySingleTool(t *testing.T) {
 	reg.RegisterWithGroup("write_file", "Write", nil, GroupFS, RiskModerate, "builtin", noop)
 
 	// Deny single tool by name.
-	tools := reg.ListForAgent(ProfileFull, []string{"write_file"})
+	tools := reg.ListForAgent(ProfileFull, []string{"write_file"}, nil)
 	if len(tools) != 1 {
 		t.Errorf("expected 1 tool, got %d", len(tools))
 	}
@@ -157,7 +157,7 @@ func TestListForAgent_MinimalProfileShowsAllTools(t *testing.T) {
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 
 	// Minimal profile shows all tools — consent handles access control.
-	tools := reg.ListForAgent(ProfileMinimal, nil)
+	tools := reg.ListForAgent(ProfileMinimal, nil, nil)
 	if len(tools) != 2 {
 		t.Errorf("minimal profile should show all tools (consent controls access), got %d", len(tools))
 	}
@@ -219,6 +219,77 @@ func TestIsInProfile(t *testing.T) {
 	}
 	if IsInProfile(ProfileMinimal, GroupMemory) {
 		t.Error("minimal profile should not allow memory")
+	}
+}
+
+func TestUnregisterBySource(t *testing.T) {
+	reg := NewRegistry()
+	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
+
+	reg.RegisterWithGroup("builtin_tool", "Builtin", nil, GroupFS, RiskModerate, "builtin", noop)
+	reg.RegisterWithGroup("brave_web_search", "Search", nil, GroupMCP, RiskSensitive, "mcp:brave-search", noop)
+	reg.RegisterWithGroup("brave_news_search", "News", nil, GroupMCP, RiskSensitive, "mcp:brave-search", noop)
+	reg.RegisterWithGroup("github_issues", "Issues", nil, GroupMCP, RiskSensitive, "mcp:github", noop)
+
+	reg.UnregisterBySource("mcp:brave-search")
+
+	tools := reg.List()
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools after unregister, got %d", len(tools))
+	}
+
+	// builtin_tool and github_issues should remain.
+	if _, _, ok := reg.Get("builtin_tool"); !ok {
+		t.Error("builtin_tool should still exist")
+	}
+	if _, _, ok := reg.Get("github_issues"); !ok {
+		t.Error("github_issues should still exist")
+	}
+	if _, _, ok := reg.Get("brave_web_search"); ok {
+		t.Error("brave_web_search should be removed")
+	}
+}
+
+func TestListForAgent_AllowedMCPServers(t *testing.T) {
+	reg := NewRegistry()
+	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
+
+	reg.RegisterWithGroup("read_file", "Read", nil, GroupFS, RiskModerate, "builtin", noop)
+	reg.RegisterWithGroup("brave_search", "Search", nil, GroupMCP, RiskSensitive, "mcp:brave-search", noop)
+	reg.RegisterWithGroup("github_issues", "Issues", nil, GroupMCP, RiskSensitive, "mcp:github", noop)
+
+	// nil = no filtering, all MCP tools pass.
+	tools := reg.ListForAgent(ProfileFull, nil, nil)
+	if len(tools) != 3 {
+		t.Errorf("nil allowedMCPServers should return all 3 tools, got %d", len(tools))
+	}
+
+	// Only allow brave-search MCP.
+	tools = reg.ListForAgent(ProfileFull, nil, []string{"brave-search"})
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools (builtin + brave), got %d", len(tools))
+	}
+	names := map[string]bool{}
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+	if !names["read_file"] {
+		t.Error("builtin read_file should be present")
+	}
+	if !names["brave_search"] {
+		t.Error("brave_search should be present")
+	}
+	if names["github_issues"] {
+		t.Error("github_issues should be filtered out")
+	}
+
+	// Empty slice = no MCP tools allowed.
+	tools = reg.ListForAgent(ProfileFull, nil, []string{})
+	if len(tools) != 1 {
+		t.Errorf("empty allowedMCPServers should return only builtin, got %d", len(tools))
+	}
+	if tools[0].Name != "read_file" {
+		t.Errorf("only read_file should remain, got %s", tools[0].Name)
 	}
 }
 

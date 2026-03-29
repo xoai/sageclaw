@@ -26,9 +26,10 @@ type Config struct {
 	MaxTokens     int
 	MaxIterations int
 	Timeout      time.Duration // Wall clock timeout. Default: 300s.
-	ToolProfile  string        // Tool profile: full, coding, messaging, readonly, minimal.
-	ToolDeny     []string      // Tools or groups to deny (e.g. "group:runtime").
-	Headless     bool          // If true, no consent prompts — in-profile only, pre-authorize for always-consent.
+	ToolProfile        string   // Tool profile: full, coding, messaging, readonly, minimal.
+	ToolDeny           []string // Tools or groups to deny (e.g. "group:runtime").
+	AllowedMCPServers  []string // If non-nil, only these MCP server IDs' tools are visible. nil = all.
+	Headless           bool     // If true, no consent prompts — in-profile only, pre-authorize for always-consent.
 	PreAuthorize []string      // Always-consent groups to auto-approve in headless mode (e.g. "runtime", "mcp:weather").
 
 	// Voice configuration.
@@ -331,6 +332,7 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 	tools := l.toolRegistry.ListForAgent(
 		l.config.ToolProfile,
 		l.config.ToolDeny,
+		l.config.AllowedMCPServers,
 	)
 
 	// Add MCP injection protection prompt when MCP tools are available.

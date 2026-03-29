@@ -86,7 +86,7 @@ export function Nav({ open, onNavigate }) {
       <div class="nav-items">
         {link('/chat', 'Chat', IconChat)}
         {link('/agents', 'Agents', IconBot)}
-        {link('/skills', 'Skills', IconSkills)}
+        {link('/marketplace', 'Marketplace', IconSkills)}
         {link('/knowledge', 'Knowledge', IconKnowledge)}
         {link('/', 'Dashboard', IconDashboard)}
       </div>
