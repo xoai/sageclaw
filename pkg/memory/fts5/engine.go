@@ -41,7 +41,9 @@ func (e *Engine) WriteWithConfidence(ctx context.Context, content, title string,
 	}
 	// Update confidence on the newly created memory.
 	if confidence > 0 && confidence <= 1.0 {
-		e.store.DB().ExecContext(ctx, `UPDATE memories SET confidence = ? WHERE id = ?`, confidence, id)
+		if _, err := e.store.DB().ExecContext(ctx, `UPDATE memories SET confidence = ? WHERE id = ?`, confidence, id); err != nil {
+			return id, fmt.Errorf("setting confidence: %w", err)
+		}
 	}
 	return id, nil
 }
@@ -98,19 +100,24 @@ func (e *Engine) Search(ctx context.Context, query string, opts memory.SearchOpt
 	}
 
 	// Apply tag boost, confidence weighting, and recency decay.
-	entries := make([]memory.Entry, len(mems))
+	// Filter by MinConfidence if set.
+	var entries []memory.Entry
 	for i, m := range mems {
-		score := -scores[i] // BM25 returns negative scores; negate for ranking.
-		score = applyTagBoost(score, m.Tags, opts.Tags)
-		score = applyRecencyDecay(score, m.UpdatedAt)
-		// Weight by confidence: higher confidence memories rank higher.
 		confidence := m.Confidence
 		if confidence <= 0 {
 			confidence = 0.8 // Default for pre-migration memories.
 		}
+		if opts.MinConfidence > 0 && confidence < opts.MinConfidence {
+			continue // Below confidence threshold.
+		}
+		score := -scores[i] // BM25 returns negative scores; negate for ranking.
+		score = applyTagBoost(score, m.Tags, opts.Tags)
+		score = applyRecencyDecay(score, m.UpdatedAt)
+		// Weight by confidence: higher confidence memories rank higher.
 		score *= confidence
-		entries[i] = toEntry(m)
-		entries[i].Score = score
+		entry := toEntry(m)
+		entry.Score = score
+		entries = append(entries, entry)
 	}
 
 	// Sort by score descending.

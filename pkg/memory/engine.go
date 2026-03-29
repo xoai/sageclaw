@@ -18,9 +18,10 @@ type Entry struct {
 
 // SearchOptions controls memory search behavior.
 type SearchOptions struct {
-	Tags       []string // Soft boost — results with these tags rank higher
-	FilterTags []string // Hard AND filter — only return memories matching ALL
-	Limit      int      // Max results (default 10)
+	Tags          []string // Soft boost — results with these tags rank higher
+	FilterTags    []string // Hard AND filter — only return memories matching ALL
+	Limit         int      // Max results (default 10)
+	MinConfidence float64  // Minimum confidence threshold (0 = no filter, default)
 }
 
 // MemoryEngine is the knowledge boundary interface (ADR-002 exception).

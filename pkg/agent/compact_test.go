@@ -121,6 +121,68 @@ func TestCompactionManager_NonBlocking(t *testing.T) {
 	lock.Unlock()
 }
 
+func TestCompactionManager_TryCompactWithBudget_SkipsBelowThreshold(t *testing.T) {
+	mem := &mockMemEngine{}
+	llm := mockLLM(`[]`)
+	cm := NewCompactionManager(mem, llm)
+
+	budget := NewContextBudget("claude-sonnet-4-20250514", 8192)
+
+	// Small history — should not compact.
+	msgs := []canonical.Message{
+		{Role: "user", Content: []canonical.Content{{Type: "text", Text: "hi"}}},
+		{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: "hello"}}},
+	}
+
+	result := cm.TryCompactWithBudget(context.Background(), "test-session-1234", msgs, budget)
+	if result != nil {
+		t.Error("should skip when budget usage is well below 1.0")
+	}
+}
+
+func TestCompactionManager_TryCompactWithBudget_CompactsWhenOver(t *testing.T) {
+	mem := &mockMemEngine{}
+	llm := mockLLM(`[{"title":"Fact","content":"Important info"}]`)
+	cm := NewCompactionManager(mem, llm)
+
+	// Create a budget with a tiny history budget so messages exceed it.
+	budget := &ContextBudget{
+		contextWindow:   200000,
+		responseReserve: 8192,
+		overheadTokens:  190000, // Leaves very little for history.
+		historyBudget:   100,    // Extremely tiny budget.
+		calibrated:      true,
+	}
+
+	// Create enough messages to exceed the tiny 100-token budget.
+	var msgs []canonical.Message
+	for i := 0; i < 30; i++ {
+		msgs = append(msgs,
+			canonical.Message{Role: "user", Content: []canonical.Content{{Type: "text", Text: strings.Repeat("question about important topic ", 10)}}},
+			canonical.Message{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: strings.Repeat("answer with detailed explanation ", 10)}}},
+		)
+	}
+
+	result := cm.TryCompactWithBudget(context.Background(), "test-session-1234", msgs, budget)
+	if result == nil {
+		t.Fatal("should compact when budget usage exceeds 1.0")
+	}
+	if len(result) >= len(msgs) {
+		t.Errorf("compacted should have fewer messages: %d vs %d", len(result), len(msgs))
+	}
+}
+
+func TestCompactionManager_TryCompactWithBudget_NilBudget(t *testing.T) {
+	cm := NewCompactionManager(nil, nil)
+	msgs := []canonical.Message{
+		{Role: "user", Content: []canonical.Content{{Type: "text", Text: "hi"}}},
+	}
+	result := cm.TryCompactWithBudget(context.Background(), "test-session-1234", msgs, nil)
+	if result != nil {
+		t.Error("should return nil for nil budget")
+	}
+}
+
 func TestFallbackSummary(t *testing.T) {
 	cm := NewCompactionManager(nil, nil)
 	msgs := []canonical.Message{

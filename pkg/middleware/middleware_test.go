@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -161,6 +162,89 @@ func TestPostToolAudit_LogsEntry(t *testing.T) {
 	store.DB().QueryRow("SELECT COUNT(*) FROM audit_log WHERE session_id = 'sess_1'").Scan(&count)
 	if count == 0 {
 		t.Fatal("expected audit log entry")
+	}
+}
+
+func TestPreContextMemory_ConfidenceFilter(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Write a high-confidence memory.
+	engine.Write(ctx, "High confidence: the API key format is sk-xxx", "API key format", []string{"devops"})
+
+	// Write a low-confidence memory via WriteWithConfidence.
+	if cw, ok := engine.(memory.ConfidenceWriter); ok {
+		cw.WriteWithConfidence(ctx, "Low confidence: user might prefer dark mode", "UI preference", []string{"preference"}, 0.3)
+	}
+
+	// Use MinConfidence 0.5 — should only return the high-confidence one.
+	mw := PreContextMemoryWithConfig(engine, 0.5, DefaultMaxInjectionTokens)
+	data := &HookData{
+		HookPoint: HookPreContext,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "API key dark mode"}}},
+		},
+	}
+
+	err := mw(ctx, data, func(ctx context.Context, data *HookData) error { return nil })
+	if err != nil {
+		t.Fatalf("middleware failed: %v", err)
+	}
+
+	if len(data.Injections) == 0 {
+		t.Fatal("expected at least one injection")
+	}
+	injection := data.Injections[0]
+	if !strings.Contains(injection, "API key") {
+		t.Fatalf("expected high-confidence memory, got: %s", injection)
+	}
+	if strings.Contains(injection, "dark mode") {
+		t.Fatalf("low-confidence memory should be filtered out, got: %s", injection)
+	}
+}
+
+func TestPreContextMemory_InjectionTokenCap(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Seed many unique memories with substantial content.
+	for i := 0; i < 10; i++ {
+		content := fmt.Sprintf("Server configuration item %d with many important details about server setup and infrastructure management for production environments", i)
+		engine.Write(ctx, content, fmt.Sprintf("Server config %d", i), []string{"infra"})
+	}
+
+	// Verify memories were written.
+	results, err := engine.Search(ctx, "server configuration", memory.SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no memories found after seeding — test setup issue")
+	}
+
+	// Use a very small token cap (50 tokens ≈ 200 chars).
+	mw := PreContextMemoryWithConfig(engine, 0.0, 50)
+	data := &HookData{
+		HookPoint: HookPreContext,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "server configuration setup"}}},
+		},
+	}
+
+	err = mw(ctx, data, func(ctx context.Context, data *HookData) error { return nil })
+	if err != nil {
+		t.Fatalf("middleware failed: %v", err)
+	}
+
+	if len(data.Injections) == 0 {
+		t.Fatal("expected injections")
+	}
+
+	// Count how many "Server config" lines appear. With 50 token cap,
+	// should not include all 10 memories.
+	lineCount := strings.Count(data.Injections[0], "Server config")
+	if lineCount >= 10 {
+		t.Errorf("expected cap to limit results, but got all %d memories", lineCount)
 	}
 }
 

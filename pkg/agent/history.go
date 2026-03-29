@@ -50,6 +50,28 @@ func PrepareHistory(msgs []canonical.Message, systemTokens int, cfg HistoryConfi
 	return result
 }
 
+// PrepareHistoryWithBudget runs the same 3-stage pipeline but uses a
+// calibrated ContextBudget for accurate thresholds instead of static config.
+// Falls back to PrepareHistory with defaults if budget is nil.
+func PrepareHistoryWithBudget(msgs []canonical.Message, budget *ContextBudget) []canonical.Message {
+	if budget == nil {
+		return PrepareHistory(msgs, 0, DefaultHistoryConfig())
+	}
+	if len(msgs) == 0 {
+		return msgs
+	}
+
+	tokenBudget := budget.HistoryBudget()
+	if tokenBudget < 1000 {
+		tokenBudget = 1000
+	}
+
+	result := limitTurns(msgs, tokenBudget)
+	result = pruneToolResults(result, budget.ContextWindow())
+	result = sanitize(result)
+	return result
+}
+
 // limitTurns keeps the last N user turns that fit within the token budget.
 // Protected: first user message is always kept.
 func limitTurns(msgs []canonical.Message, budget int) []canonical.Message {

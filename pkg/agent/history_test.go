@@ -115,6 +115,52 @@ func TestSanitize_RemovesOrphanedToolResults(t *testing.T) {
 	}
 }
 
+func TestPrepareHistoryWithBudget_NilFallback(t *testing.T) {
+	msgs := []canonical.Message{
+		{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Hello"}}},
+		{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: "Hi"}}},
+	}
+	result := PrepareHistoryWithBudget(msgs, nil)
+	if len(result) != 2 {
+		t.Errorf("expected 2 messages with nil budget, got %d", len(result))
+	}
+}
+
+func TestPrepareHistoryWithBudget_UsesCalibrated(t *testing.T) {
+	// Create a budget with a tiny history budget.
+	budget := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	// Force calibration with a very high overhead to make history budget tiny.
+	budget.overheadTokens = 198000
+	budget.historyBudget = 2000 - 8192 // Effectively very small.
+	budget.calibrated = true
+	// Ensure minimum kicks in.
+	if budget.historyBudget < 1000 {
+		budget.historyBudget = 1000
+	}
+
+	// Create many messages.
+	var msgs []canonical.Message
+	for i := 0; i < 50; i++ {
+		msgs = append(msgs,
+			canonical.Message{Role: "user", Content: []canonical.Content{{Type: "text", Text: strings.Repeat("word ", 50)}}},
+			canonical.Message{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: strings.Repeat("reply ", 50)}}},
+		)
+	}
+
+	result := PrepareHistoryWithBudget(msgs, budget)
+	if len(result) >= len(msgs) {
+		t.Errorf("expected budget to limit messages: got %d, original %d", len(result), len(msgs))
+	}
+}
+
+func TestPrepareHistoryWithBudget_Empty(t *testing.T) {
+	budget := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	result := PrepareHistoryWithBudget(nil, budget)
+	if len(result) != 0 {
+		t.Errorf("expected 0 messages for nil input, got %d", len(result))
+	}
+}
+
 func TestNeedsCompaction_MessageCount(t *testing.T) {
 	var msgs []canonical.Message
 	for i := 0; i < 60; i++ {

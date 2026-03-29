@@ -176,12 +176,14 @@ func (cm *CompactionManager) summarize(ctx context.Context, msgs []canonical.Mes
 	sumCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	systemPrompt := `Summarize this conversation concisely. Preserve:
-- Key decisions made and their reasoning
-- Action items and their status
-- Important context that would be needed to continue the conversation
-- Specific details: names, numbers, dates, technical terms
+	systemPrompt := `Summarize this conversation. Use these exact sections:
 
+DECISIONS: [key decisions made, with rationale]
+FACTS: [specific facts learned — file paths, error messages, values]
+ACTIONS: [what was done, what remains]
+CONTEXT: [user preferences, constraints, goals expressed]
+
+Stay under 500 tokens total. Omit sections with no content.
 Be specific and factual. Write in past tense. Do not add commentary.`
 
 	response, err := cm.llmCall(sumCtx, systemPrompt, msgs)
@@ -191,6 +193,95 @@ Be specific and factual. Write in past tense. Do not add commentary.`
 	}
 
 	return response
+}
+
+// TryCompactWithBudget attempts compaction using a calibrated ContextBudget.
+// This is the budget-aware entry point — use instead of TryCompact when
+// a ContextBudget is available.
+func (cm *CompactionManager) TryCompactWithBudget(ctx context.Context, sessionID string, msgs []canonical.Message, budget *ContextBudget) []canonical.Message {
+	if budget == nil {
+		return nil
+	}
+
+	// Only compact when history exceeds 100% of calibrated budget.
+	if budget.Usage(msgs) < 1.0 {
+		return nil
+	}
+
+	// Try to acquire the per-session lock (non-blocking).
+	lock := cm.sessionLock(sessionID)
+	if !lock.TryLock() {
+		log.Printf("compaction: session %s already compacting, skipping", sessionID[:min(8, len(sessionID))])
+		return nil
+	}
+	defer lock.Unlock()
+
+	log.Printf("compaction: starting for session %s (%d messages, usage=%.2f)",
+		sessionID[:min(8, len(sessionID))], len(msgs), budget.Usage(msgs))
+
+	cfg := DefaultCompactionConfig()
+	toCompact, toKeep := CompactionSplit(msgs, cfg.KeepRecent, cfg.MinKeep)
+	if len(toCompact) == 0 {
+		return nil
+	}
+
+	cm.memoryFlush(ctx, sessionID, toCompact)
+	summary := cm.summarize(ctx, toCompact)
+	result := InjectSummary(summary, toKeep)
+
+	log.Printf("compaction: session %s compacted %d → %d messages",
+		sessionID[:min(8, len(sessionID))], len(msgs), len(result))
+	return result
+}
+
+// MaybeBackgroundCompact runs compaction in a background goroutine if the
+// session history exceeds 85% of the full context window. Non-blocking:
+// if another compaction is already running for this session, returns immediately.
+//
+// Pattern source: GoClaw internal/agent/loop_history.go — maybeSummarize().
+func (cm *CompactionManager) MaybeBackgroundCompact(sessionID string, msgs []canonical.Message, budget *ContextBudget) {
+	if budget == nil || len(msgs) <= 6 {
+		return
+	}
+
+	// Check if history exceeds 85% of the full context window.
+	historyTokens := estimateHistoryTokens(msgs)
+	threshold := int(float64(budget.ContextWindow()) * 0.85)
+	if historyTokens < threshold {
+		return
+	}
+
+	lock := cm.sessionLock(sessionID)
+	if !lock.TryLock() {
+		return // Another compaction already running.
+	}
+
+	go func() {
+		defer lock.Unlock()
+		bgCtx := context.Background()
+
+		log.Printf("background-compact: starting for session %s (%d messages, %d tokens)",
+			sessionID[:min(8, len(sessionID))], len(msgs), historyTokens)
+
+		cfg := DefaultCompactionConfig()
+		toCompact, toKeep := CompactionSplit(msgs, cfg.KeepRecent, cfg.MinKeep)
+		if len(toCompact) == 0 {
+			return
+		}
+
+		// Flush memories BEFORE compacting — preserve important context.
+		cm.memoryFlush(bgCtx, sessionID, toCompact)
+
+		summary := cm.summarize(bgCtx, toCompact)
+		result := InjectSummary(summary, toKeep)
+
+		log.Printf("background-compact: session %s done %d → %d messages",
+			sessionID[:min(8, len(sessionID))], len(msgs), len(result))
+
+		// Note: The compacted result is not persisted here — the pipeline
+		// owns message storage. This runs for the memory flush side effect.
+		// Future: accept a store callback to persist compacted history.
+	}()
 }
 
 // fallbackSummary creates a basic summary without LLM when the LLM call fails.

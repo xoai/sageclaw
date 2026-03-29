@@ -53,6 +53,9 @@ type Loop struct {
 	postTool     middleware.Middleware
 	onEvent      EventHandler
 
+	// Context management.
+	compactionMgr *CompactionManager // Optional: auto-compaction.
+
 	// Owner resolution (lazy-cached per session).
 	ownerResolver OwnerResolver
 	ownerCache    sync.Map // sessionID -> *ownerInfo
@@ -113,6 +116,11 @@ func WithAudioStore(s AudioStore) LoopOption {
 // WithAudioTranscriber sets the audio-to-text transcriber (e.g. Gemini REST).
 func WithAudioTranscriber(t AudioTranscriber) LoopOption {
 	return func(l *Loop) { l.audioTranscriber = t }
+}
+
+// WithCompactionManager adds auto-compaction for long sessions.
+func WithCompactionManager(cm *CompactionManager) LoopOption {
+	return func(l *Loop) { l.compactionMgr = cm }
 }
 
 // NewLoop creates a new agent loop.
@@ -196,6 +204,10 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 	var totalUsage canonical.Usage
 	var systemPromptSize int
 
+	// Context management: calibrated budget + loop detection.
+	budget := NewContextBudget(l.config.Model, l.config.MaxTokens)
+	loopState := NewToolLoopState()
+
 	// Sanitize history before starting.
 	history = SanitizeHistory(history)
 
@@ -203,6 +215,9 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 	for iteration := 0; iteration < maxIter; iteration++ {
 		// Check for injected messages (steer/inject).
 		l.drainInjections(&history)
+
+		// Layer 1: Prune history using calibrated budget.
+		history = PrepareHistoryWithBudget(history, budget)
 
 		// Run PreContext middleware.
 		hookData := &middleware.HookData{
@@ -231,6 +246,16 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		if err != nil {
 			l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: err, Iteration: iteration})
 			return RunResult{Messages: pendingMsgs, Usage: totalUsage, SystemPromptSize: systemPromptSize, Error: fmt.Errorf("LLM call failed (iteration %d): %w", iteration, err)}
+		}
+
+		// Calibrate context budget from first response's actual token usage.
+		budget.Calibrate(resp.Usage.InputTokens, history)
+
+		// Layer 2: Compact if still over budget after pruning.
+		if l.compactionMgr != nil {
+			if compacted := l.compactionMgr.TryCompactWithBudget(ctx, sessionID, history, budget); compacted != nil {
+				history = compacted
+			}
 		}
 
 		// Accumulate usage.
@@ -294,17 +319,47 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 
 				l.onEvent(Event{Type: EventToolResult, SessionID: sessionID, ToolResult: result, Iteration: iteration})
 				results = append(results, *result)
+
+				// Track for loop detection (checked after all results are collected).
+				loopState.Record(tc.Name, tc.Input, result.Content, IsMutating(tc.Name))
 			}
 
-			// Add tool results to history.
+			// Add tool results to history BEFORE loop detection,
+			// so kill-exit returns complete message pairs.
 			toolResultMsg := BuildToolResultMessage(results)
 			history = append(history, toolResultMsg)
 			pendingMsgs = append(pendingMsgs, toolResultMsg)
+
+			// Tool loop detection — check the last tool call for patterns.
+			// Done after all results so warning/kill don't break message ordering.
+			if len(toolCalls) > 0 {
+				lastTC := toolCalls[len(toolCalls)-1]
+				lastResult := results[len(results)-1]
+				verdict, reason := loopState.Check(lastTC.Name, lastTC.Input, lastResult.Content)
+				switch verdict {
+				case LoopWarn:
+					warningMsg := canonical.Message{
+						Role:    "user",
+						Content: []canonical.Content{{Type: "text", Text: "[System warning] " + reason}},
+					}
+					history = append(history, warningMsg)
+					l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: fmt.Errorf("loop warning: %s", reason), Iteration: iteration})
+				case LoopKill:
+					loopErr := fmt.Errorf("loop detected: %s", reason)
+					l.onEvent(Event{Type: EventRunFailed, SessionID: sessionID, Error: loopErr, Iteration: iteration})
+					return RunResult{Messages: pendingMsgs, Usage: totalUsage, SystemPromptSize: systemPromptSize, Error: loopErr}
+				}
+			}
 			continue // Loop back for next iteration.
 		}
 
 		// Unknown stop reason — break.
 		break
+	}
+
+	// Layer 3: Background compaction after loop exits.
+	if l.compactionMgr != nil {
+		l.compactionMgr.MaybeBackgroundCompact(sessionID, history, budget)
 	}
 
 	// Check if we timed out.
