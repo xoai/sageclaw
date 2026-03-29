@@ -38,6 +38,6 @@ sage/
 .mcp.json
 .claude/
 CLAUDE.md
-docs/adr/
+docs/
 .impeccable.md
 skills-lock.json
