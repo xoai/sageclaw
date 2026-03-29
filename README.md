@@ -5,7 +5,7 @@
 <p align="center"><strong>Personal AI agents that compound experience.</strong></p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#why-sageclaw">Why SageClaw</a> · <a href="#features">Features</a>
+  <a href="#quick-start">Quick Start</a> · <a href="#screenshots">Screenshots</a> · <a href="#why-sageclaw">Why SageClaw</a> · <a href="#features">Features</a>
 </p>
 
 <p align="center">
@@ -40,6 +40,24 @@ go build -o bin/sageclaw ./cmd/sageclaw
 ```
 
 Open `localhost:9090` — the onboarding wizard walks you through connecting a provider, creating your first agent, and choosing a channel in under 2 minutes. No Docker. No PostgreSQL. No cloud account.
+
+## Screenshots
+
+**Agent Creation** — Visual body-diagram editor. Pick a preset or describe what you need and let Magic generate the full config.
+
+![Agent Creation](sageclaw-agent-creation.png)
+
+**MCP Marketplace** — Browse 401 servers, filter by category, one-click install. Ships offline with a bundled index.
+
+![MCP Marketplace](sageclaw-marketplace.png)
+
+**Budget Tracking** — Per-model cost breakdown, daily/monthly limits, cache savings, and alerts.
+
+![Budget Dashboard](sageclaw-budget.png)
+
+**Native Tunnel** — Expose your local instance to the internet for webhook channels. Zero-config managed mode with stable subdomain.
+
+![Tunnel Settings](sageclaw-tunnel.png)
 
 ## Why SageClaw
 
