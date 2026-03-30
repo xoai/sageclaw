@@ -1,7 +1,0 @@
-profile: coding
-deny: []
-shell_deny_groups: {}
-mcp_servers: {}
-config: {}
-headless: false
-pre_authorize: []

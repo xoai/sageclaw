@@ -1,4 +1,0 @@
-serve:
-    - cli
-    - web
-overrides: {}
