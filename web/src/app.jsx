@@ -14,6 +14,7 @@ import { Login } from './views/Login';
 import AgentEditor from './views/AgentEditor';
 import AgentCreator from './views/AgentCreator';
 import Onboarding from './views/Onboarding';
+import { Taskboard } from './views/Taskboard';
 
 /** Client-side redirect: navigates on mount. */
 function Redir({ to, id }) {
@@ -73,6 +74,7 @@ export function App() {
         <Knowledge path="/knowledge" />
         <Settings path="/settings" />
         <Onboarding path="/onboarding" />
+        <Taskboard path="/teams/:id/board" />
 
         {/* ── All redirects ── */}
         {/* M5: Sessions absorbed into Chat */}

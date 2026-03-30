@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
 )
@@ -10,12 +11,14 @@ import (
 // --- Request translation: canonical → OpenAI ---
 
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Tools       []chatTool    `json:"tools,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	Stream      bool          `json:"stream,omitempty"`
+	Model               string        `json:"model"`
+	Messages            []chatMessage `json:"messages"`
+	Tools               []chatTool    `json:"tools,omitempty"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"` // o-series models.
+	Temperature         *float64      `json:"temperature,omitempty"`
+	ReasoningEffort     string        `json:"reasoning_effort,omitempty"` // o-series: "low", "medium", "high".
+	Stream              bool          `json:"stream,omitempty"`
 }
 
 type chatMessage struct {
@@ -28,7 +31,8 @@ type chatMessage struct {
 
 type chatToolCall struct {
 	ID       string       `json:"id"`
-	Type     string       `json:"type"` // "function"
+	Type     string       `json:"type"`  // "function"
+	Index    int          `json:"index"` // Set in streaming deltas.
 	Function chatFunction `json:"function"`
 }
 
@@ -48,17 +52,37 @@ type chatToolFunction struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
+// isOSeries returns true for OpenAI reasoning models (o1, o3, o4-mini, etc.).
+func isOSeries(model string) bool {
+	for _, prefix := range []string{"o1", "o3", "o4"} {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ToOpenAIRequest converts a canonical request to OpenAI Chat Completions format.
 func ToOpenAIRequest(req *canonical.Request) ([]byte, error) {
 	cr := chatRequest{
-		Model:     req.Model,
-		MaxTokens: req.MaxTokens,
-		Stream:    req.Stream,
+		Model:  req.Model,
+		Stream: req.Stream,
 	}
 
-	if req.Temperature > 0 {
-		t := req.Temperature
-		cr.Temperature = &t
+	// o-series models use max_completion_tokens instead of max_tokens.
+	if isOSeries(req.Model) {
+		cr.MaxCompletionTokens = req.MaxTokens
+		// Map thinking_level to reasoning_effort.
+		if level, _ := req.Options["thinking_level"].(string); level != "" {
+			cr.ReasoningEffort = level
+		}
+		// o-series does not support temperature.
+	} else {
+		cr.MaxTokens = req.MaxTokens
+		if req.Temperature > 0 {
+			t := req.Temperature
+			cr.Temperature = &t
+		}
 	}
 
 	// System prompt as first message.

@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/xoai/sageclaw/pkg/channel/discord"
 	"github.com/xoai/sageclaw/pkg/channel/telegram"
@@ -196,10 +199,30 @@ func (s *Server) handleConnectionUpdate(w http.ResponseWriter, r *http.Request) 
 	if v, ok := p["agent_id"]; ok {
 		if v == nil {
 			fields["agent_id"] = ""
-		} else if str, ok := v.(string); ok && validateAgentID(str) {
-			fields["agent_id"] = str
 		} else if str, ok := v.(string); ok && str == "" {
 			fields["agent_id"] = ""
+		} else if str, ok := v.(string); ok && validateAgentID(str) {
+			// Verify agent exists: check LoopPool first, then disk.
+			exists := false
+			if s.loopPool != nil && s.loopPool.GetConfig(str) != nil {
+				exists = true
+			} else if s.agentsDir != "" {
+				if _, err := os.Stat(filepath.Join(s.agentsDir, str, "identity.yaml")); err == nil {
+					exists = true
+				}
+			}
+			if !exists {
+				available := []string{}
+				if s.loopPool != nil {
+					available = s.loopPool.AgentIDs()
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]string{
+					"error": fmt.Sprintf("agent %q not found. Available: %s", str, strings.Join(available, ", ")),
+				})
+				return
+			}
+			fields["agent_id"] = str
 		} else {
 			w.WriteHeader(http.StatusBadRequest)
 			writeJSON(w, map[string]string{"error": "invalid agent_id"})

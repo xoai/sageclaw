@@ -235,8 +235,9 @@ func (be *BudgetEngine) GetSummary(ctx context.Context) SpendingSummary {
 
 func (be *BudgetEngine) getSummaryInternal(ctx context.Context) SpendingSummary {
 	var s SpendingSummary
-	today := time.Now().Format("2006-01-02")
-	monthStart := time.Now().Format("2006-01") + "-01"
+	// Use UTC to match SQLite's datetime('now') which stores in UTC.
+	today := time.Now().UTC().Format("2006-01-02")
+	monthStart := time.Now().UTC().Format("2006-01") + "-01"
 
 	// Today's spending.
 	be.db.QueryRowContext(ctx,

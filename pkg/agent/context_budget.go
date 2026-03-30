@@ -40,6 +40,10 @@ func NewContextBudget(modelID string, responseReserve int) *ContextBudget {
 	// Conservative pre-calibration estimate: assume 30% overhead.
 	b.overheadTokens = int(float64(contextWindow) * 0.30)
 	b.historyBudget = contextWindow - b.overheadTokens - responseReserve
+	// Cap pre-calibration budget too — prevents sending huge history on first request.
+	if b.historyBudget > 25000 {
+		b.historyBudget = 25000
+	}
 	return b
 }
 
@@ -52,14 +56,26 @@ func (b *ContextBudget) Calibrate(inputTokens int, history []canonical.Message) 
 
 	historyEst := estimateHistoryTokens(history)
 	overhead := inputTokens - historyEst
-	if overhead < 0 {
-		overhead = 0
+	// Minimum overhead floor: system prompt + tools always cost something.
+	// The tokenizer can overcount history (different encoding than Anthropic's
+	// actual tokenizer), which makes overhead appear as 0. A floor of 2000
+	// tokens (~8K chars of system prompt + tool schemas) prevents this.
+	const minOverhead = 2000
+	if overhead < minOverhead {
+		overhead = minOverhead
 	}
 
 	b.overheadTokens = overhead
 	b.historyBudget = b.contextWindow - overhead - b.responseReserve
 	if b.historyBudget < 1000 {
 		b.historyBudget = 1000
+	}
+	// Cap history budget to a sensible default. No agent needs >25K tokens
+	// of history — larger conversations should use compaction/summarization.
+	// This prevents sending 78+ messages to rate-limited APIs.
+	const maxDefaultHistoryBudget = 25000
+	if b.historyBudget > maxDefaultHistoryBudget {
+		b.historyBudget = maxDefaultHistoryBudget
 	}
 	b.calibrated = true
 
@@ -85,6 +101,20 @@ func (b *ContextBudget) HistoryBudget() int {
 // ContextWindow returns the model's full context window.
 func (b *ContextBudget) ContextWindow() int {
 	return b.contextWindow
+}
+
+// CapHistoryBudget reduces the history budget to fit a per-request token cap.
+// The cap accounts for overhead (system prompt + tools) — only the remaining
+// tokens are available for history. This enables agents on rate-limited orgs
+// to stay within their token/min budget.
+func (b *ContextBudget) CapHistoryBudget(maxRequestTokens int) {
+	available := maxRequestTokens - b.overheadTokens - b.responseReserve
+	if available < 1000 {
+		available = 1000
+	}
+	if available < b.historyBudget {
+		b.historyBudget = available
+	}
 }
 
 // IsCalibrated returns true if the budget has been calibrated.

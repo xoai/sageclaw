@@ -28,7 +28,7 @@ func RegisterSkillLoader(reg *Registry, skillsDir string) {
 			},
 			"required": ["name"]
 		}`),
-		GroupOther, RiskSafe, "",
+		GroupCore, RiskSafe, "",
 		func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 			var params struct {
 				Name string `json:"name"`
@@ -58,9 +58,9 @@ func RegisterSkillLoader(reg *Registry, skillsDir string) {
 			}
 
 			content := string(data)
-			// Cap at 16KB to avoid context overflow.
-			if len(content) > 16000 {
-				content = content[:16000] + "\n... [truncated]"
+			// Cap at 512KB to match read_file limit.
+			if len(content) > maxOutputBytes {
+				content = content[:maxOutputBytes] + "\n... [truncated]"
 			}
 
 			return &canonical.ToolResult{

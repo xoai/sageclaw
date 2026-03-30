@@ -11,9 +11,9 @@ Use memory to persist knowledge across conversations.
 
 ## When to Search Memory
 
-- **Before starting any task** — search for relevant context, past decisions, or warnings
-- **When the user references something from a previous conversation**
+- **When the user references something from a previous conversation** — search for prior context
 - **Before making architectural or design decisions** — check for existing decisions
+- Do NOT search memory for simple standalone tasks (e.g., summarizing a URL, answering a factual question)
 
 ## When to Store Memory
 

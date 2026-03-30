@@ -311,6 +311,50 @@ func (s *Store) getSessionByChat(ctx context.Context, channel, chatID string) (*
 	return sess, nil
 }
 
+// ListSessions returns the most recent sessions ordered by last update.
+func (s *Store) ListSessions(ctx context.Context, limit int) ([]Session, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, COALESCE(key,''), channel, chat_id, agent_id, kind, label, status, model, provider,
+			spawned_by, input_tokens, output_tokens, compaction_count, message_count,
+			created_at, updated_at
+		 FROM sessions ORDER BY updated_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []Session
+	for rows.Next() {
+		var sess Session
+		var key, label, status, model, provider, spawnedBy *string
+		var createdAt, updatedAt string
+		if err := rows.Scan(&sess.ID, &key, &sess.Channel, &sess.ChatID, &sess.AgentID,
+			&sess.Kind, &label, &status, &model, &provider,
+			&spawnedBy, &sess.InputTokens, &sess.OutputTokens, &sess.CompactionCount, &sess.MessageCount,
+			&createdAt, &updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning session: %w", err)
+		}
+		sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		if key != nil { sess.Key = *key }
+		if label != nil { sess.Label = *label }
+		if status != nil { sess.Status = *status }
+		if model != nil { sess.Model = *model }
+		if provider != nil { sess.Provider = *provider }
+		if spawnedBy != nil { sess.SpawnedBy = *spawnedBy }
+		sessions = append(sessions, sess)
+	}
+	return sessions, rows.Err()
+}
+
 // AppendMessages stores messages for a session.
 func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs []canonical.Message) error {
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -27,11 +27,23 @@ type streamDelta struct {
 	ToolCalls []chatToolCall `json:"tool_calls,omitempty"`
 }
 
+// oaiToolAccum accumulates tool call fragments for internal accumulation.
+type oaiToolAccum struct {
+	id       string
+	name     string
+	argsBuf  strings.Builder
+}
+
 // ParseSSEStream reads an OpenAI SSE stream and emits provider.StreamEvents.
+// Tool calls are accumulated internally and emitted as complete ToolCall objects.
 func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 	defer close(events)
 
+	toolAccums := make(map[int]*oaiToolAccum)
+	var stopReason string
+
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line for large tool args.
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -41,9 +53,10 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 
 		data := strings.TrimPrefix(line, "data: ")
 
-		// Stream terminator.
+		// Stream terminator — emit accumulated tool calls and done.
 		if data == "[DONE]" {
-			events <- provider.StreamEvent{Type: "done"}
+			emitAccumulatedToolCalls(toolAccums, events)
+			events <- provider.StreamEvent{Type: "done", StopReason: stopReason}
 			return
 		}
 
@@ -79,25 +92,53 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 			}
 		}
 
-		// Tool call deltas.
+		// Tool call deltas — accumulate internally.
 		for _, tc := range choice.Delta.ToolCalls {
+			ta, ok := toolAccums[tc.Index]
+			if !ok {
+				ta = &oaiToolAccum{}
+				toolAccums[tc.Index] = ta
+			}
+			if tc.ID != "" {
+				ta.id = tc.ID
+			}
 			if tc.Function.Name != "" {
-				events <- provider.StreamEvent{
-					Type: "tool_call",
-					Delta: &canonical.Content{
-						Type: "tool_call",
-						ToolCall: &canonical.ToolCall{
-							ID:   tc.ID,
-							Name: tc.Function.Name,
-						},
-					},
-				}
+				ta.name = tc.Function.Name
+			}
+			if tc.Function.Arguments != "" {
+				ta.argsBuf.WriteString(tc.Function.Arguments)
 			}
 		}
 
-		// Finish reason.
+		// Finish reason — emit accumulated tool calls when stream signals completion.
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
-			// Usage comes in a separate chunk, just note completion.
+			stopReason = mapFinishReason(*choice.FinishReason)
+			emitAccumulatedToolCalls(toolAccums, events)
 		}
+	}
+}
+
+// emitAccumulatedToolCalls emits all accumulated tool calls as complete events.
+func emitAccumulatedToolCalls(accums map[int]*oaiToolAccum, events chan<- provider.StreamEvent) {
+	for idx, ta := range accums {
+		input := ta.argsBuf.String()
+		if input == "" {
+			input = "{}"
+		}
+		events <- provider.StreamEvent{
+			Type:  "tool_call",
+			Index: idx,
+			Delta: &canonical.Content{
+				ToolCall: &canonical.ToolCall{
+					ID:    ta.id,
+					Name:  ta.name,
+					Input: json.RawMessage(input),
+				},
+			},
+		}
+	}
+	// Clear the map to prevent double-emission.
+	for k := range accums {
+		delete(accums, k)
 	}
 }

@@ -81,9 +81,9 @@ func TestTeam_ListTasks(t *testing.T) {
 		t.Fatalf("expected 2 tasks, got %d", len(all))
 	}
 
-	open, _ := tm.ListTasks(ctx, "team1", "open")
-	if len(open) != 2 {
-		t.Fatalf("expected 2 open tasks, got %d", len(open))
+	pending, _ := tm.ListTasks(ctx, "team1", "pending")
+	if len(pending) != 2 {
+		t.Fatalf("expected 2 pending tasks, got %d", len(pending))
 	}
 }
 

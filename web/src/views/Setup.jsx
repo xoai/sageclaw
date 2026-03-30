@@ -44,7 +44,7 @@ export function Setup({ onComplete }) {
 
           {error && <div style="color:var(--error);font-size:13px;margin-bottom:12px">{error}</div>}
 
-          <button class="chat-send" style="width:100%" disabled={loading}>
+          <button class="btn-primary" style="width:100%" disabled={loading}>
             {loading ? 'Setting up...' : 'Create Password'}
           </button>
         </form>

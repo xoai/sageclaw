@@ -69,13 +69,13 @@ func TestLoopDetect_SameResultKill(t *testing.T) {
 func TestLoopDetect_ReadOnlyStuckWarn(t *testing.T) {
 	s := NewToolLoopState()
 
-	// Low uniqueness: re-reading same 2-3 files.
+	// Low uniqueness: cycling through 3 files (uniqueness ratio <= 0.6 → stuck mode).
 	for i := 0; i < 8; i++ {
-		args := json.RawMessage(fmt.Sprintf(`{"path": "/file%d.txt"}`, i%2))
-		s.Record("read_file", args, fmt.Sprintf("content%d", i%2), false)
+		args := json.RawMessage(fmt.Sprintf(`{"path": "/file%d.txt"}`, i%3))
+		s.Record("read_file", args, fmt.Sprintf("content_%d_%d", i%3, i), false)
 	}
 
-	verdict, _ := s.Check("read_file", json.RawMessage(`{"path": "/file0.txt"}`), "content0")
+	verdict, _ := s.Check("read_file", json.RawMessage(`{"path": "/file0.txt"}`), "content_check")
 	if verdict != LoopWarn {
 		t.Errorf("expected LoopWarn for stuck read-only streak at 8, got %d", verdict)
 	}
@@ -84,9 +84,10 @@ func TestLoopDetect_ReadOnlyStuckWarn(t *testing.T) {
 func TestLoopDetect_ReadOnlyStuckKill(t *testing.T) {
 	s := NewToolLoopState()
 
+	// Each call has unique result to avoid identical/same-result kill.
 	for i := 0; i < 12; i++ {
-		args := json.RawMessage(fmt.Sprintf(`{"path": "/file%d.txt"}`, i%2))
-		s.Record("read_file", args, fmt.Sprintf("content%d", i%2), false)
+		args := json.RawMessage(fmt.Sprintf(`{"path": "/file%d.txt"}`, i%3))
+		s.Record("read_file", args, fmt.Sprintf("content_%d_%d", i%3, i), false)
 	}
 
 	verdict, _ := s.Check("read_file", json.RawMessage(`{"path": "/file0.txt"}`), "content0")
@@ -98,15 +99,30 @@ func TestLoopDetect_ReadOnlyStuckKill(t *testing.T) {
 func TestLoopDetect_ReadOnlyExplorationLenient(t *testing.T) {
 	s := NewToolLoopState()
 
-	// High uniqueness: reading many different files.
-	for i := 0; i < 10; i++ {
+	// High uniqueness: reading many different files — OK up to 23.
+	for i := 0; i < 20; i++ {
 		args := json.RawMessage(fmt.Sprintf(`{"path": "/file%d.txt"}`, i))
 		s.Record("read_file", args, fmt.Sprintf("unique_content_%d", i), false)
 	}
 
-	verdict, _ := s.Check("read_file", json.RawMessage(`{"path": "/file10.txt"}`), "unique_content_10")
+	verdict, _ := s.Check("read_file", json.RawMessage(`{"path": "/file20.txt"}`), "unique_content_20")
 	if verdict != LoopOK {
-		t.Errorf("expected LoopOK for exploration at 10 calls, got %d", verdict)
+		t.Errorf("expected LoopOK for exploration at 20 calls, got %d", verdict)
+	}
+}
+
+func TestLoopDetect_WebFetchSpamKilledByReadOnlyStreak(t *testing.T) {
+	s := NewToolLoopState()
+
+	// 10 web_fetch calls with low uniqueness (cycling 3 URLs).
+	for i := 0; i < 10; i++ {
+		args := json.RawMessage(fmt.Sprintf(`{"url": "https://example.com/%d"}`, i%3))
+		s.Record("web_fetch", args, fmt.Sprintf("error_%d", i%3), false)
+	}
+
+	verdict, _ := s.Check("web_fetch", json.RawMessage(`{"url": "https://example.com/0"}`), "error_0")
+	if verdict < LoopWarn {
+		t.Errorf("expected at least LoopWarn for 10 web_fetch calls with low uniqueness, got %d", verdict)
 	}
 }
 
@@ -126,9 +142,6 @@ func TestLoopDetect_MutatingResets(t *testing.T) {
 		t.Errorf("expected streak reset after mutating call, got %d", s.streakLen)
 	}
 
-	// After mutation, a NEW unique read should be OK (strategy 3 is reset).
-	// Note: strategy 1 still sees old entries in the recent buffer — that's
-	// correct, it prevents the same identical pattern from recurring.
 	verdict, _ := s.Check("read_file", json.RawMessage(`{"path": "/new_file.txt"}`), "new_content")
 	if verdict != LoopOK {
 		t.Errorf("expected LoopOK for new read after mutating reset, got %d", verdict)
@@ -156,8 +169,8 @@ func TestIsMutating(t *testing.T) {
 	if !IsMutating("write_file") {
 		t.Error("write_file should be mutating")
 	}
-	if !IsMutating("exec") {
-		t.Error("exec should be mutating")
+	if IsMutating("exec") {
+		t.Error("exec should NOT be mutating (neutral — ambiguous read/write)")
 	}
 	if IsMutating("read_file") {
 		t.Error("read_file should not be mutating")

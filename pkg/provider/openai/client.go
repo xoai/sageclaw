@@ -174,36 +174,18 @@ func (c *Client) newRequest(ctx context.Context, body []byte) (*http.Request, er
 }
 
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			if req.Body != nil {
-				body, _ := io.ReadAll(req.Body)
-				req.Body = io.NopCloser(bytes.NewReader(body))
-			}
-			backoff := time.Duration(1<<uint(attempt)) * 500 * time.Millisecond
-			select {
-			case <-time.After(backoff):
-			case <-req.Context().Done():
-				return nil, req.Context().Err()
-			}
-		}
+	return provider.DoWithRetry(c.client, req, provider.DefaultRetryConfig())
+}
 
-		resp, err := c.client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			continue
-		}
-
-		return resp, nil
+// Supports implements provider.ProviderCapabilities.
+// OpenAI supports vision and image generation.
+func (c *Client) Supports(cap string) bool {
+	switch cap {
+	case provider.CapVision, provider.CapImageGen:
+		return true
+	default:
+		return false
 	}
-	return nil, fmt.Errorf("all retries exhausted: %w", lastErr)
 }
 
 // Compile-time check.

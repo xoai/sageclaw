@@ -2,31 +2,66 @@ package tool
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
+	"github.com/xoai/sageclaw/pkg/security"
 )
 
 const (
-	maxResponseBytes = 10 * 1024 * 1024 // 10MB
-	fetchTimeout     = 30 * time.Second
+	maxResponseBytes  = 10 * 1024 * 1024 // 10MB download limit
+	maxFetchChars     = 60_000           // ~15K tokens inline — matches GoClaw default
+	fetchTimeout      = 30 * time.Second
 )
 
+// WebConfig holds dependencies for web tools.
+type WebConfig struct {
+	FetchCache      *ToolCache              // Cache for web_fetch (15min TTL recommended). Nil disables caching.
+	SearchCache     *ToolCache              // Cache for web_search (60min TTL recommended). Nil disables caching.
+	ExtractorChain  *ExtractorChain         // Content extraction pipeline. Nil uses legacy extractPageText.
+	BraveAPIKey     string                  // Brave Search API key. Empty uses DuckDuckGo only.
+	InjectionConfig security.InjectionConfig // Content sanitization config. Zero value uses DefaultInjectionConfig().
+	BrowserFallback *BrowserManager         // If set, web_fetch falls back to headless browser when extraction is thin (JS-heavy pages).
+}
+
 // RegisterWeb registers web search and fetch tools.
-func RegisterWeb(reg *Registry) {
+func RegisterWeb(reg *Registry, cfg *WebConfig) {
+	if cfg == nil {
+		cfg = &WebConfig{}
+	}
+	// Default injection config if not explicitly set.
+	if !cfg.InjectionConfig.Enabled && cfg.InjectionConfig.BlockThreshold == 0 {
+		cfg.InjectionConfig = security.DefaultInjectionConfig()
+	}
 	reg.RegisterWithGroup("web_fetch", "Fetch a URL and return its text content",
-		json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch"}},"required":["url"]}`),
-		GroupWeb, RiskModerate, "builtin", webFetch())
+		json.RawMessage(`{"type":"object","properties":{`+
+			`"url":{"type":"string","description":"URL to fetch"},`+
+			`"extractMode":{"type":"string","enum":["markdown","text"],"description":"Output format (default: markdown)"},`+
+			`"maxChars":{"type":"integer","description":"Maximum output characters (100-60000, default: 60000)"}`+
+			`},"required":["url"]}`),
+		GroupWeb, RiskModerate, "builtin", webFetch(cfg))
 
 	reg.RegisterWithGroup("web_search", "Search the web",
-		json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"num_results":{"type":"integer","description":"Number of results (default 5)"}},"required":["query"]}`),
-		GroupWeb, RiskModerate, "builtin", webSearch())
+		json.RawMessage(`{"type":"object","properties":{`+
+			`"query":{"type":"string","description":"Search query"},`+
+			`"num_results":{"type":"integer","description":"Number of results (default 5)"},`+
+			`"freshness":{"type":"string","description":"Time filter: pd (past day), pw (past week), pm (past month), py (past year)"},`+
+			`"country":{"type":"string","description":"Country code (e.g. us, gb, de)"},`+
+			`"search_lang":{"type":"string","description":"Search language (e.g. en, vi, de)"}`+
+			`},"required":["query"]}`),
+		GroupWeb, RiskModerate, "builtin", webSearch(cfg))
 }
 
 func isPrivateIP(ipStr string) bool {
@@ -44,16 +79,7 @@ func isPrivateIP(ipStr string) bool {
 
 func checkSSRF(urlStr string) error {
 	// Extract hostname.
-	host := urlStr
-	if idx := strings.Index(host, "://"); idx != -1 {
-		host = host[idx+3:]
-	}
-	if idx := strings.Index(host, "/"); idx != -1 {
-		host = host[:idx]
-	}
-	if idx := strings.Index(host, ":"); idx != -1 {
-		host = host[:idx]
-	}
+	host := extractHost(urlStr)
 
 	// Resolve DNS and check IP.
 	ips, err := net.LookupHost(host)
@@ -70,33 +96,143 @@ func checkSSRF(urlStr string) error {
 	return nil
 }
 
-func webFetch() ToolFunc {
+// extractHost extracts the hostname from a URL string.
+func extractHost(urlStr string) string {
+	host := urlStr
+	if idx := strings.Index(host, "://"); idx != -1 {
+		host = host[idx+3:]
+	}
+	if idx := strings.Index(host, "/"); idx != -1 {
+		host = host[:idx]
+	}
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	return host
+}
+
+// pinnedDialer returns a DialContext function that resolves DNS, validates the IP
+// against private ranges, and connects directly to the validated IP. This eliminates
+// the TOCTOU race between DNS resolution in checkSSRF and the HTTP client's own
+// DNS resolution.
+func pinnedDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+		}
+
+		// Resolve DNS.
+		ips, err := net.DefaultResolver.LookupHost(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("DNS resolution failed for %s: %w", host, err)
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no DNS records for %s", host)
+		}
+
+		// Validate all resolved IPs — connect to the first safe one.
+		var lastErr error
+		for _, ipStr := range ips {
+			if isPrivateIP(ipStr) {
+				lastErr = fmt.Errorf("SSRF blocked: %s resolves to private IP %s", host, ipStr)
+				continue
+			}
+			// Connect directly to the validated IP.
+			pinnedAddr := net.JoinHostPort(ipStr, port)
+			conn, err := (&net.Dialer{}).DialContext(ctx, network, pinnedAddr)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return conn, nil
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("SSRF blocked: all IPs for %s are private", host)
+	}
+}
+
+// newPinnedHTTPClient creates an HTTP client with DNS-pinning SSRF protection.
+// The pinned dialer validates IPs at connect time, making the CheckRedirect SSRF
+// check redundant for DNS validation (kept for redirect count limiting only).
+func newPinnedHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: pinnedDialer(),
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+}
+
+// cacheChannel returns the agent ID from context for cache isolation.
+// Falls back to "_global" if no agent ID is set.
+func cacheChannel(ctx context.Context) string {
+	if id, ok := ctx.Value(agentIDKey{}).(string); ok && id != "" {
+		return id
+	}
+	return "_global"
+}
+
+func webFetch(cfg *WebConfig) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
-			URL string `json:"url"`
+			URL         string `json:"url"`
+			ExtractMode string `json:"extractMode"`
+			MaxChars    int    `json:"maxChars"`
 		}
 		if err := json.Unmarshal(input, &params); err != nil {
 			return errorResult("invalid input: " + err.Error()), nil
 		}
-
-		// SSRF protection.
-		if err := checkSSRF(params.URL); err != nil {
-			return errorResult(err.Error()), nil
+		if params.ExtractMode == "" {
+			params.ExtractMode = "markdown"
+		}
+		if params.MaxChars <= 0 {
+			params.MaxChars = maxFetchChars
+		}
+		if params.MaxChars < 100 {
+			params.MaxChars = 100
+		}
+		if params.MaxChars > maxFetchChars {
+			params.MaxChars = maxFetchChars
 		}
 
-		client := &http.Client{
-			Timeout: fetchTimeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return fmt.Errorf("too many redirects")
+		// Adaptive maxChars: scale down as iterations progress to preserve context budget.
+		// Early iterations (0-50%): full maxChars. Late iterations (50-100%): scale to 40%.
+		if iter, ok := GetIteration(ctx); ok && iter.Max > 0 {
+			pct := float64(iter.Current) / float64(iter.Max)
+			if pct > 0.5 {
+				// Linear scale from 100% at 50% progress to 40% at 100% progress.
+				scale := 1.0 - 1.2*(pct-0.5)
+				scaled := int(float64(params.MaxChars) * scale)
+				if scaled < 2000 {
+					scaled = 2000 // Floor: always return at least 2K chars.
 				}
-				// Re-check SSRF on redirect target.
-				if err := checkSSRF(req.URL.String()); err != nil {
-					return err
-				}
-				return nil
-			},
+				params.MaxChars = scaled
+			}
 		}
+
+		// Build cache key from all params that affect output.
+		cacheKey := params.URL + "|" + params.ExtractMode + "|" + fmt.Sprintf("%d", params.MaxChars)
+
+		// Check cache first.
+		if cfg.FetchCache != nil {
+			if cached, ok := cfg.FetchCache.Get(cacheChannel(ctx), cacheKey); ok {
+				return &canonical.ToolResult{Content: cached + "\n[cached]"}, nil
+			}
+		}
+
+		// SSRF protection via DNS-pinning dialer.
+		// The pinned dialer resolves DNS, validates IPs, and connects to the validated
+		// IP directly — eliminating the TOCTOU race of separate check + connect.
+		client := newPinnedHTTPClient(fetchTimeout)
 
 		req, err := http.NewRequestWithContext(ctx, "GET", params.URL, nil)
 		if err != nil {
@@ -110,25 +246,118 @@ func webFetch() ToolFunc {
 		}
 		defer resp.Body.Close()
 
+		ct := resp.Header.Get("Content-Type")
+		if isBinaryContentType(ct) {
+			return &canonical.ToolResult{
+				Content: fmt.Sprintf("HTTP %d — binary content (%s). "+
+					"web_fetch only handles text. To download this file, use execute_command with: "+
+					"curl -LO '%s'", resp.StatusCode, ct, params.URL),
+			}, nil
+		}
+
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 		if err != nil {
 			return errorResult("reading response: " + err.Error()), nil
 		}
 
-		content := fmt.Sprintf("HTTP %d\n\n%s", resp.StatusCode, string(body))
-		if len(content) > maxOutputBytes {
-			content = content[:maxOutputBytes] + "\n... [truncated at 16KB — full output too large for context]"
+		rawBody := string(body)
+
+		// Extraction waterfall (OpenClaw pattern):
+		// ExtractorChain: Defuddle → Readability → Markdown → PlainText
+		// Fallback: DOM tree walker (GoClaw pattern — skips nav/footer/hidden)
+		// Quality signal if all extractors return thin content
+		var text string
+		var extractor string
+
+		// Stage 1: ExtractorChain (Defuddle → Readability → Markdown → PlainText).
+		if cfg.ExtractorChain != nil {
+			if extracted, label, err := cfg.ExtractorChain.ExtractWithLabel(ctx, rawBody, params.URL); err == nil && isQualityContent(extracted) {
+				text = extracted
+				extractor = label
+			}
 		}
 
-		return &canonical.ToolResult{Content: content}, nil
+		// Stage 2: DOM tree walker fallback (skips nav/footer/hidden elements).
+		if text == "" {
+			if params.ExtractMode == "markdown" {
+				text = htmlToMarkdown(rawBody)
+			} else {
+				text = htmlToText(rawBody)
+			}
+			extractor = "dom-walker"
+		}
+
+		// Stage 3: Browser fallback for JS-heavy pages.
+		// Trigger when extraction is thin OR suspiciously small relative to the raw HTML.
+		// A news homepage might be 200KB of HTML but only yield 800 chars of footer —
+		// that's a signal the real content is JS-rendered.
+		needsBrowser := !isRichContent(text) ||
+			(len(rawBody) > 5000 && len(strings.TrimSpace(text))*50 < len(rawBody))
+		if needsBrowser && cfg.BrowserFallback != nil {
+			if browserText, err := browserFallbackFetch(ctx, cfg.BrowserFallback, params.URL); err == nil && len(browserText) > len(text) {
+				text = browserText
+				extractor = "browser"
+			}
+		}
+
+		// Quality signal — prevent LLM from retrying when extraction is thin.
+		if text == "" && len(rawBody) > 0 {
+			text = "[No content extracted. The page may require JavaScript to render, " +
+				"or returned a bot-protection challenge. Do NOT retry this URL — " +
+				"try using execute_command with curl instead, or ask the user for the content.]"
+			extractor = "none"
+		}
+
+		// Sanitize external content: homoglyph normalization, zero-width stripping,
+		// injection detection (warn/block).
+		text = security.SanitizeExternal(text, cfg.InjectionConfig)
+
+		// Wrap with trust boundary markers.
+		text = security.WrapBoundary(text, "web_fetch", params.URL)
+
+		content := fmt.Sprintf("HTTP %d [extractor: %s]\n\n%s", resp.StatusCode, extractor, text)
+
+		// Truncate to maxChars.
+		if len(content) <= params.MaxChars {
+			if cfg.FetchCache != nil {
+				cfg.FetchCache.Set(cacheChannel(ctx), cacheKey, content)
+			}
+			return &canonical.ToolResult{Content: content}, nil
+		}
+
+		// Overflow: write full content to temp file, return preview + path.
+		tmpPath, err := writeWebFetchTempFile(text)
+		if err != nil {
+			content = content[:params.MaxChars] + "\n... [truncated — temp file write failed]"
+			return &canonical.ToolResult{Content: content}, nil
+		}
+
+		preview := content[:params.MaxChars]
+		preview += fmt.Sprintf("\n\n... [truncated at %dK chars — full content (%d chars) saved to: %s]\n"+
+			"Use read_file or execute_command to access the full content.",
+			params.MaxChars/1000, len(text), tmpPath)
+
+		if cfg.FetchCache != nil {
+			cfg.FetchCache.Set(cacheChannel(ctx), cacheKey, preview)
+		}
+		return &canonical.ToolResult{Content: preview}, nil
 	}
 }
 
-func webSearch() ToolFunc {
+func webSearch(cfg *WebConfig) ToolFunc {
+	// Token bucket for Brave rate limiting (1 req/s).
+	var braveLimiter *rateLimiter
+	if cfg.BraveAPIKey != "" {
+		braveLimiter = newRateLimiter(1, time.Second)
+	}
+
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
 			Query      string `json:"query"`
 			NumResults int    `json:"num_results"`
+			Freshness  string `json:"freshness"`
+			Country    string `json:"country"`
+			SearchLang string `json:"search_lang"`
 		}
 		if err := json.Unmarshal(input, &params); err != nil {
 			return errorResult("invalid input: " + err.Error()), nil
@@ -140,8 +369,36 @@ func webSearch() ToolFunc {
 			params.NumResults = 10
 		}
 
-		// Search using DuckDuckGo HTML (no API key required).
-		results, err := duckDuckGoSearch(ctx, params.Query, params.NumResults)
+		// Build cache key.
+		searchCacheKey := fmt.Sprintf("%s|%d|%s|%s|%s",
+			params.Query, params.NumResults, params.Freshness, params.Country, params.SearchLang)
+
+		// Check cache.
+		if cfg.SearchCache != nil {
+			if cached, ok := cfg.SearchCache.Get(cacheChannel(ctx), searchCacheKey); ok {
+				return &canonical.ToolResult{Content: cached + "\n[cached]"}, nil
+			}
+		}
+
+		var results []searchResult
+		var err error
+		var source string
+
+		// Try Brave Search first if configured.
+		if cfg.BraveAPIKey != "" && braveLimiter != nil && braveLimiter.allow() {
+			results, err = braveSearch(ctx, cfg.BraveAPIKey, params.Query, params.NumResults,
+				params.Freshness, params.Country, params.SearchLang)
+			if err == nil {
+				source = "Brave"
+			}
+		}
+
+		// Fall back to DuckDuckGo.
+		if results == nil {
+			results, err = duckDuckGoSearch(ctx, params.Query, params.NumResults)
+			source = "DuckDuckGo"
+		}
+
 		if err != nil {
 			return &canonical.ToolResult{
 				Content: fmt.Sprintf("Web search failed: %v. Try rephrasing the query or use web_fetch with a specific URL instead.", err),
@@ -154,11 +411,16 @@ func webSearch() ToolFunc {
 		}
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Search results for: %s\n\n", params.Query))
+		sb.WriteString(fmt.Sprintf("Search results for: %s (via %s)\n\n", params.Query, source))
 		for i, r := range results {
 			sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, r.title, r.url, r.snippet))
 		}
-		return &canonical.ToolResult{Content: sb.String()}, nil
+
+		content := sb.String()
+		if cfg.SearchCache != nil {
+			cfg.SearchCache.Set(cacheChannel(ctx), searchCacheKey, content)
+		}
+		return &canonical.ToolResult{Content: content}, nil
 	}
 }
 
@@ -225,13 +487,10 @@ func parseDDGResults(html string, max int) []searchResult {
 			if ampIdx := strings.Index(rawURL, "&"); ampIdx >= 0 {
 				rawURL = rawURL[:ampIdx]
 			}
-			// URL decode.
-			rawURL = strings.ReplaceAll(rawURL, "%3A", ":")
-			rawURL = strings.ReplaceAll(rawURL, "%2F", "/")
-			rawURL = strings.ReplaceAll(rawURL, "%3F", "?")
-			rawURL = strings.ReplaceAll(rawURL, "%3D", "=")
-			rawURL = strings.ReplaceAll(rawURL, "%26", "&")
-			rawURL = strings.ReplaceAll(rawURL, "%25", "%")
+			// URL decode (handles all percent-encoded characters).
+			if decoded, err := url.QueryUnescape(rawURL); err == nil {
+				rawURL = decoded
+			}
 		}
 
 		// Extract title (text inside the <a> tag).
@@ -271,6 +530,215 @@ func parseDDGResults(html string, max int) []searchResult {
 	}
 
 	return results
+}
+
+// writeWebFetchTempFile writes content to a temp file and returns the path.
+func writeWebFetchTempFile(content string) (string, error) {
+	dir := filepath.Join(os.TempDir(), "sageclaw-web-fetch")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	var buf [8]byte
+	rand.Read(buf[:])
+	name := "web-fetch-" + hex.EncodeToString(buf[:]) + ".txt"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// isBinaryContentType returns true for content types that are not human-readable text.
+func isBinaryContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	// Split off parameters (e.g. "text/html; charset=utf-8" → "text/html").
+	if idx := strings.Index(ct, ";"); idx >= 0 {
+		ct = strings.TrimSpace(ct[:idx])
+	}
+	// Text and JSON/XML types are readable.
+	if strings.HasPrefix(ct, "text/") {
+		return false
+	}
+	if ct == "application/json" || ct == "application/xml" ||
+		ct == "application/xhtml+xml" || ct == "application/rss+xml" ||
+		ct == "application/atom+xml" || ct == "application/javascript" ||
+		ct == "application/x-javascript" {
+		return false
+	}
+	// Everything else under application/, image/, audio/, video/ is binary.
+	if strings.HasPrefix(ct, "application/") || strings.HasPrefix(ct, "image/") ||
+		strings.HasPrefix(ct, "audio/") || strings.HasPrefix(ct, "video/") {
+		return true
+	}
+	// Unknown or empty — allow through (let text extraction handle it).
+	return false
+}
+
+// extractPageText uses the DOM tree walker for text extraction.
+// Kept as a convenience wrapper for backward compatibility.
+func extractPageText(rawHTML string) string {
+	return htmlToText(rawHTML)
+}
+
+// isQualityContent checks if extracted content has enough substance.
+func isQualityContent(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	return len(trimmed) >= 100 && len(strings.Fields(trimmed)) >= 10
+}
+
+// isRichContent checks if content is substantial enough to skip browser fallback.
+// Higher bar than isQualityContent — we want real article text, not just a footer.
+func isRichContent(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	return len(trimmed) >= 200 && len(strings.Fields(trimmed)) >= 30
+}
+
+// browserFallbackFetch renders a page via headless browser and extracts its text.
+// Used when HTTP-based extraction yields thin content (JS-heavy sites).
+func browserFallbackFetch(ctx context.Context, bm *BrowserManager, urlStr string) (string, error) {
+	_, err := bm.EnsureBrowser()
+	if err != nil {
+		return "", fmt.Errorf("browser init: %w", err)
+	}
+
+	page, _, err := bm.NewPage()
+	if err != nil {
+		return "", fmt.Errorf("new page: %w", err)
+	}
+
+	if err := page.Timeout(30 * time.Second).Navigate(urlStr); err != nil {
+		return "", fmt.Errorf("navigate: %w", err)
+	}
+
+	// Wait for page load + extra settle time for JS rendering.
+	_ = page.Timeout(30 * time.Second).WaitLoad()
+	time.Sleep(2 * time.Second) // Allow JS frameworks to hydrate.
+
+	result, err := page.Eval(`() => document.body.innerText || ''`)
+	if err != nil {
+		return "", fmt.Errorf("extract text: %w", err)
+	}
+
+	text := result.Value.String()
+	if len(text) > maxFetchChars {
+		text = text[:maxFetchChars]
+	}
+	return text, nil
+}
+
+// --- Brave Search ---
+
+// braveSearch queries the Brave Search API.
+func braveSearch(ctx context.Context, apiKey, query string, count int,
+	freshness, country, searchLang string) ([]searchResult, error) {
+
+	u := fmt.Sprintf("https://api.search.brave.com/res/v1/web/search?q=%s&count=%d",
+		strings.ReplaceAll(query, " ", "+"), count)
+	if freshness != "" {
+		u += "&freshness=" + freshness
+	}
+	if country != "" {
+		u += "&country=" + country
+	}
+	if searchLang != "" {
+		u += "&search_lang=" + searchLang
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("X-Subscription-Token", apiKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("brave search request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("brave search returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+	if err != nil {
+		return nil, err
+	}
+
+	return parseBraveResults(body, count)
+}
+
+func parseBraveResults(data []byte, max int) ([]searchResult, error) {
+	var resp struct {
+		Web struct {
+			Results []struct {
+				Title       string `json:"title"`
+				URL         string `json:"url"`
+				Description string `json:"description"`
+			} `json:"results"`
+		} `json:"web"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("brave response parse: %w", err)
+	}
+
+	var results []searchResult
+	for _, r := range resp.Web.Results {
+		if len(results) >= max {
+			break
+		}
+		results = append(results, searchResult{
+			title:   r.Title,
+			url:     r.URL,
+			snippet: r.Description,
+		})
+	}
+	return results, nil
+}
+
+// --- Rate Limiter ---
+
+// rateLimiter is a simple token bucket rate limiter.
+type rateLimiter struct {
+	mu       sync.Mutex
+	tokens   int
+	max      int
+	interval time.Duration
+	lastFill time.Time
+}
+
+func newRateLimiter(maxTokens int, interval time.Duration) *rateLimiter {
+	return &rateLimiter{
+		tokens:   maxTokens,
+		max:      maxTokens,
+		interval: interval,
+		lastFill: time.Now(),
+	}
+}
+
+func (r *rateLimiter) allow() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(r.lastFill)
+	refill := int(elapsed / r.interval)
+	if refill > 0 {
+		r.tokens += refill
+		if r.tokens > r.max {
+			r.tokens = r.max
+		}
+		r.lastFill = now
+	}
+
+	if r.tokens > 0 {
+		r.tokens--
+		return true
+	}
+	return false
 }
 
 // stripHTML removes HTML tags from a string.

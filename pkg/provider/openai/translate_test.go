@@ -129,6 +129,84 @@ func TestToOpenAIRequest_WithToolCall(t *testing.T) {
 	}
 }
 
+func TestToOpenAIRequest_OSeries(t *testing.T) {
+	req := &canonical.Request{
+		Model:     "o3-mini",
+		MaxTokens: 4096,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "think"}}},
+		},
+		Options: map[string]any{"thinking_level": "high"},
+	}
+
+	data, err := ToOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	// o-series uses max_completion_tokens, not max_tokens.
+	if _, ok := raw["max_tokens"]; ok {
+		t.Error("o-series should not have max_tokens")
+	}
+	if raw["max_completion_tokens"].(float64) != 4096 {
+		t.Errorf("expected max_completion_tokens=4096, got %v", raw["max_completion_tokens"])
+	}
+
+	// reasoning_effort from thinking_level.
+	if raw["reasoning_effort"] != "high" {
+		t.Errorf("expected reasoning_effort=high, got %v", raw["reasoning_effort"])
+	}
+
+	// No temperature for o-series.
+	if _, ok := raw["temperature"]; ok {
+		t.Error("o-series should not have temperature")
+	}
+}
+
+func TestToOpenAIRequest_NonOSeries_MaxTokens(t *testing.T) {
+	req := &canonical.Request{
+		Model:     "gpt-4o",
+		MaxTokens: 2048,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "hi"}}},
+		},
+	}
+
+	data, _ := ToOpenAIRequest(req)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	// Non o-series uses max_tokens.
+	if raw["max_tokens"].(float64) != 2048 {
+		t.Errorf("expected max_tokens=2048, got %v", raw["max_tokens"])
+	}
+	if _, ok := raw["max_completion_tokens"]; ok {
+		t.Error("non o-series should not have max_completion_tokens")
+	}
+}
+
+func TestIsOSeries(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"o1-preview", true},
+		{"o3-mini", true},
+		{"o4-mini", true},
+		{"gpt-4o", false},
+		{"gpt-4o-mini", false},
+		{"claude-sonnet-4-20250514", false},
+	}
+	for _, tt := range tests {
+		if got := isOSeries(tt.model); got != tt.want {
+			t.Errorf("isOSeries(%q) = %v, want %v", tt.model, got, tt.want)
+		}
+	}
+}
+
 func TestFromOpenAIResponse_Text(t *testing.T) {
 	apiResp := `{
 		"id": "chatcmpl-123",

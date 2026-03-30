@@ -60,7 +60,7 @@ func RegisterPlan(reg *Registry) {
 			},
 			"required": ["action"]
 		}`),
-		GroupOther, RiskSafe, "",
+		GroupCore, RiskSafe, "",
 		func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 			var params struct {
 				Action    string   `json:"action"`

@@ -116,7 +116,11 @@ func limitTurns(msgs []canonical.Message, budget int) []canonical.Message {
 		return msgs // Only one turn, can't trim further.
 	}
 
-	// Keep the first turn (protected) + as many recent turns as fit.
+	// Hard cap: keep at most maxRecentTurns recent turns (matching GoClaw).
+	// This prevents sending 50+ messages even if the token counter underestimates.
+	const maxRecentTurns = 3
+
+	// Keep the first turn (protected) + most recent turns within both limits.
 	firstTurn := turns[0]
 	remaining := budget - firstTurn.tokens
 	if remaining <= 0 {
@@ -125,14 +129,19 @@ func limitTurns(msgs []canonical.Message, budget int) []canonical.Message {
 		return msgs[lastTurn.startIdx : lastTurn.endIdx+1]
 	}
 
-	// Walk backwards from most recent turn, accumulating tokens.
+	// Walk backwards from most recent turn, accumulating tokens, capped at maxRecentTurns.
 	var keepTurns []turn
+	kept := 0
 	for i := len(turns) - 1; i >= 1; i-- {
+		if kept >= maxRecentTurns {
+			break
+		}
 		if remaining-turns[i].tokens < 0 {
 			break
 		}
 		remaining -= turns[i].tokens
 		keepTurns = append([]turn{turns[i]}, keepTurns...)
+		kept++
 	}
 
 	// Build result: first turn + kept turns.

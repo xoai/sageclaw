@@ -7,6 +7,7 @@ export function Nav({ open, onNavigate }) {
   const [url, setUrl] = useState(getCurrentUrl());
   const [theme, setTheme] = useState(localStorage.getItem('sageclaw-theme') || 'dark');
   const [healthy, setHealthy] = useState(true);
+  const [attentionCount, setAttentionCount] = useState(0);
 
   useEffect(() => {
     const update = () => setUrl(getCurrentUrl());
@@ -30,10 +31,20 @@ export function Nav({ open, onNavigate }) {
     checkHealth();
     const healthInterval = setInterval(checkHealth, 30000);
 
+    // Poll for tasks needing attention (in_review, failed, blocked).
+    const checkAttention = () => {
+      fetch('/api/teams/attention', { credentials: 'include' }).then(r => r.json()).then(data => {
+        setAttentionCount(data?.count || 0);
+      }).catch(() => {});
+    };
+    checkAttention();
+    const attentionInterval = setInterval(checkAttention, 15000);
+
     return () => {
       window.removeEventListener('popstate', update);
       history.pushState = orig;
       clearInterval(healthInterval);
+      clearInterval(attentionInterval);
     };
   }, []);
 
@@ -50,7 +61,7 @@ export function Nav({ open, onNavigate }) {
     return path === href || path.startsWith(href + '/');
   };
 
-  const link = (href, label, Icon) => (
+  const link = (href, label, Icon, badge) => (
     <a
       href={href}
       class={`nav-item ${isActive(href) ? 'active' : ''}`}
@@ -63,6 +74,11 @@ export function Nav({ open, onNavigate }) {
     >
       <Icon />
       <span>{label}</span>
+      {badge > 0 && (
+        <span style="margin-left:auto;background:var(--error);color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;min-width:18px;text-align:center">
+          {badge}
+        </span>
+      )}
     </a>
   );
 
@@ -85,7 +101,7 @@ export function Nav({ open, onNavigate }) {
 
       <div class="nav-items">
         {link('/chat', 'Chat', IconChat)}
-        {link('/agents', 'Agents', IconBot)}
+        {link('/agents', 'Agents', IconBot, attentionCount)}
         {link('/marketplace', 'Marketplace', IconSkills)}
         {link('/knowledge', 'Knowledge', IconKnowledge)}
         {link('/', 'Dashboard', IconDashboard)}

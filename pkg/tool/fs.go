@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -27,6 +28,40 @@ func RegisterFS(reg *Registry, sandbox *security.Sandbox) {
 		GroupFS, RiskModerate, "builtin", fsList(sandbox))
 }
 
+// binaryFileExts lists extensions that are binary and shouldn't be read as text.
+var binaryFileExts = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".bmp": true,
+	".ico": true, ".webp": true, ".svg": true, ".tiff": true, ".tif": true,
+	".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true,
+	".7z": true, ".rar": true, ".zst": true,
+	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
+	".ppt": true, ".pptx": true, ".odt": true, ".ods": true, ".odp": true,
+	".exe": true, ".dll": true, ".so": true, ".dylib": true, ".bin": true,
+	".o": true, ".a": true, ".lib": true,
+	".class": true, ".jar": true, ".war": true,
+	".wasm": true, ".pyc": true, ".pyo": true,
+	".mp3": true, ".mp4": true, ".avi": true, ".mkv": true, ".mov": true,
+	".wav": true, ".flac": true, ".ogg": true, ".webm": true, ".m4a": true,
+	".ttf": true, ".otf": true, ".woff": true, ".woff2": true, ".eot": true,
+	".sqlite": true, ".db": true, ".mdb": true,
+}
+
+// isBinaryFileExt returns true if the file extension indicates a binary file.
+func isBinaryFileExt(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return binaryFileExts[ext]
+}
+
+// BinaryFileExtensions returns a sorted list of known binary extensions (for testing).
+func BinaryFileExtensions() []string {
+	exts := make([]string, 0, len(binaryFileExts))
+	for ext := range binaryFileExts {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+	return exts
+}
+
 func fsRead(sandbox *security.Sandbox) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
@@ -34,6 +69,17 @@ func fsRead(sandbox *security.Sandbox) ToolFunc {
 		}
 		if err := json.Unmarshal(input, &params); err != nil {
 			return errorResult("invalid input: " + err.Error()), nil
+		}
+
+		// Check for binary file extension before reading.
+		if isBinaryFileExt(params.Path) {
+			ext := strings.ToLower(filepath.Ext(params.Path))
+			hint := "Use execute_command to inspect binary files."
+			if ext == ".pdf" || ext == ".doc" || ext == ".docx" {
+				hint = "Use read_document for PDFs and documents."
+			}
+			return errorResult(fmt.Sprintf(
+				"Binary file detected (%s). %s", ext, hint)), nil
 		}
 
 		resolved, err := sandbox.Resolve(params.Path)
@@ -49,7 +95,7 @@ func fsRead(sandbox *security.Sandbox) ToolFunc {
 		// Truncate large files.
 		content := string(data)
 		if len(content) > maxOutputBytes {
-			content = content[:maxOutputBytes] + "\n... [truncated at 16KB — full output too large for context]"
+			content = content[:maxOutputBytes] + fmt.Sprintf("\n... [truncated at %dKB]", maxOutputBytes/1000)
 		}
 
 		return &canonical.ToolResult{Content: content}, nil

@@ -403,6 +403,66 @@ func TestAssembleSystemPrompt_WithVoiceLanguage(t *testing.T) {
 	}
 }
 
+func TestAssembleSystemPrompt_WithTeamLead(t *testing.T) {
+	cfg := &AgentConfig{
+		Identity: Identity{Name: "LeadBot", Role: "team lead"},
+		TeamInfo: &TeamInfo{
+			TeamID:   "team-1",
+			TeamName: "Content Team",
+			Role:     "lead",
+			LeadName: "LeadBot",
+			Members: []TeamMemberInfo{
+				{AgentID: "lead-bot", DisplayName: "LeadBot", Role: "lead", Description: "Team lead"},
+				{AgentID: "researcher", DisplayName: "Researcher", Role: "member", Description: "Handles research"},
+				{AgentID: "writer", DisplayName: "Writer", Role: "member", Description: "Writes articles"},
+			},
+		},
+	}
+
+	prompt := AssembleSystemPrompt(cfg)
+	if !contains(prompt, "## Team: Content Team") {
+		t.Error("prompt should contain team header")
+	}
+	if !contains(prompt, "Role: lead") {
+		t.Error("prompt should contain lead role")
+	}
+	if !contains(prompt, "**Researcher** `researcher` (member): Handles research") {
+		t.Error("prompt should contain member listing")
+	}
+	if !contains(prompt, "team_tasks") {
+		t.Error("prompt should reference team_tasks tool")
+	}
+	if !contains(prompt, "team-task-result") {
+		t.Error("prompt should contain injection warning")
+	}
+}
+
+func TestAssembleSystemPrompt_WithTeamMember(t *testing.T) {
+	cfg := &AgentConfig{
+		Identity: Identity{Name: "Researcher", Role: "research agent"},
+		TeamInfo: &TeamInfo{
+			TeamID:   "team-1",
+			TeamName: "Content Team",
+			Role:     "member",
+			LeadName: "LeadBot",
+		},
+	}
+
+	prompt := AssembleSystemPrompt(cfg)
+	if !contains(prompt, "## Team: Content Team") {
+		t.Error("prompt should contain team header")
+	}
+	if !contains(prompt, "Role: member") {
+		t.Error("prompt should contain member role")
+	}
+	if !contains(prompt, "**LeadBot**") {
+		t.Error("prompt should reference lead name")
+	}
+	if contains(prompt, "team-task-result") {
+		t.Error("member prompt should NOT contain injection warning")
+	}
+}
+
 func TestToRuntimeConfig_VoiceFields(t *testing.T) {
 	cfg := &AgentConfig{
 		ID:       "test",

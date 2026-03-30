@@ -22,6 +22,7 @@ type SessionStore interface {
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
 	AppendMessages(ctx context.Context, sessionID string, msgs []canonical.Message) error
 	GetMessages(ctx context.Context, sessionID string, limit int) ([]canonical.Message, error)
+	ListSessions(ctx context.Context, limit int) ([]Session, error)
 }
 
 // MemoryStore manages the memory persistence layer.
@@ -37,8 +38,10 @@ type MemoryStore interface {
 type CronStore interface {
 	CreateCronJob(ctx context.Context, agentID, schedule, prompt string) (string, error)
 	ListCronJobs(ctx context.Context) ([]CronJob, error)
+	GetCronJob(ctx context.Context, id string) (*CronJob, error)
 	GetCronLastRun(ctx context.Context, id string) (time.Time, error)
 	UpdateCronLastRun(ctx context.Context, id string, t time.Time) error
+	UpdateCronJob(ctx context.Context, id string, schedule, prompt *string) error
 	DeleteCronJob(ctx context.Context, id string) error
 }
 
@@ -67,13 +70,36 @@ type ConnectionStore interface {
 	DeleteConnection(ctx context.Context, id string) error
 }
 
-// TeamStore manages team task boards and mailboxes (v0.3+).
+// TeamStore manages teams, task boards, and mailboxes.
 type TeamStore interface {
+	// Team CRUD
+	GetTeam(ctx context.Context, teamID string) (*Team, error)
+	GetTeamByAgent(ctx context.Context, agentID string) (*Team, string, error) // Returns (team, role, err)
+	UpdateTeam(ctx context.Context, teamID string, fields map[string]any) error
+	ListTeamMembers(ctx context.Context, teamID string) ([]TeamMember, error)
+
+	// Task lifecycle
 	CreateTask(ctx context.Context, task TeamTask) (string, error)
+	GetTask(ctx context.Context, taskID string) (*TeamTask, error)
+	UpdateTask(ctx context.Context, taskID string, fields map[string]any) error
+	UpdateTaskProgress(ctx context.Context, taskID string, percent int, text string) error
 	ClaimTask(ctx context.Context, taskID, agentID string) error
 	CompleteTask(ctx context.Context, taskID string, result string) error
+	CancelTask(ctx context.Context, taskID string) error
 	UpdateTaskStatus(ctx context.Context, taskID, status string) error
 	ListTasks(ctx context.Context, teamID string, status string) ([]TeamTask, error)
+	GetTasksByParent(ctx context.Context, parentID string) ([]TeamTask, error)
+	GetBlockedTasks(ctx context.Context, teamID string) ([]TeamTask, error)
+	UnblockTasks(ctx context.Context, completedTaskID string) ([]TeamTask, error)
+	RetryTask(ctx context.Context, taskID string) error
+	SearchTasks(ctx context.Context, teamID, query string) ([]TeamTask, error)
+	NextTaskNumber(ctx context.Context, teamID string) (int, error)
+
+	// Task comments
+	CreateComment(ctx context.Context, comment TeamTaskComment) (string, error)
+	ListComments(ctx context.Context, taskID string) ([]TeamTaskComment, error)
+
+	// Team messages (legacy mailbox)
 	SendTeamMessage(ctx context.Context, msg TeamMessage) error
 	GetTeamMessages(ctx context.Context, agentID string, unreadOnly bool) ([]TeamMessage, error)
 	MarkMessageRead(ctx context.Context, messageID string) error
@@ -95,6 +121,15 @@ type MCPRegistryStore interface {
 	SetMCPSeedVersion(ctx context.Context, version int) error
 }
 
+// ModelStore manages the discovered models cache.
+type ModelStore interface {
+	UpsertDiscoveredModels(ctx context.Context, models []DiscoveredModel) error
+	ListDiscoveredModels(ctx context.Context, provider string) ([]DiscoveredModel, error)
+	ListAllDiscoveredModels(ctx context.Context) ([]DiscoveredModel, error)
+	DeleteDiscoveredModelsByProvider(ctx context.Context, provider string) error
+	GetDiscoveredModelAge(ctx context.Context, provider string) (time.Duration, error)
+}
+
 // Store composes all store interfaces.
 type Store interface {
 	SessionStore
@@ -105,6 +140,7 @@ type Store interface {
 	TeamStore
 	ConnectionStore
 	MCPRegistryStore
+	ModelStore
 	DB() *sql.DB
 	Close() error
 }

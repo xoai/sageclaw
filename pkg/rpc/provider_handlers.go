@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/xoai/sageclaw/pkg/provider"
 	"github.com/xoai/sageclaw/pkg/provider/anthropic"
@@ -15,33 +17,11 @@ import (
 	provgithub "github.com/xoai/sageclaw/pkg/provider/github"
 	"github.com/xoai/sageclaw/pkg/provider/ollama"
 	"github.com/xoai/sageclaw/pkg/provider/openai"
+	"github.com/xoai/sageclaw/pkg/provider/openaicompat"
 	"github.com/xoai/sageclaw/pkg/provider/openrouter"
+	"github.com/xoai/sageclaw/pkg/store"
+	storesqlite "github.com/xoai/sageclaw/pkg/store/sqlite"
 )
-
-// Known models per provider type for discovery.
-var knownModels = map[string][]map[string]string{
-	"anthropic": {
-		{"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "tier": "strong"},
-		{"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "tier": "fast"},
-		{"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "tier": "strong"},
-	},
-	"openai": {
-		{"id": "gpt-4o", "name": "GPT-4o", "tier": "strong"},
-		{"id": "gpt-4o-mini", "name": "GPT-4o Mini", "tier": "fast"},
-		{"id": "gpt-4.1", "name": "GPT-4.1", "tier": "strong"},
-		{"id": "gpt-4.1-mini", "name": "GPT-4.1 Mini", "tier": "fast"},
-		{"id": "gpt-4.1-nano", "name": "GPT-4.1 Nano", "tier": "fast"},
-		{"id": "o3-mini", "name": "o3-mini", "tier": "strong"},
-	},
-	"ollama": {
-		{"id": "llama3.2", "name": "Llama 3.2", "tier": "local"},
-		{"id": "mistral", "name": "Mistral", "tier": "local"},
-		{"id": "codellama", "name": "Code Llama", "tier": "local"},
-		{"id": "gemma2", "name": "Gemma 2", "tier": "local"},
-		{"id": "qwen2.5", "name": "Qwen 2.5", "tier": "local"},
-		{"id": "deepseek-r1", "name": "DeepSeek R1", "tier": "local"},
-	},
-}
 
 // --- Providers ---
 
@@ -61,6 +41,7 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 		providers = append(providers, map[string]any{
 			"id": id, "type": pType, "name": name, "base_url": baseURL,
 			"models": json.RawMessage(models), "status": status,
+			"config": json.RawMessage(config),
 			"has_key": true, "created_at": createdAt,
 		})
 	}
@@ -72,10 +53,11 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProvidersCreate(w http.ResponseWriter, r *http.Request) {
 	var p struct {
-		Type    string `json:"type"`
-		Name    string `json:"name"`
-		BaseURL string `json:"base_url"`
-		APIKey  string `json:"api_key"`
+		Type            string `json:"type"`
+		Name            string `json:"name"`
+		BaseURL         string `json:"base_url"`
+		APIKey          string `json:"api_key"`
+		TokensPerMinute int    `json:"tokens_per_minute,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -97,17 +79,17 @@ func (s *Server) handleProvidersCreate(w http.ResponseWriter, r *http.Request) {
 			p.BaseURL = "https://api.openai.com"
 		case "ollama":
 			p.BaseURL = "http://localhost:11434"
+		default:
+			// Check openaicompat registry for known base URLs.
+			if cfg := openaicompat.KnownProvider(p.Type); cfg != nil {
+				p.BaseURL = cfg.BaseURL
+			}
 		}
 	}
 
 	id := fmt.Sprintf("%s_%s", p.Type, strings.ReplaceAll(strings.ToLower(p.Name), " ", "_"))
 
-	// Get known models for this type.
-	models := knownModels[p.Type]
-	modelsJSON, _ := json.Marshal(models)
-
 	// Encrypt and store API key.
-	var apiKeyEnc []byte
 	if p.APIKey != "" {
 		if err := s.store.StoreCredential(r.Context(), "provider_"+id, []byte(p.APIKey), s.encKey); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -116,11 +98,17 @@ func (s *Server) handleProvidersCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Build config JSON with TPM.
+	tpm := p.TokensPerMinute
+	if tpm == 0 {
+		tpm = provider.DefaultTPM(p.Type)
+	}
+	configJSON := fmt.Sprintf(`{"tokens_per_minute":%d}`, tpm)
+
 	_, err := s.store.DB().ExecContext(r.Context(),
-		`INSERT INTO providers (id, type, name, base_url, api_key_enc, models, status) VALUES (?, ?, ?, ?, ?, ?, 'active')
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, base_url=excluded.base_url, api_key_enc=excluded.api_key_enc,
-		 models=excluded.models, updated_at=datetime('now')`,
-		id, p.Type, p.Name, p.BaseURL, apiKeyEnc, string(modelsJSON))
+		`INSERT INTO providers (id, type, name, base_url, config, status) VALUES (?, ?, ?, ?, ?, 'active')
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, base_url=excluded.base_url, config=excluded.config, updated_at=datetime('now')`,
+		id, p.Type, p.Name, p.BaseURL, configJSON)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": err.Error()})
@@ -130,6 +118,9 @@ func (s *Server) handleProvidersCreate(w http.ResponseWriter, r *http.Request) {
 	// Hot-reload: create provider client and register with router immediately.
 	if s.router != nil && p.APIKey != "" {
 		s.activateProvider(p.Type, p.APIKey, p.BaseURL)
+		s.router.SetProviderTPM(p.Type, tpm)
+		// Discover models async after activation.
+		go s.discoverModels(p.Type)
 	}
 
 	writeJSON(w, map[string]string{"id": id, "status": "created"})
@@ -169,18 +160,35 @@ func (s *Server) activateProvider(provType, apiKey, baseURL string) {
 		strongModel = "llama3.2:3b"
 		fastModel = "llama3.2:3b"
 	default:
-		return
+		// Try openaicompat registry for known providers (DeepSeek, xAI, Groq, etc).
+		cfg := openaicompat.KnownProvider(provType)
+		if cfg == nil {
+			// Unknown provider — create a generic openaicompat client.
+			cfg = &openaicompat.Config{Name: provType}
+		}
+		cfg.APIKey = apiKey
+		if baseURL != "" {
+			cfg.BaseURL = baseURL
+		}
+		prov = openaicompat.New(*cfg)
+		// Generic tier — use whatever model the user configures via combos.
+		strongModel = ""
+		fastModel = ""
 	}
 
 	if prov == nil {
 		return
 	}
 
+	// Register provider for combo resolution and model discovery.
+	s.router.RegisterProvider(provType, prov)
+
 	// Register with router — set tiers if not already occupied.
-	if !s.router.HasTier(provider.TierStrong) {
+	// Skip when model is empty (openaicompat providers rely on combos for model selection).
+	if strongModel != "" && !s.router.HasTier(provider.TierStrong) {
 		s.router.SetRoute(provider.TierStrong, provider.Route{Provider: prov, Model: strongModel})
 	}
-	if !s.router.HasTier(provider.TierFast) {
+	if fastModel != "" && !s.router.HasTier(provider.TierFast) {
 		s.router.SetRoute(provider.TierFast, provider.Route{Provider: prov, Model: fastModel})
 	}
 
@@ -188,6 +196,155 @@ func (s *Server) activateProvider(provType, apiKey, baseURL string) {
 	s.providerHealth[provType] = "connected"
 
 	log.Printf("provider: %s activated at runtime (hot-reload)", provType)
+}
+
+// discoverModels fetches the model list from a provider API and caches it in SQLite.
+// Safe to call concurrently — each provider's refresh is transactional.
+func (s *Server) discoverModels(provType string) {
+	if s.router == nil {
+		return
+	}
+
+	var target provider.Provider
+	s.router.ForEachProvider(func(name string, p provider.Provider) {
+		if name == provType {
+			target = p
+		}
+	})
+	if target == nil {
+		return
+	}
+
+	lister, ok := target.(provider.ModelLister)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	models, err := lister.ListModels(ctx)
+	if err != nil {
+		log.Printf("discover models: %s: %v", provType, err)
+		return
+	}
+
+	// Convert ModelInfo → DiscoveredModel.
+	discovered := make([]store.DiscoveredModel, 0, len(models))
+	for _, m := range models {
+		discovered = append(discovered, store.DiscoveredModel{
+			ID:            m.ID,
+			Provider:      m.Provider,
+			ModelID:       m.ModelID,
+			DisplayName:   m.Name,
+			ContextWindow: m.ContextWindow,
+			Capabilities:  make(map[string]bool),
+		})
+	}
+
+	// Use transactional refresh if the store supports it.
+	if sqlStore, ok := s.store.(*storesqlite.Store); ok {
+		if err := sqlStore.RefreshDiscoveredModels(context.Background(), provType, discovered); err != nil {
+			log.Printf("discover models: %s: cache write failed: %v", provType, err)
+			return
+		}
+	}
+
+	log.Printf("discover models: %s: cached %d models", provType, len(discovered))
+
+	// Re-resolve tiers from all discovered models.
+	s.resolveAllTiers()
+}
+
+// resolveAllTiers loads all discovered models, enriches with KnownModels, and resolves tiers.
+func (s *Server) resolveAllTiers() {
+	if s.router == nil {
+		return
+	}
+	all, err := s.store.ListAllDiscoveredModels(context.Background())
+	if err != nil {
+		log.Printf("resolve tiers: load models failed: %v", err)
+		return
+	}
+
+	// Build tier candidates enriched with KnownModels data.
+	candidates := make([]provider.TierCandidate, 0, len(all))
+	for _, d := range all {
+		tc := provider.TierCandidate{
+			Provider:      d.Provider,
+			ModelID:       d.ModelID,
+			ContextWindow: d.ContextWindow,
+		}
+		// Enrich from KnownModels (pricing, tier hint, context_window if missing).
+		if known := provider.FindModel(d.ID); known != nil {
+			tc.TierHint = known.Tier
+			tc.InputCost = known.InputCost
+			if tc.ContextWindow == 0 {
+				tc.ContextWindow = known.ContextWindow
+			}
+		}
+		candidates = append(candidates, tc)
+	}
+
+	s.router.ResolveAllTiers(candidates)
+}
+
+// handleProvidersUpdateConfig updates a provider's config (e.g. tokens_per_minute).
+// PATCH /api/providers/{id}/config
+func (s *Server) handleProvidersUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	remainder := extractPathParam(r.URL.Path, "/api/providers/")
+	parts := strings.SplitN(remainder, "/", 2)
+	if len(parts) < 2 || parts[1] != "config" || parts[0] == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "expected /api/providers/{id}/config"})
+		return
+	}
+	id := parts[0]
+
+	var updates map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid request"})
+		return
+	}
+
+	// Read current config.
+	var currentConfig string
+	var provType string
+	s.store.DB().QueryRowContext(r.Context(),
+		`SELECT type, config FROM providers WHERE id = ?`, id).Scan(&provType, &currentConfig)
+	if provType == "" {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "provider not found"})
+		return
+	}
+
+	// Merge updates into current config.
+	cfg := make(map[string]any)
+	json.Unmarshal([]byte(currentConfig), &cfg)
+	for k, v := range updates {
+		cfg[k] = v
+	}
+	merged, _ := json.Marshal(cfg)
+
+	if _, err := s.store.DB().ExecContext(r.Context(),
+		`UPDATE providers SET config = ?, updated_at = datetime('now') WHERE id = ?`,
+		string(merged), id); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "failed to save config"})
+		return
+	}
+
+	// Hot-reload TPM on the router.
+	if s.router != nil {
+		if tpm, ok := cfg["tokens_per_minute"]; ok {
+			if tpmFloat, ok := tpm.(float64); ok {
+				s.router.SetProviderTPM(provType, int(tpmFloat))
+			}
+		}
+	}
+
+	writeJSON(w, map[string]string{"id": id, "status": "updated"})
 }
 
 func (s *Server) handleProvidersDelete(w http.ResponseWriter, r *http.Request) {
@@ -202,9 +359,8 @@ func (s *Server) handleProvidersDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"id": id, "status": "deleted"})
 }
 
-// handleProvidersModels returns all known models with pricing and availability.
+// handleProvidersModels returns all models (discovered + known fallback) with pricing and availability.
 func (s *Server) handleProvidersModels(w http.ResponseWriter, r *http.Request) {
-	// Build set of connected providers from health.
 	connectedProviders := map[string]bool{}
 	for pName, status := range s.providerHealth {
 		if status == "connected" {
@@ -212,24 +368,73 @@ func (s *Server) handleProvidersModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Return the full known model registry with availability status.
-	var models []map[string]any
-	for _, m := range provider.KnownModels {
-		models = append(models, map[string]any{
-			"id":             m.ID,
-			"provider":       m.Provider,
-			"model_id":       m.ModelID,
-			"name":           m.Name,
-			"tier":           m.Tier,
-			"input_cost":     m.InputCost,
-			"output_cost":    m.OutputCost,
-			"cache_cost":     m.CacheCost,
-			"context_window": m.ContextWindow,
-			"available":      connectedProviders[m.Provider],
-		})
+	// 1. Load discovered models from SQLite cache.
+	discovered, dbErr := s.store.ListAllDiscoveredModels(r.Context())
+	degraded := dbErr != nil
+	if dbErr != nil {
+		log.Printf("models: failed to load discovered models: %v", dbErr)
 	}
 
-	// Load combos.
+	// 2. Build model list from discovered models, enriched with KnownModels pricing/tier.
+	var models []map[string]any
+	seen := map[string]bool{}
+	for _, d := range discovered {
+		entry := map[string]any{
+			"id": d.ID, "provider": d.Provider, "model_id": d.ModelID,
+			"name": d.DisplayName, "context_window": d.ContextWindow,
+			"max_output_tokens": d.MaxOutputTokens,
+			"available": connectedProviders[d.Provider],
+			"source":    "discovered",
+		}
+		if known := provider.FindModel(d.ID); known != nil {
+			entry["input_cost"] = known.InputCost
+			entry["output_cost"] = known.OutputCost
+			entry["cache_cost"] = known.CacheCost
+			entry["tier"] = known.Tier
+			entry["name"] = known.Name
+		}
+		// Enrich with capabilities from the registry.
+		if caps, ok := provider.LookupModelCapabilities(d.ModelID); ok {
+			entry["capabilities"] = caps
+		}
+		models = append(models, entry)
+		seen[d.ID] = true
+	}
+
+	// 3. Add KnownModels not yet discovered (fallback for unconnected providers).
+	for _, m := range provider.KnownModels {
+		if seen[m.ID] {
+			continue
+		}
+		entry := map[string]any{
+			"id": m.ID, "provider": m.Provider, "model_id": m.ModelID,
+			"name": m.Name, "tier": m.Tier,
+			"input_cost": m.InputCost, "output_cost": m.OutputCost,
+			"cache_cost": m.CacheCost, "context_window": m.ContextWindow,
+			"available": connectedProviders[m.Provider],
+			"source":    "known",
+		}
+		if caps, ok := provider.LookupModelCapabilities(m.ModelID); ok {
+			entry["capabilities"] = caps
+		}
+		models = append(models, entry)
+	}
+
+	if models == nil {
+		models = []map[string]any{}
+	}
+
+	// 4. Check staleness.
+	stale := false
+	for prov := range connectedProviders {
+		age, _ := s.store.GetDiscoveredModelAge(r.Context(), prov)
+		if age > 24*time.Hour {
+			stale = true
+			break
+		}
+	}
+
+	// 5. Load combos.
 	comboRows, err := s.store.DB().QueryContext(r.Context(),
 		`SELECT id, name, description, strategy, models, is_preset FROM combos ORDER BY is_preset DESC, name`)
 	var combos []map[string]any
@@ -254,61 +459,72 @@ func (s *Server) handleProvidersModels(w http.ResponseWriter, r *http.Request) {
 		"models":     models,
 		"combos":     combos,
 		"connected":  connectedProviders,
+		"stale":      stale,
+		"degraded":   degraded,
 		"cost_stats": provider.GlobalCacheStats.Snapshot().WithCalculations(),
 	})
 }
 
-// handleProvidersModelsLive queries connected providers for their actual available models.
+// handleProvidersModelsLive returns cached models (backward compat).
+// Supports ?force=true to trigger a synchronous refresh first.
 func (s *Server) handleProvidersModelsLive(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("force") == "true" {
+		s.refreshAllProviderModels()
+	}
+	// Delegate to the cache-based endpoint.
+	s.handleProvidersModels(w, r)
+}
+
+// handleProvidersModelsRefresh triggers model discovery for all connected providers.
+func (s *Server) handleProvidersModelsRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshed, failed := s.refreshAllProviderModels()
+	writeJSON(w, map[string]any{
+		"refreshed": refreshed,
+		"failed":    failed,
+	})
+}
+
+// refreshAllProviderModels discovers models for all connected providers.
+func (s *Server) refreshAllProviderModels() (refreshed, failed []string) {
 	if s.router == nil {
-		writeJSON(w, map[string]any{"models": []any{}})
 		return
 	}
-
-	var allModels []map[string]any
-	seen := map[string]bool{}
-
-	// Query each registered provider that implements ModelLister.
 	s.router.ForEachProvider(func(name string, p provider.Provider) {
-		lister, ok := p.(provider.ModelLister)
-		if !ok {
+		if _, ok := p.(provider.ModelLister); !ok {
 			return
 		}
-		models, err := lister.ListModels(r.Context())
-		if err != nil {
-			log.Printf("live models: %s: %v", name, err)
-			return
-		}
-		for _, m := range models {
-			if seen[m.ID] {
-				continue
-			}
-			seen[m.ID] = true
-
-			// Enrich with pricing from KnownModels if available.
-			entry := map[string]any{
-				"id":        m.ID,
-				"provider":  m.Provider,
-				"model_id":  m.ModelID,
-				"name":      m.Name,
-				"tier":      m.Tier,
-				"available": true,
-			}
-			if known := provider.FindModel(m.ModelID); known != nil {
-				entry["input_cost"] = known.InputCost
-				entry["output_cost"] = known.OutputCost
-				entry["context_window"] = known.ContextWindow
-				entry["name"] = known.Name
-				entry["tier"] = known.Tier
-			}
-			allModels = append(allModels, entry)
+		s.discoverModels(name)
+		// Check if models were actually cached.
+		models, err := s.store.ListDiscoveredModels(context.Background(), name)
+		if err == nil && len(models) > 0 {
+			refreshed = append(refreshed, name)
+		} else {
+			failed = append(failed, name)
 		}
 	})
+	return
+}
 
-	if allModels == nil {
-		allModels = []map[string]any{}
+// DiscoverAllModels runs model discovery for all connected providers concurrently.
+// Called at startup after the RPC server is created.
+func (s *Server) DiscoverAllModels() {
+	if s.router == nil {
+		return
 	}
-	writeJSON(w, map[string]any{"models": allModels})
+	go func() {
+		var providers []string
+		s.router.ForEachProvider(func(name string, p provider.Provider) {
+			if _, ok := p.(provider.ModelLister); ok {
+				providers = append(providers, name)
+			}
+		})
+		for _, name := range providers {
+			s.discoverModels(name)
+		}
+		if len(providers) > 0 {
+			log.Printf("discover models: startup discovery complete for %d providers", len(providers))
+		}
+	}()
 }
 
 // --- Combos ---
@@ -341,6 +557,7 @@ func (s *Server) handleCombosList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCombosCreate(w http.ResponseWriter, r *http.Request) {
 	var p struct {
+		ID          string          `json:"id"`
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
 		Strategy    string          `json:"strategy"`
@@ -360,13 +577,32 @@ func (s *Server) handleCombosCreate(w http.ResponseWriter, r *http.Request) {
 		p.Strategy = "priority"
 	}
 
-	id := strings.ReplaceAll(strings.ToLower(p.Name), " ", "_")
+	newID := strings.ReplaceAll(strings.ToLower(p.Name), " ", "_")
+
+	// When editing an existing combo whose name changed, delete the old row
+	// so we don't create a duplicate (the id is derived from the name).
+	if p.ID != "" && p.ID != newID {
+		s.store.DB().ExecContext(r.Context(), `DELETE FROM combos WHERE id = ? AND is_preset = 0`, p.ID)
+		if s.router != nil {
+			s.router.RemoveCombo(p.ID)
+		}
+	}
+
+	// Sanitize double-encoded models before storing.
+	modelsRaw := p.Models
+	var testModels []provider.ComboModel
+	if json.Unmarshal(modelsRaw, &testModels) != nil {
+		var unwrapped string
+		if json.Unmarshal(modelsRaw, &unwrapped) == nil {
+			modelsRaw = json.RawMessage(unwrapped)
+		}
+	}
 
 	_, err := s.store.DB().ExecContext(r.Context(),
 		`INSERT INTO combos (id, name, description, strategy, models, is_preset) VALUES (?, ?, ?, ?, ?, 0)
 		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,
 		 strategy=excluded.strategy, models=excluded.models`,
-		id, p.Name, p.Description, p.Strategy, string(p.Models))
+		newID, p.Name, p.Description, p.Strategy, string(modelsRaw))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": err.Error()})
@@ -376,13 +612,13 @@ func (s *Server) handleCombosCreate(w http.ResponseWriter, r *http.Request) {
 	// Sync combo to router for live resolution.
 	if s.router != nil {
 		var models []provider.ComboModel
-		if json.Unmarshal(p.Models, &models) == nil && len(models) > 0 {
-			s.router.SetCombo(id, provider.Combo{
+		if json.Unmarshal(modelsRaw, &models) == nil && len(models) > 0 {
+			s.router.SetCombo(newID, provider.Combo{
 				Name: p.Name, Strategy: p.Strategy, Models: models,
 			})
 		}
 	}
-	writeJSON(w, map[string]string{"id": id, "status": "created"})
+	writeJSON(w, map[string]string{"id": newID, "status": "created"})
 }
 
 func (s *Server) handleCombosDelete(w http.ResponseWriter, r *http.Request) {

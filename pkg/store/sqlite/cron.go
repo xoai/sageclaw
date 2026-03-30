@@ -46,6 +46,56 @@ func (s *Store) ListCronJobs(ctx context.Context) ([]CronJob, error) {
 	return jobs, rows.Err()
 }
 
+// GetCronJob returns a single cron job by ID.
+func (s *Store) GetCronJob(ctx context.Context, id string) (*CronJob, error) {
+	var j CronJob
+	var enabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, agent_id, schedule, prompt, enabled FROM cron_jobs WHERE id = ?`, id,
+	).Scan(&j.ID, &j.AgentID, &j.Schedule, &j.Prompt, &enabled)
+	if err != nil {
+		return nil, fmt.Errorf("cron job not found: %w", err)
+	}
+	j.Enabled = enabled == 1
+	return &j, nil
+}
+
+// UpdateCronJob updates schedule and/or prompt for a cron job.
+// Pass nil to leave a field unchanged.
+func (s *Store) UpdateCronJob(ctx context.Context, id string, schedule, prompt *string) error {
+	if schedule == nil && prompt == nil {
+		return fmt.Errorf("nothing to update: provide schedule or prompt")
+	}
+
+	var sets []string
+	var args []any
+	if schedule != nil {
+		sets = append(sets, "schedule = ?")
+		args = append(args, *schedule)
+	}
+	if prompt != nil {
+		sets = append(sets, "prompt = ?")
+		args = append(args, *prompt)
+	}
+	args = append(args, id)
+
+	query := "UPDATE cron_jobs SET " + sets[0]
+	for _, s := range sets[1:] {
+		query += ", " + s
+	}
+	query += " WHERE id = ?"
+
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("updating cron job: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("cron job not found: %s", id)
+	}
+	return nil
+}
+
 // GetCronLastRun returns the last run time for a cron job.
 func (s *Store) GetCronLastRun(ctx context.Context, id string) (time.Time, error) {
 	var lastRun *string

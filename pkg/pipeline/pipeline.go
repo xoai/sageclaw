@@ -318,17 +318,16 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 		}
 	}
 
-	// If agentID is still "default" or empty, try LoopPool configs first, then DB fallback.
+	// If agentID is still "default" or empty, try LoopPool configs.
 	if agentID == "default" || agentID == "" {
-		// Check if the LoopPool actually has a "default" config — if so, keep it.
-		if agentID == "default" && p.loopPool != nil && p.loopPool.Get("default") != nil {
+		if agentID == "default" && p.loopPool != nil && p.loopPool.GetConfig("default") != nil {
 			log.Printf("pipeline: using pipeline default agent %q (exists in pool)", agentID)
-		} else {
-			var firstAgent string
-			p.store.DB().QueryRow(`SELECT id FROM agents ORDER BY id LIMIT 1`).Scan(&firstAgent)
-			log.Printf("pipeline: fallback agent from DB: %q (agentID was %q)", firstAgent, agentID)
-			if firstAgent != "" {
-				agentID = firstAgent
+		} else if p.loopPool != nil {
+			// Pick the first available agent from the pool (sorted alphabetically).
+			ids := p.loopPool.AgentIDs()
+			if len(ids) > 0 {
+				agentID = ids[0]
+				log.Printf("pipeline: fallback to first available agent %q (original was %q)", agentID, "default")
 			}
 		}
 	}
@@ -457,7 +456,22 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 	// S5: Agent loop — select the right loop for this agent.
 	loop := p.loopPool.Get(req.AgentID)
 	if loop == nil {
-		log.Printf("pipeline: no agent loop for %s, skipping", req.AgentID)
+		log.Printf("pipeline: no agent loop for %s, sending error to user", req.AgentID)
+		// Send error feedback to user instead of silently dropping.
+		if sess, err := p.store.GetSession(ctx, req.SessionID); err == nil && sess != nil {
+			p.bus.PublishOutbound(ctx, bus.Envelope{
+				Channel: sess.Channel,
+				ChatID:  sess.ChatID,
+				Kind:    sess.Kind,
+				Messages: []canonical.Message{{
+					Role: "assistant",
+					Content: []canonical.Content{{
+						Type: "text",
+						Text: fmt.Sprintf("Agent %q is not available. Please check the agent configuration or rebind this channel to an existing agent.", req.AgentID),
+					}},
+				}},
+			})
+		}
 		return
 	}
 

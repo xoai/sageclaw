@@ -40,6 +40,28 @@ type AgentConfig struct {
 	Channels  ChannelsConfig  `json:"channels" yaml:"channels"`
 	Skills    SkillsConfig    `json:"skills" yaml:"skills"`
 	Voice     VoiceConfig     `json:"voice" yaml:"voice"`
+
+	// TeamInfo is populated at runtime for agents that belong to a team.
+	// Set by the caller before calling AssembleSystemPrompt.
+	TeamInfo *TeamInfo `json:"-" yaml:"-"`
+}
+
+// TeamInfo holds team context for system prompt injection.
+type TeamInfo struct {
+	TeamID      string
+	TeamName    string
+	Description string
+	Role        string // "lead" or "member"
+	LeadName    string // Display name of the lead agent
+	Members     []TeamMemberInfo
+}
+
+// TeamMemberInfo describes a team member for prompt injection.
+type TeamMemberInfo struct {
+	AgentID     string
+	DisplayName string
+	Role        string // "lead" or "member"
+	Description string
 }
 
 // Identity defines who the agent is (identity.yaml).
@@ -47,8 +69,11 @@ type Identity struct {
 	Name          string   `json:"name" yaml:"name"`
 	Role          string   `json:"role" yaml:"role"`
 	Model         string   `json:"model" yaml:"model"`                     // Tier (strong/fast/local) or model ID
-	MaxTokens     int      `json:"max_tokens" yaml:"max_tokens"`
-	MaxIterations int      `json:"max_iterations" yaml:"max_iterations"`
+	MaxTokens        int      `json:"max_tokens" yaml:"max_tokens"`
+	MaxIterations    int      `json:"max_iterations" yaml:"max_iterations"`
+	MaxRequestTokens int      `json:"max_request_tokens" yaml:"max_request_tokens"` // Hard cap on input tokens per API request (0 = no cap).
+	TokensPerMinute  int      `json:"tokens_per_minute,omitempty" yaml:"tokens_per_minute"` // Agent-level TPM override. 0 = use provider default.
+	ThinkingLevel string   `json:"thinking_level,omitempty" yaml:"thinking_level"` // "low", "medium", "high" — enables extended thinking on supported models.
 	Avatar        string   `json:"avatar" yaml:"avatar"`                   // Emoji or URL
 	Tags          []string `json:"tags" yaml:"tags"`
 	Status        string   `json:"status" yaml:"status"`                   // "active" (default), "inactive"
@@ -70,6 +95,20 @@ type ToolsConfig struct {
 
 	// MCPServers defines external MCP server connections.
 	MCPServers map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers"`
+
+	// ExecSecurity controls command execution approval: "deny", "safe-only", "ask".
+	// Default: "safe-only" — auto-approves safe commands, blocks others.
+	ExecSecurity string `json:"exec_security,omitempty" yaml:"exec_security"`
+
+	// ExecAllowlist adds or overrides safe binaries for exec approval.
+	// Merged on top of tool.DefaultSafeBinaries. Set a binary to false to block it.
+	ExecAllowlist map[string]bool `json:"exec_allowlist,omitempty" yaml:"exec_allowlist"`
+
+	// Grounding enables search grounding. Values: "google_search" (Gemini), "web_search" (OpenAI).
+	Grounding string `json:"grounding,omitempty" yaml:"grounding"`
+
+	// CodeExecution enables native code execution (Gemini code_execution tool).
+	CodeExecution bool `json:"code_execution,omitempty" yaml:"code_execution"`
 
 	// Config holds per-tool configuration overrides.
 	Config map[string]map[string]any `json:"config,omitempty" yaml:"config"`

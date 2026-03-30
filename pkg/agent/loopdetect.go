@@ -81,10 +81,10 @@ func (s *ToolLoopState) Check(name string, args json.RawMessage, result string) 
 		}
 	}
 	if identicalCount >= 5 {
-		return LoopKill, fmt.Sprintf("Identical loop: %s called %d times with same args and result", name, identicalCount)
+		return LoopKill, fmt.Sprintf("Identical loop: %s called %d times with same args and result. Stopping.", name, identicalCount)
 	}
 	if identicalCount >= 3 {
-		return LoopWarn, fmt.Sprintf("You've called %s %d times with identical results. Try a different approach.", name, identicalCount)
+		return LoopWarn, fmt.Sprintf("You've called %s %d times with identical results. Try a different approach or tool.", name, identicalCount)
 	}
 
 	// Strategy 2: Same-result loop — same tool, different args, identical result.
@@ -95,7 +95,7 @@ func (s *ToolLoopState) Check(name string, args json.RawMessage, result string) 
 		}
 	}
 	if sameResultCount >= 6 {
-		return LoopKill, fmt.Sprintf("Same-result loop: %s returning identical results for %d different inputs", name, sameResultCount)
+		return LoopKill, fmt.Sprintf("Same-result loop: %s returning identical results for %d different inputs. Stopping.", name, sameResultCount)
 	}
 	if sameResultCount >= 4 {
 		return LoopWarn, fmt.Sprintf("Different inputs to %s are producing the same result. The approach may not be working.", name)
@@ -106,7 +106,7 @@ func (s *ToolLoopState) Check(name string, args json.RawMessage, result string) 
 		uniquenessRatio := float64(len(s.streakUniq)) / float64(s.streakLen)
 
 		if uniquenessRatio > 0.6 {
-			// Exploration mode: reading many different things — lenient.
+			// Exploration mode: reading many different things — moderate.
 			if s.streakLen >= 36 {
 				return LoopKill, "Extended read-only exploration without any action"
 			}
@@ -129,12 +129,13 @@ func (s *ToolLoopState) Check(name string, args json.RawMessage, result string) 
 
 // mutatingTools lists tools that create or modify state.
 var mutatingTools = map[string]bool{
-	"write_file":  true,
-	"edit_file":   true,
-	"create_file": true,
-	"exec":        true,
+	"write_file":    true,
+	"edit_file":     true,
+	"create_file":   true,
 	"memory_write":  true,
 	"memory_delete": true,
+	// exec is intentionally excluded — it's ambiguous (could be read-only like "ls"
+	// or mutating like "rm"). GoClaw treats it as neutral.
 }
 
 // IsMutating returns true if the tool creates or modifies state.

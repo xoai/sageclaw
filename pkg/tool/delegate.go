@@ -84,3 +84,22 @@ type agentIDKey struct{}
 func WithAgentID(ctx context.Context, agentID string) context.Context {
 	return context.WithValue(ctx, agentIDKey{}, agentID)
 }
+
+// IterationInfo carries iteration progress for adaptive tool behavior.
+type IterationInfo struct {
+	Current int // 0-based current iteration
+	Max     int // max iterations for this run
+}
+
+type iterationKey struct{}
+
+// WithIteration adds iteration progress to context.
+func WithIteration(ctx context.Context, info IterationInfo) context.Context {
+	return context.WithValue(ctx, iterationKey{}, info)
+}
+
+// GetIteration returns iteration progress from context, if set.
+func GetIteration(ctx context.Context) (IterationInfo, bool) {
+	info, ok := ctx.Value(iterationKey{}).(IterationInfo)
+	return info, ok
+}

@@ -107,6 +107,63 @@ var AllDenyGroups = map[string]DenyGroup{
 			regexp.MustCompile(`/sys/kernel/`),
 		},
 	},
+	"crypto_mining": {
+		Name: "crypto_mining",
+		Patterns: []*regexp.Regexp{
+			regexp.MustCompile(`\bxmrig\b`),
+			regexp.MustCompile(`\bminerd\b`),
+			regexp.MustCompile(`\bcpuminer\b`),
+			regexp.MustCompile(`stratum\+tcp://`),
+			regexp.MustCompile(`\bcgminer\b`),
+			regexp.MustCompile(`\bbfgminer\b`),
+		},
+	},
+	"filter_bypass": {
+		Name: "filter_bypass",
+		Patterns: []*regexp.Regexp{
+			regexp.MustCompile(`\$\(.*\)\s*\|\s*(sh|bash)`), // command substitution piped to shell
+			regexp.MustCompile("`.+`\\s*\\|\\s*(sh|bash)"),  // backtick substitution piped to shell
+			regexp.MustCompile(`\$\{.*#.*\}`),               // parameter manipulation
+			regexp.MustCompile(`\\x[0-9a-fA-F]{2}`),        // hex encoding
+			regexp.MustCompile(`\$'\\.+'`),                  // ANSI-C quoting
+			regexp.MustCompile(`\bxxd\b.*\|\s*(sh|bash)`),   // hex decode to shell
+		},
+	},
+	"package_install": {
+		Name: "package_install",
+		Patterns: []*regexp.Regexp{
+			regexp.MustCompile(`\bapt(-get)?\s+install\b`),
+			regexp.MustCompile(`\byum\s+install\b`),
+			regexp.MustCompile(`\bdnf\s+install\b`),
+			regexp.MustCompile(`\bpacman\s+-S\b`),
+			regexp.MustCompile(`\bbrew\s+install\b`),
+			regexp.MustCompile(`\bsnap\s+install\b`),
+			regexp.MustCompile(`\bpip\s+install\b`),
+			regexp.MustCompile(`\bnpm\s+install\s+-g\b`),
+		},
+	},
+	"persistence": {
+		Name: "persistence",
+		Patterns: []*regexp.Regexp{
+			regexp.MustCompile(`\bcrontab\b`),
+			regexp.MustCompile(`/etc/cron`),
+			regexp.MustCompile(`\bsystemctl\s+(enable|start)\b`),
+			regexp.MustCompile(`/etc/init\.d/`),
+			regexp.MustCompile(`\.bashrc`),
+			regexp.MustCompile(`\.bash_profile`),
+			regexp.MustCompile(`\.profile`),
+			regexp.MustCompile(`/etc/rc\.local`),
+		},
+	},
+	"process_control": {
+		Name: "process_control",
+		Patterns: []*regexp.Regexp{
+			regexp.MustCompile(`\bkill\s+-9\b`),
+			regexp.MustCompile(`\bkillall\b`),
+			regexp.MustCompile(`\bpkill\b`),
+			regexp.MustCompile(`\bsignal\s+SIGKILL\b`),
+		},
+	},
 }
 
 // DenyGroupNames returns all available deny group names.
@@ -116,6 +173,21 @@ func DenyGroupNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// ResolveDenyPatterns collects all deny patterns from enabled groups.
+// disabledGroups follows the same convention as CheckCommand: a group is
+// disabled when its value is false (i.e., {"crypto_mining": false} disables it).
+// Nil means all groups enabled.
+func ResolveDenyPatterns(disabledGroups map[string]bool) []*regexp.Regexp {
+	var patterns []*regexp.Regexp
+	for groupName, group := range AllDenyGroups {
+		if disabled, ok := disabledGroups[groupName]; ok && !disabled {
+			continue
+		}
+		patterns = append(patterns, group.Patterns...)
+	}
+	return patterns
 }
 
 // CheckCommand returns an error if the command matches any enabled deny pattern.

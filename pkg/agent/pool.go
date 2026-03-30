@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -92,6 +93,41 @@ func (p *LoopPool) RemoveConfig(agentID string) {
 	defer p.mu.Unlock()
 	delete(p.configs, agentID)
 	delete(p.loops, agentID)
+}
+
+// GetConfig returns a copy of the config for an agent without creating a Loop.
+// Returns nil if no config exists.
+func (p *LoopPool) GetConfig(agentID string) *Config {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	cfg, ok := p.configs[agentID]
+	if !ok {
+		return nil
+	}
+	return &cfg
+}
+
+// AgentIDs returns a sorted list of all agent IDs that have configs loaded.
+func (p *LoopPool) AgentIDs() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	ids := make([]string, 0, len(p.configs))
+	for id := range p.configs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// NewTaskLoop creates a fresh, ephemeral Loop for a member agent task execution.
+// Unlike Get(), this always creates a new Loop (not pooled/cached).
+// Used by TeamExecutor to run isolated task sessions.
+func (p *LoopPool) NewTaskLoop(agentID string) *Loop {
+	cfg := p.GetConfig(agentID)
+	if cfg == nil {
+		return nil
+	}
+	return NewLoop(*cfg, p.provider, p.toolRegistry, p.preContext, p.postTool, p.onEvent, p.opts...)
 }
 
 // InjectAll broadcasts a message to all active loops' inject channels.

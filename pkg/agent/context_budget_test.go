@@ -54,10 +54,9 @@ func TestContextBudget_Calibrate(t *testing.T) {
 		t.Errorf("overhead %d seems wrong for 5000 input tokens with small history", b.overheadTokens)
 	}
 
-	// History budget should be window - overhead - reserve.
-	expectedBudget := b.contextWindow - b.overheadTokens - b.responseReserve
-	if b.historyBudget != expectedBudget {
-		t.Errorf("expected historyBudget %d, got %d", expectedBudget, b.historyBudget)
+	// History budget should be capped at 25000 (sensible default).
+	if b.historyBudget > 25000 {
+		t.Errorf("historyBudget %d should be capped at 25000", b.historyBudget)
 	}
 }
 

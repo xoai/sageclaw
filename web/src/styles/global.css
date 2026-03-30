@@ -584,7 +584,7 @@ button { font-family: var(--sans); }
 /* Info tooltip */
 .info-tip { display: inline-block; position: relative; cursor: help; margin-left: 4px; }
 .info-tip-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; background: var(--border); color: var(--text-muted); font-size: 10px; font-weight: 700; font-style: normal; vertical-align: middle; }
-.info-tip-text { display: none; position: absolute; bottom: calc(100% + 6px); left: 0; background: var(--text); color: var(--bg); font-size: 11px; padding: 8px 12px; border-radius: 6px; white-space: normal; max-width: 360px; min-width: 200px; z-index: var(--z-tooltip); font-weight: 400; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.info-tip-text { display: none; position: absolute; bottom: calc(100% + 6px); right: 0; background: var(--text); color: var(--bg); font-size: 11px; padding: 8px 12px; border-radius: 6px; white-space: normal; max-width: min(360px, 80vw); min-width: 180px; z-index: var(--z-tooltip); font-weight: 400; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
 .info-tip:hover .info-tip-text { display: block; }
 
 /* Toast notification */
@@ -876,6 +876,47 @@ button { font-family: var(--sans); }
   .table td, .table th, .data-table td, .data-table th { padding: 8px; font-size: 12px; }
 }
 
+/* ─── Kanban Board ─── */
+.kanban-board {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  min-height: 300px;
+}
+.kanban-column {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+}
+.kanban-column-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  border-radius: 8px 8px 0 0;
+  z-index: 1;
+}
+.kanban-column-body {
+  padding: 8px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Kanban responsive: stack columns on narrow screens */
+@media (max-width: 1200px) {
+  .kanban-board { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 768px) {
+  .kanban-board { grid-template-columns: 1fr; }
+}
+
 /* ─── Responsive: small mobile (< 480px) ─── */
 @media (max-width: 480px) {
   .content { padding: 8px; padding-top: 48px; }
@@ -888,3 +929,37 @@ button { font-family: var(--sans); }
 
   .message { max-width: 100%; padding: 10px 12px; font-size: 13px; }
 }
+
+/* Model Picker */
+.model-picker { position: relative; }
+.model-picker-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
+  max-height: 360px; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12); margin-top: 4px;
+}
+.model-picker-group { padding: 4px 0; border-bottom: 1px solid var(--border); }
+.model-picker-group:last-child { border-bottom: none; }
+.model-picker-group-label {
+  padding: 6px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  color: var(--text-secondary); letter-spacing: 0.5px;
+  display: flex; align-items: center; gap: 6px;
+}
+.model-picker-item {
+  padding: 8px 12px; cursor: pointer; display: flex; align-items: center;
+  justify-content: space-between; gap: 8px; font-size: 13px;
+  transition: background 0.1s;
+}
+.model-picker-item:hover { background: var(--surface-hover); }
+.model-picker-item.selected { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.model-picker-item.unavailable { opacity: 0.5; }
+.model-picker-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-meta { font-size: 11px; color: var(--text-secondary); white-space: nowrap; display: flex; gap: 6px; align-items: center; }
+.model-picker-tier {
+  padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;
+  background: color-mix(in srgb, var(--primary) 15%, transparent); color: var(--primary);
+}
+.model-picker-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); display: inline-block;
+}
+.model-picker-dot.connected { background: var(--success); }

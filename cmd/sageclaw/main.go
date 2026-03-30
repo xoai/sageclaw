@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xoai/sageclaw/pkg/agent"
@@ -51,6 +52,7 @@ import (
 	"github.com/xoai/sageclaw/pkg/skillstore"
 	"github.com/xoai/sageclaw/pkg/store"
 	"github.com/xoai/sageclaw/pkg/store/sqlite"
+	"github.com/xoai/sageclaw/pkg/team"
 	"github.com/xoai/sageclaw/pkg/tool"
 	"github.com/xoai/sageclaw/pkg/tui"
 	"github.com/xoai/sageclaw/pkg/tunnel"
@@ -213,6 +215,9 @@ func run() error {
 	// --- Environment ---
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 	openaiKey := os.Getenv("OPENAI_API_KEY")
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	openrouterKey := os.Getenv("OPENROUTER_API_KEY")
+	githubToken := os.Getenv("GITHUB_COPILOT_TOKEN")
 	telegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	discordToken := os.Getenv("DISCORD_BOT_TOKEN")
 	zaloOAID := os.Getenv("ZALO_OA_ID")
@@ -287,16 +292,49 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("encryption key: %w", err)
 	}
-	if anthropicKey == "" {
-		if key, err := appStore.GetCredential(initCtx, "provider_anthropic_anthropic", encKey); err == nil && len(key) > 0 {
-			anthropicKey = string(key)
-			log.Println("provider: anthropic key loaded from database")
-		}
-	}
-	if openaiKey == "" {
-		if key, err := appStore.GetCredential(initCtx, "provider_openai_openai", encKey); err == nil && len(key) > 0 {
-			openaiKey = string(key)
-			log.Println("provider: openai key loaded from database")
+	// Load provider keys from DB — scan the providers table to support custom names.
+	{
+		rows, err := appStore.DB().QueryContext(initCtx, `SELECT id, type FROM providers WHERE status = 'active'`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id, pType string
+				if rows.Scan(&id, &pType) != nil {
+					continue
+				}
+				credKey := "provider_" + id
+				key, err := appStore.GetCredential(initCtx, credKey, encKey)
+				if err != nil || len(key) == 0 {
+					continue
+				}
+				switch pType {
+				case "anthropic":
+					if anthropicKey == "" {
+						anthropicKey = string(key)
+						log.Printf("provider: anthropic key loaded from database (%s)", id)
+					}
+				case "openai":
+					if openaiKey == "" {
+						openaiKey = string(key)
+						log.Printf("provider: openai key loaded from database (%s)", id)
+					}
+				case "gemini":
+					if geminiKey == "" {
+						geminiKey = string(key)
+						log.Printf("provider: gemini key loaded from database (%s)", id)
+					}
+				case "openrouter":
+					if openrouterKey == "" {
+						openrouterKey = string(key)
+						log.Printf("provider: openrouter key loaded from database (%s)", id)
+					}
+				case "github":
+					if githubToken == "" {
+						githubToken = string(key)
+						log.Printf("provider: github key loaded from database (%s)", id)
+					}
+				}
+			}
 		}
 	}
 	if telegramToken == "" {
@@ -349,13 +387,6 @@ func run() error {
 	}
 
 	// Gemini.
-	geminiKey := os.Getenv("GEMINI_API_KEY")
-	if geminiKey == "" {
-		if key, err := appStore.GetCredential(initCtx, "provider_gemini_gemini", encKey); err == nil && len(key) > 0 {
-			geminiKey = string(key)
-			log.Println("provider: gemini key loaded from database")
-		}
-	}
 	var geminiClient *gemini.Client
 	if geminiKey != "" {
 		geminiClient = gemini.NewClient(geminiKey)
@@ -370,13 +401,6 @@ func run() error {
 	}
 
 	// OpenRouter.
-	openrouterKey := os.Getenv("OPENROUTER_API_KEY")
-	if openrouterKey == "" {
-		if key, err := appStore.GetCredential(initCtx, "provider_openrouter_openrouter", encKey); err == nil && len(key) > 0 {
-			openrouterKey = string(key)
-			log.Println("provider: openrouter key loaded from database")
-		}
-	}
 	if openrouterKey != "" {
 		orp := openrouter.NewClient(openrouterKey)
 		orpClient = orp
@@ -392,13 +416,6 @@ func run() error {
 	}
 
 	// GitHub Copilot.
-	githubToken := os.Getenv("GITHUB_COPILOT_TOKEN")
-	if githubToken == "" {
-		if key, err := appStore.GetCredential(initCtx, "provider_github_github", encKey); err == nil && len(key) > 0 {
-			githubToken = string(key)
-			log.Println("provider: github copilot token loaded from database")
-		}
-	}
 	if githubToken != "" {
 		ghp := github.NewClient(githubToken)
 		if _, exists := routes[provider.TierStrong]; !exists {
@@ -413,7 +430,8 @@ func run() error {
 	// Ollama (local).
 	ctx := context.Background()
 	ollamaClient := ollama.New()
-	if ollamaClient.Healthy(ctx) {
+	ollamaHealthy := ollamaClient.Healthy(ctx)
+	if ollamaHealthy {
 		routes[provider.TierLocal] = provider.Route{Provider: ollamaClient, Model: "llama3.2:3b"}
 		if defaultProvider == nil {
 			defaultProvider = ollamaClient
@@ -461,52 +479,102 @@ func run() error {
 			return fmt.Errorf("creating router: %w", err)
 		}
 		log.Printf("router: tiers=%v fallback=%s", router.Tiers(), router.Fallback())
+	} else {
+		// Create empty router so hot-reload from dashboard works (providers added via UI).
+		router = provider.NewEmptyRouter()
+		log.Println("router: empty (providers can be added via dashboard)")
+	}
 
-		// Register providers for model discovery and combo resolution.
-		if apClient != nil {
-			router.RegisterProvider("anthropic", apClient)
-		}
-		if opClient != nil {
-			router.RegisterProvider("openai", opClient)
-		}
-		if gpClient != nil {
-			router.RegisterProvider("gemini", gpClient)
-		}
-		if orpClient != nil {
-			router.RegisterProvider("openrouter", orpClient)
-		}
+	// Register providers for combo resolution and model discovery.
+	// Must run for ALL routers — not just the empty router path.
+	if apClient != nil {
+		router.RegisterProvider("anthropic", apClient)
+	}
+	if opClient != nil {
+		router.RegisterProvider("openai", opClient)
+	}
+	if gpClient != nil {
+		router.RegisterProvider("gemini", gpClient)
+	}
+	if orpClient != nil {
+		router.RegisterProvider("openrouter", orpClient)
+	}
 
-		// Load combos from DB into the router.
-		comboRows, err := appStore.DB().Query(
-			`SELECT id, name, strategy, models FROM combos ORDER BY name`)
-		if err == nil {
-			defer comboRows.Close()
-			for comboRows.Next() {
-				var id, name, strategy, modelsJSON string
-				comboRows.Scan(&id, &name, &strategy, &modelsJSON)
-				var models []provider.ComboModel
-				if json.Unmarshal([]byte(modelsJSON), &models) == nil && len(models) > 0 {
-					router.SetCombo(id, provider.Combo{
-						Name:     name,
-						Strategy: strategy,
-						Models:   models,
-					})
+	// Load combos from DB into the router (must run for ALL routers, not just empty).
+	if comboRows, err := appStore.DB().Query(
+		`SELECT id, name, strategy, models FROM combos ORDER BY name`); err == nil {
+		for comboRows.Next() {
+			var id, name, strategy, modelsJSON string
+			comboRows.Scan(&id, &name, &strategy, &modelsJSON)
+			var models []provider.ComboModel
+			if json.Unmarshal([]byte(modelsJSON), &models) != nil {
+				// Handle double-encoded JSON strings from earlier frontend bug.
+				var unwrapped string
+				if json.Unmarshal([]byte(modelsJSON), &unwrapped) == nil {
+					json.Unmarshal([]byte(unwrapped), &models)
 				}
 			}
+			if len(models) > 0 {
+				router.SetCombo(id, provider.Combo{
+					Name:     name,
+					Strategy: strategy,
+					Models:   models,
+				})
+			}
 		}
+		comboRows.Close()
+	}
+
+	// Load per-provider TPM from DB config.
+	if tpmRows, err := appStore.DB().QueryContext(initCtx,
+		`SELECT type, config FROM providers WHERE status = 'active'`); err == nil {
+		for tpmRows.Next() {
+			var pType, cfgJSON string
+			if tpmRows.Scan(&pType, &cfgJSON) != nil {
+				continue
+			}
+			var cfg struct {
+				TokensPerMinute int `json:"tokens_per_minute"`
+			}
+			if json.Unmarshal([]byte(cfgJSON), &cfg) == nil && cfg.TokensPerMinute > 0 {
+				router.SetProviderTPM(pType, cfg.TokensPerMinute)
+			} else {
+				router.SetProviderTPM(pType, provider.DefaultTPM(pType))
+			}
+		}
+		tpmRows.Close()
 	}
 
 	// --- Tool registry ---
 	toolReg := tool.NewRegistry()
 	tool.RegisterFS(toolReg, sandbox)
+	tool.RegisterEdit(toolReg, sandbox)
 	tool.RegisterExec(toolReg, sandbox.Root())
-	tool.RegisterWeb(toolReg)
+	browserMgr := tool.NewBrowserManager(filepath.Join(f.workspace, "screenshots"))
+	fetchCache := tool.NewToolCache(15*time.Minute, 200)
+	searchCache := tool.NewToolCache(60*time.Minute, 200)
+	extractorChain := tool.NewDefaultChain("") // No Defuddle endpoint by default.
+	tool.RegisterWeb(toolReg, &tool.WebConfig{
+		FetchCache:      fetchCache,
+		SearchCache:     searchCache,
+		ExtractorChain:  extractorChain,
+		BrowserFallback: browserMgr, // Headless browser fallback for JS-heavy pages.
+	})
 	tool.RegisterMemory(toolReg, memEngine)
-	tool.RegisterGraph(toolReg, graphOps)
+	tool.RegisterGraph(toolReg, graphOps, memEngine)
 	tool.RegisterCron(toolReg, appStore)
 	tool.RegisterSpawn(toolReg)
 	tool.RegisterPlan(toolReg)
 	tool.RegisterSkillLoader(toolReg, skillsDir)
+	tool.RegisterDatetime(toolReg)
+	tool.RegisterSessions(toolReg, appStore)
+	tool.RegisterBrowser(toolReg, browserMgr)
+	// Build provider chain for media tools (vision, document, image gen).
+	var mediaProviders []provider.Provider
+	router.ForEachProvider(func(_ string, p provider.Provider) {
+		mediaProviders = append(mediaProviders, p)
+	})
+	tool.RegisterMedia(toolReg, sandbox, mediaProviders)
 
 	// --- Agent configs (file-first, with DB/YAML fallback) ---
 	agentsDir := filepath.Join(f.workspace, "agents")
@@ -653,7 +721,59 @@ Key behaviors:
 		})
 	}
 	teamMgr := orchestration.NewTeamManager(appStore, teams)
-	tool.RegisterTeam(toolReg, teamMgr)
+	// v1 team tools removed — superseded by v2 team_tasks (registered in TeamExecutor block below).
+	// tool.RegisterTeam(toolReg, teamMgr)
+	_ = teamMgr // Keep teamMgr alive for orchestration use.
+
+	// Inject team context into agent system prompts for team members.
+	for _, tc := range cfg.Teams {
+		// Build member info list.
+		allAgents := append([]string{tc.Lead}, tc.Members...)
+		var memberInfos []agentcfg.TeamMemberInfo
+		for _, aid := range allAgents {
+			role := "member"
+			if aid == tc.Lead {
+				role = "lead"
+			}
+			displayName := aid
+			desc := ""
+			if fa, ok := fileAgents[aid]; ok {
+				if fa.Identity.Name != "" {
+					displayName = fa.Identity.Name
+				}
+				desc = fa.Identity.Role
+			}
+			memberInfos = append(memberInfos, agentcfg.TeamMemberInfo{
+				AgentID:     aid,
+				DisplayName: displayName,
+				Role:        role,
+				Description: desc,
+			})
+		}
+
+		// Set TeamInfo on each agent's config.
+		leadName := tc.Lead
+		if fa, ok := fileAgents[tc.Lead]; ok && fa.Identity.Name != "" {
+			leadName = fa.Identity.Name
+		}
+		for _, aid := range allAgents {
+			if fa, ok := fileAgents[aid]; ok {
+				role := "member"
+				if aid == tc.Lead {
+					role = "lead"
+				}
+				fa.TeamInfo = &agentcfg.TeamInfo{
+					TeamID:   tc.ID,
+					TeamName: tc.Name,
+					Role:     role,
+					LeadName: leadName,
+					Members:  memberInfos,
+				}
+				// Re-assemble system prompt with team context.
+				agentConfigs[aid] = agentcfg.ToRuntimeConfig(fa)
+			}
+		}
+	}
 
 	// Handoff.
 	agentNames := map[string]string{"default": "SageClaw"}
@@ -728,6 +848,9 @@ Key behaviors:
 	var sseBroadcast func(agent.Event)
 	var telegramEventForwarder func(agent.Event)
 
+	// Forward-reference for lead wakeup (set after pipeline is created).
+	var wakeLeadFn team.WakeLeadFunc
+
 	// --- Voice messaging infrastructure ---
 	audioStoragePath := cfg.Audio.StoragePath
 	if audioStoragePath == "" {
@@ -792,34 +915,54 @@ Key behaviors:
 	}
 	loopOpts = append(loopOpts, agent.WithAudioStore(audioStore))
 
-	if !noProviders {
-		loopPool = agent.NewLoopPool(agentConfigs, defaultProvider, toolReg, preCtx, postTool,
-			func(e agent.Event) {
-				switch e.Type {
-				case agent.EventRunStarted:
-					log.Printf("[%s] run started", e.SessionID)
-				case agent.EventRunCompleted:
-					log.Printf("[%s] run completed", e.SessionID)
-				case agent.EventToolCall:
-					if e.ToolCall != nil {
-						log.Printf("[%s] tool call: %s", e.SessionID, e.ToolCall.Name)
-					}
-				case agent.EventConsentNeeded:
-					if e.Consent != nil {
-						log.Printf("[%s] consent needed: %s (%s/%s)", e.SessionID, e.Consent.ToolName, e.Consent.Group, e.Consent.RiskLevel)
-					}
-				case agent.EventRunFailed:
-					log.Printf("[%s] run failed: %v", e.SessionID, e.Error)
+	// Always create LoopPool so hot-reload from dashboard works.
+	// When no providers exist yet, defaultProvider is nil — the router handles resolution.
+	loopPool = agent.NewLoopPool(agentConfigs, defaultProvider, toolReg, preCtx, postTool,
+		func(e agent.Event) {
+			switch e.Type {
+			case agent.EventRunStarted:
+				log.Printf("[%s] run started", e.SessionID)
+			case agent.EventRunCompleted:
+				log.Printf("[%s] run completed", e.SessionID)
+			case agent.EventToolCall:
+				if e.ToolCall != nil {
+					log.Printf("[%s] tool call: %s", e.SessionID, e.ToolCall.Name)
 				}
-				// Broadcast to SSE clients (web dashboard).
-				if sseBroadcast != nil {
-					sseBroadcast(e)
+			case agent.EventConsentNeeded:
+				if e.Consent != nil {
+					log.Printf("[%s] consent needed: %s (%s/%s)", e.SessionID, e.Consent.ToolName, e.Consent.Group, e.Consent.RiskLevel)
 				}
-				// Forward streaming events to Telegram adapters.
-				if telegramEventForwarder != nil {
-					telegramEventForwarder(e)
-				}
-			}, loopOpts...)
+			case agent.EventRunFailed:
+				log.Printf("[%s] run failed: %v", e.SessionID, e.Error)
+			}
+			// Broadcast to SSE clients (web dashboard).
+			if sseBroadcast != nil {
+				sseBroadcast(e)
+			}
+			// Forward streaming events to Telegram adapters.
+			if telegramEventForwarder != nil {
+				telegramEventForwarder(e)
+			}
+		}, loopOpts...)
+
+	// --- TeamExecutor (needs LoopPool) ---
+	if loopPool != nil && len(teams) > 0 {
+		teamExec := team.NewTeamExecutor(appStore, loopPool, func(e agent.Event) {
+			if sseBroadcast != nil {
+				sseBroadcast(e)
+			}
+		})
+
+		// Progress notifier: decides when to wake the lead based on verbosity.
+		notifier := team.NewTeamProgressNotifier(appStore, teamExec, func(ctx context.Context, leadAgentID, teamID, systemMessage string) {
+			if wakeLeadFn != nil {
+				wakeLeadFn(ctx, leadAgentID, teamID, systemMessage)
+			}
+		})
+		teamExec.SetNotifier(notifier)
+
+		tool.RegisterTeamTasks(toolReg, appStore, teamExec)
+		log.Printf("team: executor created for %d teams", len(teams))
 	}
 
 	// --- Channel Pairing ---
@@ -836,6 +979,7 @@ Key behaviors:
 
 	// --- Bus + Pipeline ---
 	msgBus := localbus.New()
+	tool.RegisterMessage(toolReg, appStore, msgBus)
 
 	// Forward-declare pipeline for consent callbacks in channel factories.
 	var p *pipeline.Pipeline
@@ -971,6 +1115,29 @@ Key behaviors:
 		},
 	})
 
+	// Wire lead wakeup: creates/finds a session for the lead and dispatches a run.
+	wakeLeadFn = func(ctx context.Context, leadAgentID, teamID, systemMessage string) {
+		// Find or create an internal session for the lead's wakeup.
+		sess, err := appStore.CreateSessionWithKind(ctx, "internal", teamID, leadAgentID, "team_wakeup")
+		if err != nil {
+			log.Printf("[team] wakeup: failed to create session for %s: %v", leadAgentID, err)
+			return
+		}
+		msg := canonical.Message{
+			Role:    "user",
+			Content: []canonical.Content{{Type: "text", Text: systemMessage}},
+		}
+		req := pipeline.RunRequest{
+			SessionID: sess.ID,
+			AgentID:   leadAgentID,
+			Messages:  []canonical.Message{msg},
+			Lane:      pipeline.LaneDelegate,
+		}
+		if err := scheduler.Schedule(ctx, pipeline.LaneDelegate, req); err != nil {
+			log.Printf("[team] wakeup: failed to schedule lead run for %s: %v", leadAgentID, err)
+		}
+	}
+
 	cronRunner := pipeline.NewCronRunner(appStore, scheduler)
 
 	// --- MCP mode (early exit) ---
@@ -992,13 +1159,12 @@ Key behaviors:
 	startCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if loopPool != nil {
-		if err := p.Start(startCtx); err != nil {
-			return fmt.Errorf("starting pipeline: %w", err)
-		}
-		cronRunner.Start(startCtx)
-	} else {
-		log.Println("agent: disabled (no providers configured)")
+	if err := p.Start(startCtx); err != nil {
+		return fmt.Errorf("starting pipeline: %w", err)
+	}
+	cronRunner.Start(startCtx)
+	if noProviders {
+		log.Println("agent: no providers configured yet — add one via dashboard to start chatting")
 	}
 
 	// --- RPC + Web Dashboard (auto-start) ---
@@ -1030,7 +1196,7 @@ Key behaviors:
 	} else {
 		providerHealth["github"] = "not configured"
 	}
-	if ollamaClient.Healthy(ctx) {
+	if ollamaHealthy {
 		providerHealth["ollama"] = "connected"
 	} else {
 		providerHealth["ollama"] = "not available"
@@ -1132,6 +1298,9 @@ Key behaviors:
 		log.Printf("dashboard: http://localhost%s", rpcAddr)
 		defer rpcServer.Stop(startCtx)
 	}
+
+	// Discover models for all connected providers (non-blocking).
+	rpcServer.DiscoverAllModels()
 
 	// Wire session invalidation: rotate JWT secret when tunnel starts.
 	// This forces all existing sessions to re-login (with TOTP if enabled).

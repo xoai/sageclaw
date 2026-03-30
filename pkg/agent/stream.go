@@ -30,7 +30,10 @@ func consumeStream(
 	onEvent EventHandler,
 ) streamResult {
 	var textBuf strings.Builder
+	var thinkingBuf strings.Builder
+	var thinkingSig string
 	toolCallBuilders := map[int]*toolCallBuilder{}
+	var completeToolCalls []canonical.Content // From providers that accumulate internally.
 	var usage canonical.Usage
 	var stopReason string
 	var streamErr error
@@ -38,7 +41,20 @@ func consumeStream(
 	for ev := range stream {
 		switch ev.Type {
 		case "content_delta":
-			if ev.Delta != nil && ev.Delta.Text != "" {
+			if ev.Delta == nil {
+				continue
+			}
+			if ev.Delta.Type == "thinking" {
+				// Accumulate thinking text and signature.
+				if ev.Delta.Thinking != "" {
+					thinkingBuf.WriteString(ev.Delta.Thinking)
+				}
+				if sig, ok := ev.Delta.Meta["thinking_signature"]; ok && sig != "" {
+					thinkingSig = sig
+				}
+				continue
+			}
+			if ev.Delta.Text != "" {
 				textBuf.WriteString(ev.Delta.Text)
 				// Emit real-time delta to subscribers.
 				onEvent(Event{
@@ -50,28 +66,40 @@ func consumeStream(
 			}
 
 		case "tool_call":
-			// Tool call start or delta.
-			if ev.Delta != nil {
-				idx := ev.Index
-				b, ok := toolCallBuilders[idx]
-				if !ok {
-					b = &toolCallBuilder{}
-					toolCallBuilders[idx] = b
-				}
-				// Start event carries ID and name.
-				if ev.Delta.ToolCallID != "" {
-					b.id = ev.Delta.ToolCallID
-				}
-				if ev.Delta.ToolName != "" {
-					b.name = ev.Delta.ToolName
-				}
-				// Delta carries partial input JSON.
-				if ev.Delta.ToolInput != "" {
-					b.inputBuf.WriteString(ev.Delta.ToolInput)
-				}
-				if len(ev.Delta.ToolMeta) > 0 {
-					b.meta = ev.Delta.ToolMeta
-				}
+			if ev.Delta == nil {
+				continue
+			}
+			// Complete path: provider already accumulated the tool call.
+			if ev.Delta.ToolCall != nil {
+				completeToolCalls = append(completeToolCalls, canonical.Content{
+					Type:     "tool_call",
+					ToolCall: ev.Delta.ToolCall,
+				})
+				continue
+			}
+			// Delta path: accumulate partial fragments.
+			idx := ev.Index
+			b, ok := toolCallBuilders[idx]
+			if !ok {
+				b = &toolCallBuilder{}
+				toolCallBuilders[idx] = b
+			}
+			// Start event carries ID and name.
+			if ev.Delta.ToolCallID != "" {
+				b.id = ev.Delta.ToolCallID
+			}
+			if ev.Delta.ToolName != "" {
+				b.name = ev.Delta.ToolName
+			}
+			// Delta carries partial input JSON.
+			if ev.Delta.ToolInput != "" {
+				b.inputBuf.WriteString(ev.Delta.ToolInput)
+			}
+			// Prefer Meta over deprecated ToolMeta.
+			if len(ev.Delta.Meta) > 0 {
+				b.meta = ev.Delta.Meta
+			} else if len(ev.Delta.ToolMeta) > 0 {
+				b.meta = ev.Delta.ToolMeta
 			}
 
 		case "usage":
@@ -80,6 +108,10 @@ func consumeStream(
 				usage.OutputTokens += ev.Usage.OutputTokens
 				usage.CacheCreation += ev.Usage.CacheCreation
 				usage.CacheRead += ev.Usage.CacheRead
+			}
+			// Anthropic sends stop_reason on usage events (message_delta).
+			if ev.StopReason != "" {
+				stopReason = ev.StopReason
 			}
 
 		case "done":
@@ -100,6 +132,19 @@ func consumeStream(
 
 	// Build the complete assistant message.
 	var content []canonical.Content
+
+	// Thinking blocks go first (before text) for correct round-trip ordering.
+	if thinkingBuf.Len() > 0 {
+		c := canonical.Content{
+			Type:     "thinking",
+			Thinking: thinkingBuf.String(),
+		}
+		if thinkingSig != "" {
+			c.Meta = map[string]string{"thinking_signature": thinkingSig}
+		}
+		content = append(content, c)
+	}
+
 	if textBuf.Len() > 0 {
 		content = append(content, canonical.Content{
 			Type: "text",
@@ -107,15 +152,19 @@ func consumeStream(
 		})
 	}
 
-	// Assemble tool calls from accumulated builders.
+	// Add complete tool calls from providers that accumulate internally.
+	content = append(content, completeToolCalls...)
+
+	// Assemble tool calls from accumulated delta builders.
 	for _, b := range toolCallBuilders {
 		tc := b.build()
 		content = append(content, canonical.Content{
-			Type: "tool_use",
+			Type: "tool_call",
 			ToolCall: &canonical.ToolCall{
 				ID:    tc.ID,
 				Name:  tc.Name,
 				Input: tc.Input,
+				Meta:  tc.Meta,
 			},
 		})
 	}
@@ -144,6 +193,7 @@ func (b *toolCallBuilder) build() canonical.ToolCall {
 	if input == "" {
 		input = "{}"
 	}
+
 	return canonical.ToolCall{
 		ID:    b.id,
 		Name:  b.name,

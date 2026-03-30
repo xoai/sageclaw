@@ -311,8 +311,10 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("GET /api/providers", srv.authGuard(srv.handleProvidersList))
 	mux.HandleFunc("POST /api/providers", srv.authGuard(srv.handleProvidersCreate))
 	mux.HandleFunc("DELETE /api/providers/", srv.authGuard(srv.handleProvidersDelete))
+	mux.HandleFunc("PATCH /api/providers/", srv.authGuard(srv.handleProvidersUpdateConfig))
 	mux.HandleFunc("GET /api/providers/models", srv.authGuard(srv.handleProvidersModels))
 	mux.HandleFunc("GET /api/providers/models/live", srv.authGuard(srv.handleProvidersModelsLive))
+	mux.HandleFunc("POST /api/providers/models/refresh", srv.authGuard(srv.handleProvidersModelsRefresh))
 
 	// Combos (authenticated).
 	mux.HandleFunc("GET /api/combos", srv.authGuard(srv.handleCombosList))
@@ -329,6 +331,9 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("PUT /api/teams/", srv.authGuard(srv.handleTeamsUpdate))
 	mux.HandleFunc("DELETE /api/teams/", srv.authGuard(srv.handleTeamsDelete))
 	mux.HandleFunc("GET /api/teams/tasks/", srv.authGuard(srv.handleTeamsTasks))
+	mux.HandleFunc("POST /api/teams/tasks/", srv.authGuard(srv.handleTeamsTaskAction))
+	mux.HandleFunc("GET /api/teams/resolve-task", srv.authGuard(srv.handleTaskResolve))
+	mux.HandleFunc("GET /api/teams/attention", srv.authGuard(srv.handleTeamsAttentionCount))
 
 	// Skills (authenticated).
 	mux.HandleFunc("GET /api/skills", srv.authGuard(srv.handleSkillsList))
@@ -511,10 +516,27 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 
 	srv.httpServer = &http.Server{
 		Addr:    config.ListenAddr,
-		Handler: mux,
+		Handler: recoveryHandler(mux),
 	}
 
 	return srv
+}
+
+// recoveryHandler wraps an HTTP handler with panic recovery.
+// Without this, a panic in any handler kills the goroutine and leaves
+// the connection hanging (browser shows "pending" indefinitely).
+func recoveryHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("rpc: panic recovered in %s %s: %v", r.Method, r.URL.Path, err)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"internal server error"}`))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start begins the RPC server.
@@ -542,6 +564,17 @@ func (s *Server) EventHandler() agent.EventHandler {
 			"agent_id":   e.AgentID,
 			"text":       e.Text,
 			"iteration":  e.Iteration,
+		}
+		if e.Provider != "" {
+			payload["provider"] = e.Provider
+		}
+		if e.Model != "" {
+			payload["model"] = e.Model
+		}
+		if e.TeamData != nil {
+			payload["task_id"] = e.TeamData.TaskID
+			payload["seq"] = e.TeamData.Seq
+			payload["task"] = e.TeamData.Task
 		}
 		if e.ToolCall != nil {
 			payload["tool_call"] = e.ToolCall

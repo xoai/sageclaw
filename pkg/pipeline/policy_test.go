@@ -63,6 +63,9 @@ func (m *mockPolicyStore) AppendMessages(context.Context, string, []canonical.Me
 func (m *mockPolicyStore) GetMessages(context.Context, string, int) ([]canonical.Message, error) {
 	panic("not implemented")
 }
+func (m *mockPolicyStore) ListSessions(context.Context, int) ([]store.Session, error) {
+	panic("not implemented")
+}
 func (m *mockPolicyStore) WriteMemory(context.Context, string, string, []string) (string, bool, error) {
 	panic("not implemented")
 }
@@ -86,6 +89,12 @@ func (m *mockPolicyStore) GetCronLastRun(context.Context, string) (time.Time, er
 	panic("not implemented")
 }
 func (m *mockPolicyStore) UpdateCronLastRun(context.Context, string, time.Time) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetCronJob(context.Context, string) (*store.CronJob, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) UpdateCronJob(context.Context, string, *string, *string) error {
 	panic("not implemented")
 }
 func (m *mockPolicyStore) DeleteCronJob(context.Context, string) error { panic("not implemented") }
@@ -123,7 +132,28 @@ func (m *mockPolicyStore) UpdateConnection(context.Context, string, map[string]a
 	panic("not implemented")
 }
 func (m *mockPolicyStore) DeleteConnection(context.Context, string) error { panic("not implemented") }
+func (m *mockPolicyStore) GetTeam(context.Context, string) (*store.Team, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetTeamByAgent(context.Context, string) (*store.Team, string, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) UpdateTeam(context.Context, string, map[string]any) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) ListTeamMembers(context.Context, string) ([]store.TeamMember, error) {
+	panic("not implemented")
+}
 func (m *mockPolicyStore) CreateTask(context.Context, store.TeamTask) (string, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetTask(context.Context, string) (*store.TeamTask, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) UpdateTask(context.Context, string, map[string]any) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) UpdateTaskProgress(context.Context, string, int, string) error {
 	panic("not implemented")
 }
 func (m *mockPolicyStore) ClaimTask(context.Context, string, string) error {
@@ -132,10 +162,37 @@ func (m *mockPolicyStore) ClaimTask(context.Context, string, string) error {
 func (m *mockPolicyStore) CompleteTask(context.Context, string, string) error {
 	panic("not implemented")
 }
+func (m *mockPolicyStore) CancelTask(context.Context, string) error {
+	panic("not implemented")
+}
 func (m *mockPolicyStore) UpdateTaskStatus(context.Context, string, string) error {
 	panic("not implemented")
 }
 func (m *mockPolicyStore) ListTasks(context.Context, string, string) ([]store.TeamTask, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetTasksByParent(context.Context, string) ([]store.TeamTask, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetBlockedTasks(context.Context, string) ([]store.TeamTask, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) UnblockTasks(context.Context, string) ([]store.TeamTask, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) RetryTask(context.Context, string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) SearchTasks(context.Context, string, string) ([]store.TeamTask, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) NextTaskNumber(context.Context, string) (int, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) CreateComment(context.Context, store.TeamTaskComment) (string, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) ListComments(context.Context, string) ([]store.TeamTaskComment, error) {
 	panic("not implemented")
 }
 func (m *mockPolicyStore) SendTeamMessage(context.Context, store.TeamMessage) error {
@@ -145,8 +202,53 @@ func (m *mockPolicyStore) GetTeamMessages(context.Context, string, bool) ([]stor
 	panic("not implemented")
 }
 func (m *mockPolicyStore) MarkMessageRead(context.Context, string) error { panic("not implemented") }
-func (m *mockPolicyStore) DB() *sql.DB                                   { return nil }
-func (m *mockPolicyStore) Close() error                                  { return nil }
+func (m *mockPolicyStore) UpsertMCPEntry(context.Context, store.MCPRegistryEntry) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetMCPEntry(context.Context, string) (*store.MCPRegistryEntry, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) DeleteMCPEntry(context.Context, string) error { panic("not implemented") }
+func (m *mockPolicyStore) DeleteMCPCredential(context.Context, string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) ListMCPEntries(context.Context, store.MCPFilter) ([]store.MCPRegistryEntry, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) SearchMCPEntries(context.Context, string, int) ([]store.MCPRegistryEntry, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) SetMCPStatus(context.Context, string, string, string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) SetMCPAgents(context.Context, string, []string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) CountMCPByCategory(context.Context) (map[string]int, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) CountMCPInstalled(context.Context) (int, error) { panic("not implemented") }
+func (m *mockPolicyStore) GetMCPSeedVersion(context.Context) (int, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) SetMCPSeedVersion(context.Context, int) error { panic("not implemented") }
+func (m *mockPolicyStore) UpsertDiscoveredModels(context.Context, []store.DiscoveredModel) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) ListDiscoveredModels(context.Context, string) ([]store.DiscoveredModel, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) ListAllDiscoveredModels(context.Context) ([]store.DiscoveredModel, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) DeleteDiscoveredModelsByProvider(context.Context, string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetDiscoveredModelAge(context.Context, string) (time.Duration, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) DB() *sql.DB { return nil }
+func (m *mockPolicyStore) Close() error { return nil }
 
 // pipelineWithConnections creates a Pipeline with a mock store for policy tests.
 func pipelineWithConnections(conns map[string]*store.Connection) *Pipeline {

@@ -10,12 +10,19 @@ import (
 // --- Request translation: canonical → Anthropic ---
 
 type apiRequest struct {
-	Model     string       `json:"model"`
-	Messages  []apiMessage `json:"messages"`
-	System    any          `json:"system,omitempty"`
-	Tools     []apiTool    `json:"tools,omitempty"`
-	MaxTokens int          `json:"max_tokens"`
-	Stream    bool         `json:"stream,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []apiMessage  `json:"messages"`
+	System      any           `json:"system,omitempty"`
+	Tools       []apiTool     `json:"tools,omitempty"`
+	MaxTokens   int           `json:"max_tokens"`
+	Stream      bool          `json:"stream,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"` // Omitted when thinking is enabled.
+	Thinking    *apiThinking  `json:"thinking,omitempty"`    // Extended thinking config.
+}
+
+type apiThinking struct {
+	Type        string `json:"type"`         // "enabled"
+	BudgetTokens int   `json:"budget_tokens"` // Token budget for thinking.
 }
 
 type apiMessage struct {
@@ -46,6 +53,12 @@ type apiToolResultBlock struct {
 	IsError    bool   `json:"is_error,omitempty"`
 }
 
+type apiThinkingBlock struct {
+	Type      string `json:"type"`
+	Thinking  string `json:"thinking"`
+	Signature string `json:"signature"`
+}
+
 type apiImageBlock struct {
 	Type   string         `json:"type"`
 	Source apiImageSource `json:"source"`
@@ -74,6 +87,13 @@ type apiSystemBlock struct {
 	CacheControl *cacheCtrl `json:"cache_control,omitempty"`
 }
 
+// thinkingBudget maps thinking_level to token budgets.
+var thinkingBudget = map[string]int{
+	"low":    4096,
+	"medium": 10000,
+	"high":   32000,
+}
+
 // ToAPIRequest converts a canonical request to an Anthropic API request.
 func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 	ar := apiRequest{
@@ -84,6 +104,22 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 
 	if ar.MaxTokens == 0 {
 		ar.MaxTokens = 8192
+	}
+
+	// Extended thinking: set budget and adjust max_tokens.
+	if level, _ := req.Options["thinking_level"].(string); level != "" {
+		if budget, ok := thinkingBudget[level]; ok {
+			ar.Thinking = &apiThinking{Type: "enabled", BudgetTokens: budget}
+			// Anthropic requires max_tokens >= budget + output space.
+			if ar.MaxTokens < budget+8192 {
+				ar.MaxTokens = budget + 8192
+			}
+			// Temperature must be omitted (not 0) when thinking is enabled.
+			// We leave ar.Temperature nil (omitempty handles it).
+		}
+	} else if req.Temperature > 0 {
+		// Only set temperature when thinking is NOT enabled.
+		ar.Temperature = &req.Temperature
 	}
 
 	// System prompt with optional caching.
@@ -122,12 +158,26 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 	}
 
 	for msgIdx, msg := range req.Messages {
+		var thinkingBlocks []any
 		var textBlocks []any
 		var toolUseBlocks []any
 		var toolResultBlocks []any
 
 		for _, c := range msg.Content {
 			switch c.Type {
+			case "thinking":
+				// Reconstruct thinking block with signature for round-trip.
+				sig := ""
+				if c.Meta != nil {
+					sig = c.Meta["thinking_signature"]
+				}
+				if sig != "" {
+					thinkingBlocks = append(thinkingBlocks, apiThinkingBlock{
+						Type:      "thinking",
+						Thinking:  c.Thinking,
+						Signature: sig,
+					})
+				}
 			case "text":
 				if c.Text == "" {
 					continue
@@ -183,8 +233,9 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 		// We split mixed messages into separate properly-roled messages.
 
 		if len(toolUseBlocks) > 0 {
-			// Assistant message: text + tool_use blocks.
+			// Assistant message: thinking + text + tool_use blocks.
 			var blocks []any
+			blocks = append(blocks, thinkingBlocks...)
 			blocks = append(blocks, textBlocks...)
 			blocks = append(blocks, toolUseBlocks...)
 			ar.Messages = append(ar.Messages, apiMessage{Role: "assistant", Content: blocks})
@@ -195,13 +246,21 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 				ar.Messages = append(ar.Messages, apiMessage{Role: "user", Content: makeContent(textBlocks)})
 			}
 			ar.Messages = append(ar.Messages, apiMessage{Role: "user", Content: any(toolResultBlocks)})
-		} else if len(textBlocks) > 0 {
-			// Pure text/image message — preserve original role.
+		} else if len(textBlocks) > 0 || len(thinkingBlocks) > 0 {
+			// Text/image/thinking message — preserve original role.
 			role := msg.Role
 			if role == "tool" {
 				role = "user" // Normalize "tool" role to "user" for Anthropic.
 			}
-			ar.Messages = append(ar.Messages, apiMessage{Role: role, Content: makeContent(textBlocks)})
+			if len(thinkingBlocks) > 0 {
+				// Thinking + text — must be array format.
+				var blocks []any
+				blocks = append(blocks, thinkingBlocks...)
+				blocks = append(blocks, textBlocks...)
+				ar.Messages = append(ar.Messages, apiMessage{Role: role, Content: blocks})
+			} else {
+				ar.Messages = append(ar.Messages, apiMessage{Role: role, Content: makeContent(textBlocks)})
+			}
 		}
 		// Skip messages with no translatable content.
 	}
@@ -368,11 +427,13 @@ type apiUsage struct {
 }
 
 type apiContentBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text,omitempty"`
-	ID    string          `json:"id,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input json.RawMessage `json:"input,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`  // thinking block text
+	Signature string          `json:"signature,omitempty"` // thinking block signature (must round-trip)
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
 }
 
 // FromAPIResponse converts an Anthropic API response to canonical format.
@@ -390,6 +451,15 @@ func FromAPIResponse(data []byte) (*canonical.Response, error) {
 	var content []canonical.Content
 	for _, b := range blocks {
 		switch b.Type {
+		case "thinking":
+			c := canonical.Content{
+				Type:     "thinking",
+				Thinking: b.Thinking,
+			}
+			if b.Signature != "" {
+				c.Meta = map[string]string{"thinking_signature": b.Signature}
+			}
+			content = append(content, c)
 		case "text":
 			content = append(content, canonical.Content{Type: "text", Text: b.Text})
 		case "tool_use":

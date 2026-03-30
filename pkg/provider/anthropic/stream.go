@@ -13,14 +13,14 @@ import (
 
 // SSE event types from Anthropic's streaming API.
 const (
-	eventMessageStart     = "message_start"
+	eventMessageStart      = "message_start"
 	eventContentBlockStart = "content_block_start"
 	eventContentBlockDelta = "content_block_delta"
 	eventContentBlockStop  = "content_block_stop"
-	eventMessageDelta     = "message_delta"
-	eventMessageStop      = "message_stop"
-	eventPing             = "ping"
-	eventError            = "error"
+	eventMessageDelta      = "message_delta"
+	eventMessageStop       = "message_stop"
+	eventPing              = "ping"
+	eventError             = "error"
 )
 
 type sseEvent struct {
@@ -28,12 +28,22 @@ type sseEvent struct {
 	Data  string
 }
 
+// toolAccum accumulates tool call fragments for internal accumulation.
+type toolAccum struct {
+	id       string
+	name     string
+	inputBuf strings.Builder
+}
+
 // ParseSSEStream reads an SSE stream and emits provider.StreamEvents.
+// Tool calls are accumulated internally and emitted as complete ToolCall objects.
 func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 	defer close(events)
 
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line for large tool args.
 	var current sseEvent
+	toolAccums := make(map[int]*toolAccum)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -41,7 +51,7 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 		if line == "" {
 			// Empty line = dispatch event.
 			if current.Event != "" && current.Data != "" {
-				processSSEEvent(current, events)
+				processSSEEvent(current, events, toolAccums)
 			}
 			current = sseEvent{}
 			continue
@@ -56,19 +66,21 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 
 	// Handle any remaining event.
 	if current.Event != "" && current.Data != "" {
-		processSSEEvent(current, events)
+		processSSEEvent(current, events, toolAccums)
 	}
 }
 
-func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent) {
+func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent, toolAccums map[int]*toolAccum) {
 	switch evt.Event {
 	case eventContentBlockDelta:
 		var delta struct {
 			Index int `json:"index"`
 			Delta struct {
-				Type          string `json:"type"`
-				Text          string `json:"text,omitempty"`
-				PartialJSON   string `json:"partial_json,omitempty"`
+				Type        string `json:"type"`
+				Text        string `json:"text,omitempty"`
+				Thinking    string `json:"thinking,omitempty"`
+				Signature   string `json:"signature,omitempty"`
+				PartialJSON string `json:"partial_json,omitempty"`
 			} `json:"delta"`
 		}
 		if err := json.Unmarshal([]byte(evt.Data), &delta); err != nil {
@@ -84,15 +96,28 @@ func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent) {
 					Text: delta.Delta.Text,
 				},
 			}
-		case "input_json_delta":
-			// Tool call input arrives as partial JSON fragments.
+		case "thinking_delta":
 			events <- provider.StreamEvent{
-				Type:  "tool_call",
+				Type:  "content_delta",
 				Index: delta.Index,
 				Delta: &canonical.Content{
-					Type:      "tool_call",
-					ToolInput: delta.Delta.PartialJSON,
+					Type:     "thinking",
+					Thinking: delta.Delta.Thinking,
 				},
+			}
+		case "signature_delta":
+			events <- provider.StreamEvent{
+				Type:  "content_delta",
+				Index: delta.Index,
+				Delta: &canonical.Content{
+					Type: "thinking",
+					Meta: map[string]string{"thinking_signature": delta.Delta.Signature},
+				},
+			}
+		case "input_json_delta":
+			// Accumulate tool call input fragments internally.
+			if ta, ok := toolAccums[delta.Index]; ok {
+				ta.inputBuf.WriteString(delta.Delta.PartialJSON)
 			}
 		}
 
@@ -110,15 +135,39 @@ func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent) {
 			return
 		}
 		if block.ContentBlock.Type == "tool_use" {
+			// Start accumulating this tool call.
+			toolAccums[block.Index] = &toolAccum{
+				id:   block.ContentBlock.ID,
+				name: block.ContentBlock.Name,
+			}
+		}
+		// thinking blocks start — no action needed until deltas arrive.
+
+	case eventContentBlockStop:
+		var stop struct {
+			Index int `json:"index"`
+		}
+		if err := json.Unmarshal([]byte(evt.Data), &stop); err != nil {
+			return
+		}
+		// If this was a tool_use block, emit the complete tool call.
+		if ta, ok := toolAccums[stop.Index]; ok {
+			input := ta.inputBuf.String()
+			if input == "" {
+				input = "{}"
+			}
 			events <- provider.StreamEvent{
 				Type:  "tool_call",
-				Index: block.Index,
+				Index: stop.Index,
 				Delta: &canonical.Content{
-					Type:       "tool_call",
-					ToolCallID: block.ContentBlock.ID,
-					ToolName:   block.ContentBlock.Name,
+					ToolCall: &canonical.ToolCall{
+						ID:    ta.id,
+						Name:  ta.name,
+						Input: json.RawMessage(input),
+					},
 				},
 			}
+			delete(toolAccums, stop.Index)
 		}
 
 	case eventMessageStart:

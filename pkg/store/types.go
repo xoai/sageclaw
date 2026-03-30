@@ -89,19 +89,64 @@ type DelegationRecord struct {
 	CompletedAt *time.Time
 }
 
-// TeamTask represents a task on the team board.
-type TeamTask struct {
+// Team represents a team definition.
+type Team struct {
 	ID          string
-	TeamID      string
-	Title       string
+	Name        string
+	LeadID      string
 	Description string
-	Status      string // "open", "claimed", "completed", "blocked"
-	AssignedTo  string
-	CreatedBy   string
-	Result      string
-	BlockedBy   string // Comma-separated task IDs this task depends on.
+	Status      string // "active", "archived"
+	Config      string // JSON: legacy field from migration 004
+	Settings    string // JSON: {max_concurrent, chat_verbosity, ...}
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+// TeamMember represents a member of a team.
+type TeamMember struct {
+	AgentID     string
+	Role        string // "lead" or "member"
+	DisplayName string // From identity.yaml
+	Description string // From identity.yaml role field
+}
+
+// TeamTask represents a task on the team board.
+type TeamTask struct {
+	ID              string     `json:"id"`
+	TeamID          string     `json:"team_id"`
+	Title           string     `json:"title"`
+	Description     string     `json:"description"`
+	Status          string     `json:"status"` // "pending", "in_progress", "completed", "blocked", "in_review", "cancelled", "failed"
+	AssignedTo      string     `json:"assigned_to"`
+	CreatedBy       string     `json:"created_by"`
+	Result          string     `json:"result"`
+	BlockedBy       string     `json:"blocked_by"` // Comma-separated task IDs this task depends on.
+	ParentID        string     `json:"parent_id"`  // Subtask parent
+	Priority        int        `json:"priority"`   // Higher = more urgent
+	OwnerAgentID    string     `json:"owner_agent_id"` // Lead who created this task
+	BatchID         string     `json:"batch_id"` // Groups tasks from same delegation turn
+	TaskNumber      int        `json:"task_number"` // Auto-increment per team
+	Identifier      string     `json:"identifier"` // Team prefix + task_number (e.g., "TSK-12")
+	ProgressPercent int        `json:"progress_percent"` // 0-100
+	RequireApproval bool       `json:"require_approval"` // Needs lead approval before completing
+	SessionID       string     `json:"session_id"` // Session used for execution
+	RetryCount      int        `json:"retry_count"`
+	MaxRetries      int        `json:"max_retries"`
+	ErrorMessage    string     `json:"error_message"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// TeamTaskComment represents a comment on a task.
+type TeamTaskComment struct {
+	ID          string
+	TaskID      string
+	AgentID     string
+	UserID      string
+	Content     string
+	CommentType string // "note", "status", "system"
+	CreatedAt   time.Time
 }
 
 // TeamMessage represents a mailbox message.
@@ -162,6 +207,19 @@ type MCPRegistryEntry struct {
 	AgentIDs     []string   `json:"agent_ids,omitempty"`
 	InstalledAt  *time.Time `json:"installed_at,omitempty"`
 	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// DiscoveredModel represents a model fetched from a provider's API.
+type DiscoveredModel struct {
+	ID              string          // "anthropic/claude-sonnet-4-20250514"
+	Provider        string          // "anthropic", "openai", "gemini", "ollama"
+	ModelID         string          // Raw API model ID
+	DisplayName     string          // "Claude Sonnet 4"
+	ContextWindow   int             // Max input tokens
+	MaxOutputTokens int             // Max output tokens
+	Capabilities    map[string]bool // {"vision":true,"thinking":true}
+	DiscoveredAt    time.Time
+	UpdatedAt       time.Time
 }
 
 // MCPFilter for listing MCP registry entries.

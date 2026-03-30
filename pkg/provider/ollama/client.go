@@ -33,7 +33,7 @@ func WithBaseURL(url string) Option {
 func New(opts ...Option) *Client {
 	c := &Client{
 		baseURL: defaultOllamaURL,
-		client:  &http.Client{Timeout: 5 * time.Second},
+		client:  &http.Client{Timeout: 1 * time.Second},
 	}
 	for _, opt := range opts {
 		opt(c)

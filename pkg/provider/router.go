@@ -39,12 +39,13 @@ type ComboModel struct {
 
 // Router selects which provider+model to use based on tier.
 type Router struct {
-	mu       sync.RWMutex
-	routes   map[Tier]Route
-	combos   map[string]Combo // named combos
-	providers map[string]Provider // provider name → instance
-	fallback Tier
-	bridge   *ContextBridge
+	mu          sync.RWMutex
+	routes      map[Tier]Route
+	combos      map[string]Combo     // named combos
+	providers   map[string]Provider  // provider name → instance
+	providerTPM map[string]int       // provider name → tokens per minute (0 = unlimited)
+	fallback    Tier
+	bridge      *ContextBridge
 }
 
 // NewRouter creates a model router with the given routes and fallback tier.
@@ -53,17 +54,35 @@ func NewRouter(routes map[Tier]Route, fallback Tier) (*Router, error) {
 		return nil, fmt.Errorf("fallback tier %q not found in routes", fallback)
 	}
 	return &Router{
-		routes:    routes,
-		combos:    make(map[string]Combo),
-		providers: make(map[string]Provider),
-		fallback:  fallback,
-		bridge:    NewContextBridge(),
+		routes:      routes,
+		combos:      make(map[string]Combo),
+		providers:   make(map[string]Provider),
+		providerTPM: make(map[string]int),
+		fallback:    fallback,
+		bridge:      NewContextBridge(),
 	}, nil
+}
+
+// NewEmptyRouter creates a router with no routes. Providers can be added
+// at runtime via SetRoute. Used when SageClaw starts with no providers
+// so that hot-reload from the dashboard works.
+func NewEmptyRouter() *Router {
+	return &Router{
+		routes:      make(map[Tier]Route),
+		combos:      make(map[string]Combo),
+		providers:   make(map[string]Provider),
+		providerTPM: make(map[string]int),
+		fallback:    TierStrong,
+		bridge:      NewContextBridge(),
+	}
 }
 
 // ChatWithFallback tries the primary tier, falls back on error, and uses the
 // context bridge to handle model switches transparently.
 func (r *Router) ChatWithFallback(ctx context.Context, tier Tier, req *canonical.Request) (*canonical.Response, error) {
+	if !r.HasRoutes() {
+		return nil, fmt.Errorf("no providers configured — add one via Settings > AI Models")
+	}
 	primary, primaryModel := r.Resolve(tier)
 	req.Model = primaryModel
 
@@ -93,6 +112,9 @@ func (r *Router) ChatWithFallback(ctx context.Context, tier Tier, req *canonical
 
 // ChatStreamWithFallback is the streaming version of ChatWithFallback.
 func (r *Router) ChatStreamWithFallback(ctx context.Context, tier Tier, req *canonical.Request) (<-chan StreamEvent, error) {
+	if !r.HasRoutes() {
+		return nil, fmt.Errorf("no providers configured — add one via Settings > AI Models")
+	}
 	primary, primaryModel := r.Resolve(tier)
 	req.Model = primaryModel
 
@@ -227,6 +249,19 @@ func (r *Router) ResolveCombo(name string) (Provider, string, error) {
 	r.mu.RUnlock()
 
 	if !ok {
+		// Fallback: if combo name matches a tier, resolve as tier.
+		// Handles backward compat after preset combo deletion.
+		switch Tier(name) {
+		case TierStrong, TierFast, TierLocal:
+			log.Printf("router: combo %q not found, falling back to tier %q (deprecated)", name, name)
+			p, model := r.Resolve(Tier(name))
+			return p, model, nil
+		}
+		if name == "balanced" {
+			log.Printf("router: combo %q not found, falling back to tier fast (deprecated)", name)
+			p, model := r.Resolve(TierFast)
+			return p, model, nil
+		}
 		return nil, "", fmt.Errorf("combo %q not found", name)
 	}
 
@@ -241,6 +276,32 @@ func (r *Router) ResolveCombo(name string) (Provider, string, error) {
 	return nil, "", fmt.Errorf("combo %q: no available provider for any model in chain", name)
 }
 
+// ResolveComboExcluding resolves a combo skipping a specific provider.
+// Used for fallback within a combo chain when the primary provider returns 429.
+func (r *Router) ResolveComboExcluding(name, excludeProvider string) (Provider, string, error) {
+	r.mu.RLock()
+	combo, ok := r.combos[name]
+	providers := r.providers
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, "", fmt.Errorf("combo %q not found", name)
+	}
+
+	for _, m := range combo.Models {
+		if m.Provider == excludeProvider {
+			continue
+		}
+		p, pOk := providers[m.Provider]
+		if !pOk {
+			continue
+		}
+		return p, m.ModelID, nil
+	}
+
+	return nil, "", fmt.Errorf("combo %q: no available provider after excluding %s", name, excludeProvider)
+}
+
 // ForEachProvider calls fn for each registered provider.
 func (r *Router) ForEachProvider(fn func(name string, p Provider)) {
 	r.mu.RLock()
@@ -248,6 +309,134 @@ func (r *Router) ForEachProvider(fn func(name string, p Provider)) {
 	for name, p := range r.providers {
 		fn(name, p)
 	}
+}
+
+// ResolveTierFromDiscovered updates a tier route based on discovered models.
+// Picks the best available model for the tier from connected providers.
+func (r *Router) ResolveTierFromDiscovered(tier Tier, providerModels []TierCandidate) {
+	best := pickBestForTier(tier, providerModels)
+	if best == nil {
+		return
+	}
+
+	r.mu.RLock()
+	prov, ok := r.providers[best.Provider]
+	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	r.SetRoute(tier, Route{Provider: prov, Model: best.ModelID})
+}
+
+// ResolveAllTiers updates all three tier routes from discovered models.
+func (r *Router) ResolveAllTiers(candidates []TierCandidate) {
+	for _, tier := range []Tier{TierStrong, TierFast, TierLocal} {
+		r.ResolveTierFromDiscovered(tier, candidates)
+	}
+}
+
+// TierCandidate is a model considered for tier routing.
+type TierCandidate struct {
+	Provider      string
+	ModelID       string
+	ContextWindow int
+	TierHint      string  // From KnownModels: "strong", "fast", "local", "reasoning"
+	InputCost     float64 // From KnownModels (0 if unknown)
+}
+
+// pickBestForTier scores candidates and returns the best one for a tier.
+func pickBestForTier(tier Tier, candidates []TierCandidate) *TierCandidate {
+	var best *TierCandidate
+	bestScore := -1.0
+
+	for i := range candidates {
+		c := &candidates[i]
+		score := scoreTierCandidate(tier, c)
+		if score < 0 {
+			continue // Filtered out.
+		}
+		if score > bestScore {
+			bestScore = score
+			best = c
+		}
+	}
+	return best
+}
+
+func scoreTierCandidate(tier Tier, c *TierCandidate) float64 {
+	switch tier {
+	case TierStrong:
+		score := float64(c.ContextWindow) / 1000.0
+		if c.TierHint == "strong" {
+			score += 100
+		}
+		if c.TierHint == "reasoning" {
+			score += 50
+		}
+		if c.Provider == "ollama" {
+			return -1 // Exclude local models from strong tier.
+		}
+		return score
+	case TierFast:
+		score := 0.0
+		if c.TierHint == "fast" {
+			score += 100
+		}
+		if c.InputCost > 0 {
+			score += 50 - c.InputCost*10
+		}
+		if c.Provider == "ollama" {
+			return -1 // Exclude local models from fast tier.
+		}
+		return score
+	case TierLocal:
+		if c.Provider != "ollama" {
+			return -1 // Only local providers.
+		}
+		return 1 // Pick first available.
+	default:
+		return -1
+	}
+}
+
+// DefaultTPM returns the default tokens-per-minute for a provider type.
+func DefaultTPM(providerType string) int {
+	switch providerType {
+	case "anthropic":
+		return 30000
+	case "openai":
+		return 60000
+	case "gemini":
+		return 1000000
+	case "openrouter":
+		return 60000
+	case "github":
+		return 60000
+	case "ollama":
+		return 0 // Unlimited.
+	default:
+		return 30000
+	}
+}
+
+// SetProviderTPM sets the tokens-per-minute limit for a provider.
+func (r *Router) SetProviderTPM(name string, tpm int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.providerTPM[name] = tpm
+}
+
+// GetProviderTPM returns the tokens-per-minute limit for a provider.
+// Falls back to DefaultTPM if not explicitly set.
+func (r *Router) GetProviderTPM(name string) int {
+	r.mu.RLock()
+	tpm, ok := r.providerTPM[name]
+	r.mu.RUnlock()
+	if ok {
+		return tpm
+	}
+	return DefaultTPM(name)
 }
 
 // IsCombo returns true if the model string is a combo reference (combo:name).

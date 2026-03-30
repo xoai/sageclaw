@@ -32,6 +32,34 @@ function extractText(content) {
   return content.text || String(content);
 }
 
+// Linkify TSK-N identifiers in message text.
+function linkifyTasks(text) {
+  if (!text) return text;
+  const parts = text.split(/(TSK-\d+)/g);
+  if (parts.length === 1) return text; // No matches.
+  return parts.map((part, i) => {
+    if (/^TSK-\d+$/.test(part)) {
+      return h('a', {
+        key: i,
+        href: '#',
+        style: 'color:var(--primary);text-decoration:underline;cursor:pointer',
+        onClick: async (e) => {
+          e.preventDefault();
+          try {
+            const res = await fetch(`/api/teams/resolve-task?id=${encodeURIComponent(part)}`);
+            const data = await res.json();
+            if (data.found) {
+              window.location.hash = '';
+              window.location.href = `/teams/${data.team_id}/board?task=${part}`;
+            }
+          } catch {}
+        },
+      }, part);
+    }
+    return part;
+  });
+}
+
 function extractAudio(content) {
   if (!content || !Array.isArray(content)) return null;
   for (const c of content) {
@@ -464,7 +492,7 @@ export function Chat() {
                       )}
                     </div>
                   )}
-                  {msg.text && <div class="message-text">{msg.text}</div>}
+                  {msg.text && <div class="message-text">{linkifyTasks(msg.text)}</div>}
                 </div>
               ))}
 

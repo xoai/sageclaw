@@ -22,7 +22,8 @@ type Content struct {
 	ToolCallID string            `json:"tool_call_id,omitempty"` // For tool_call start delta.
 	ToolName   string            `json:"tool_name,omitempty"`    // For tool_call start delta.
 	ToolInput  string            `json:"tool_input,omitempty"`   // For tool_call input_json_delta (partial JSON).
-	ToolMeta   map[string]string `json:"tool_meta,omitempty"`    // Provider metadata (e.g., Gemini thought_signature).
+	ToolMeta   map[string]string `json:"tool_meta,omitempty"`    // Deprecated: use Meta instead.
+	Meta       map[string]string `json:"meta,omitempty"`         // Provider metadata (e.g., thought_signature).
 }
 
 // AudioSource describes an audio file reference.
@@ -65,14 +66,15 @@ type ImageSource struct {
 
 // Request is the canonical LLM request format.
 type Request struct {
-	Model            string    `json:"model"`
-	Messages         []Message `json:"messages"`
-	System           string    `json:"system,omitempty"`
-	Tools            []ToolDef `json:"tools,omitempty"`
-	MaxTokens        int       `json:"max_tokens,omitempty"`
-	Temperature      float64   `json:"temperature,omitempty"`
-	Stream           bool      `json:"stream,omitempty"`
-	SystemPromptSize int       `json:"-"` // Estimated tokens in system prompt (for diagnostics, not sent to LLM).
+	Model            string         `json:"model"`
+	Messages         []Message      `json:"messages"`
+	System           string         `json:"system,omitempty"`
+	Tools            []ToolDef      `json:"tools,omitempty"`
+	MaxTokens        int            `json:"max_tokens,omitempty"`
+	Temperature      float64        `json:"temperature,omitempty"`
+	Stream           bool           `json:"stream,omitempty"`
+	Options          map[string]any `json:"options,omitempty"` // Provider-specific options (grounding, code_execution, thinking_level, etc.).
+	SystemPromptSize int            `json:"-"`                 // Estimated tokens in system prompt (for diagnostics, not sent to LLM).
 }
 
 // Response is the canonical LLM response format.

@@ -28,6 +28,30 @@ type ModelLister interface {
 	ListModels(ctx context.Context) ([]ModelInfo, error)
 }
 
+// Capability constants for ProviderCapabilities.
+const (
+	CapVision   = "vision"    // Can analyze images.
+	CapDocument = "document"  // Can analyze documents (PDF, etc.).
+	CapImageGen = "image_gen" // Can generate images.
+	CapTTS      = "tts"       // Can generate speech from text.
+)
+
+// ProviderCapabilities is an optional interface for providers that support
+// specific capabilities beyond basic chat (e.g. vision, document analysis,
+// image generation).
+type ProviderCapabilities interface {
+	Supports(cap string) bool
+}
+
+// ProviderSupports checks whether a provider supports a given capability.
+// Returns false if the provider does not implement ProviderCapabilities.
+func ProviderSupports(p Provider, cap string) bool {
+	if pc, ok := p.(ProviderCapabilities); ok {
+		return pc.Supports(cap)
+	}
+	return false
+}
+
 // --- Live (bidirectional streaming) provider types ---
 
 // LiveMessage is sent from client to a live session.

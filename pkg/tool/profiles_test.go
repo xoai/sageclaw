@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -35,10 +36,10 @@ func TestProfileGroups(t *testing.T) {
 		t.Error("messaging profile should not include fs or runtime")
 	}
 
-	// Minimal profile.
+	// Minimal profile includes core.
 	groups = ProfileGroups(ProfileMinimal)
-	if len(groups) != 0 {
-		t.Errorf("minimal profile should return empty map, got %d groups", len(groups))
+	if len(groups) != 1 || !groups[GroupCore] {
+		t.Errorf("minimal profile should include only core group, got %d groups", len(groups))
 	}
 
 	// Unknown profile returns nil.
@@ -80,21 +81,58 @@ func TestListForAgent_FullProfile(t *testing.T) {
 	}
 }
 
-func TestListForAgent_AllProfilesShowAllTools(t *testing.T) {
+func TestListForAgent_ProfileFiltering(t *testing.T) {
 	reg := NewRegistry()
 	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
 
 	reg.RegisterWithGroup("read_file", "Read", nil, GroupFS, RiskModerate, "builtin", noop)
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
 	reg.RegisterWithGroup("team_send", "Send", nil, GroupTeam, RiskModerate, "builtin", noop)
+	reg.RegisterWithGroup("datetime", "Time", nil, GroupCore, RiskSafe, "builtin", noop)
 
-	// All profiles show all tools — profile controls consent, not visibility.
-	for _, profile := range []string{ProfileFull, ProfileCoding, ProfileMessaging, ProfileReadonly, ProfileMinimal} {
-		tools := reg.ListForAgent(profile, nil, nil)
-		if len(tools) != 3 {
-			t.Errorf("%s profile should return 3 tools (all visible), got %d", profile, len(tools))
-		}
+	// Full profile sees all tools.
+	tools := reg.ListForAgent(ProfileFull, nil, nil)
+	if len(tools) != 4 {
+		t.Errorf("full profile should return 4 tools, got %d", len(tools))
 	}
+
+	// Coding profile sees fs, runtime, core — but not team.
+	tools = reg.ListForAgent(ProfileCoding, nil, nil)
+	names := toolNames(tools)
+	if !names["read_file"] || !names["execute_command"] || !names["datetime"] {
+		t.Errorf("coding profile should include fs, runtime, core tools, got %v", names)
+	}
+	if names["team_send"] {
+		t.Error("coding profile should not include team tools")
+	}
+
+	// Messaging profile sees team, core — but not fs, runtime.
+	tools = reg.ListForAgent(ProfileMessaging, nil, nil)
+	names = toolNames(tools)
+	if !names["team_send"] || !names["datetime"] {
+		t.Errorf("messaging should include team, core, got %v", names)
+	}
+	if names["read_file"] || names["execute_command"] {
+		t.Error("messaging should not include fs or runtime")
+	}
+
+	// Minimal profile sees only core.
+	tools = reg.ListForAgent(ProfileMinimal, nil, nil)
+	names = toolNames(tools)
+	if !names["datetime"] {
+		t.Error("minimal should include core tools")
+	}
+	if names["read_file"] || names["execute_command"] || names["team_send"] {
+		t.Error("minimal should only include core tools")
+	}
+}
+
+func toolNames(tools []canonical.ToolDef) map[string]bool {
+	m := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		m[t.Name] = true
+	}
+	return m
 }
 
 func TestListForAgent_DenyGroup(t *testing.T) {
@@ -149,17 +187,21 @@ func TestListForAgent_DenySingleTool(t *testing.T) {
 	}
 }
 
-func TestListForAgent_MinimalProfileShowsAllTools(t *testing.T) {
+func TestListForAgent_MinimalProfileOnlyCore(t *testing.T) {
 	reg := NewRegistry()
 	noop := func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) { return nil, nil }
 
 	reg.RegisterWithGroup("read_file", "Read", nil, GroupFS, RiskModerate, "builtin", noop)
 	reg.RegisterWithGroup("execute_command", "Exec", nil, GroupRuntime, RiskSensitive, "builtin", noop)
+	reg.RegisterWithGroup("datetime", "Time", nil, GroupCore, RiskSafe, "builtin", noop)
 
-	// Minimal profile shows all tools — consent handles access control.
+	// Minimal profile only sees core tools.
 	tools := reg.ListForAgent(ProfileMinimal, nil, nil)
-	if len(tools) != 2 {
-		t.Errorf("minimal profile should show all tools (consent controls access), got %d", len(tools))
+	if len(tools) != 1 {
+		t.Errorf("minimal profile should show only core tools, got %d", len(tools))
+	}
+	if tools[0].Name != "datetime" {
+		t.Errorf("expected datetime, got %s", tools[0].Name)
 	}
 }
 
@@ -213,7 +255,10 @@ func TestIsInProfile(t *testing.T) {
 		t.Error("messaging profile should not allow fs")
 	}
 
-	// Minimal profile allows nothing.
+	// Minimal profile allows only core.
+	if !IsInProfile(ProfileMinimal, GroupCore) {
+		t.Error("minimal profile should allow core")
+	}
 	if IsInProfile(ProfileMinimal, GroupFS) {
 		t.Error("minimal profile should not allow fs")
 	}
@@ -290,6 +335,98 @@ func TestListForAgent_AllowedMCPServers(t *testing.T) {
 	}
 	if tools[0].Name != "read_file" {
 		t.Errorf("only read_file should remain, got %s", tools[0].Name)
+	}
+}
+
+func TestSchemaCompression(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch"},"mode":{"type":"string","description":"Output format","default":"markdown"}},"required":["url"]}`)
+
+	compressed := compressSchema(schema)
+
+	var obj map[string]any
+	json.Unmarshal(compressed, &obj)
+
+	props := obj["properties"].(map[string]any)
+	urlProp := props["url"].(map[string]any)
+	modeProp := props["mode"].(map[string]any)
+
+	// Descriptions and defaults should be stripped.
+	if _, ok := urlProp["description"]; ok {
+		t.Error("description should be stripped from url property")
+	}
+	if _, ok := modeProp["description"]; ok {
+		t.Error("description should be stripped from mode property")
+	}
+	if _, ok := modeProp["default"]; ok {
+		t.Error("default should be stripped from mode property")
+	}
+
+	// Type and required should be preserved.
+	if urlProp["type"] != "string" {
+		t.Error("type should be preserved")
+	}
+	req := obj["required"].([]any)
+	if len(req) != 1 || req[0] != "url" {
+		t.Error("required should be preserved")
+	}
+
+	// Compressed should be smaller.
+	if len(compressed) >= len(schema) {
+		t.Errorf("compressed (%d bytes) should be smaller than original (%d bytes)", len(compressed), len(schema))
+	}
+}
+
+func TestSoftTrimResult(t *testing.T) {
+	// Short content — no trimming.
+	short := "hello world"
+	if got := softTrimResult(short); got != short {
+		t.Errorf("short content should not be trimmed")
+	}
+
+	// Exactly at threshold — no trimming.
+	exact := strings.Repeat("x", softTrimThreshold)
+	if got := softTrimResult(exact); got != exact {
+		t.Errorf("content at threshold should not be trimmed")
+	}
+
+	// Over threshold — should be trimmed.
+	big := strings.Repeat("A", 2000) + strings.Repeat("B", 6000) + strings.Repeat("C", 2000)
+	result := softTrimResult(big)
+
+	if len(result) >= len(big) {
+		t.Errorf("trimmed result (%d) should be smaller than original (%d)", len(result), len(big))
+	}
+	// Should start with head content.
+	if !strings.HasPrefix(result, strings.Repeat("A", 1500)) {
+		t.Error("should keep first 1500 chars")
+	}
+	// Should end with tail content.
+	if !strings.HasSuffix(result, strings.Repeat("C", 1500)) {
+		t.Error("should keep last 1500 chars")
+	}
+	// Should contain trim note.
+	if !strings.Contains(result, "chars trimmed") {
+		t.Error("should contain trim note")
+	}
+}
+
+func TestExecute_SoftTrimsLargeResult(t *testing.T) {
+	reg := NewRegistry()
+	bigResult := strings.Repeat("x", 10000)
+	reg.RegisterWithGroup("big_tool", "Returns big output", nil, GroupCore, RiskSafe, "builtin",
+		func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
+			return &canonical.ToolResult{Content: bigResult}, nil
+		})
+
+	result, err := reg.Execute(context.Background(), "big_tool", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Content) >= len(bigResult) {
+		t.Errorf("Execute should soft-trim large results: got %d chars, original %d", len(result.Content), len(bigResult))
+	}
+	if !strings.Contains(result.Content, "chars trimmed") {
+		t.Error("trimmed result should contain trim note")
 	}
 }
 

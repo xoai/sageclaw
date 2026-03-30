@@ -3,6 +3,7 @@ import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
 import { Label } from '../components/InfoTip';
 import ConfigPanel from '../components/ConfigPanel';
+import ModelPicker from '../components/ModelPicker';
 
 export default function AgentEditor({ id }) {
   const [agent, setAgent] = useState(null);
@@ -134,7 +135,8 @@ export default function AgentEditor({ id }) {
       </div>
 
       {/* Tab content */}
-      {tab === 'identity' && <IdentityTab agent={agent} update={update} isNew={isNew} modelData={modelData} />}
+      {tab === 'identity' && <IdentityTab agent={agent} update={update} isNew={isNew} modelData={modelData}
+        reloadModels={() => fetch('/api/providers/models').then(r => r.json()).then(setModelData).catch(() => {})} />}
       {tab === 'soul' && <SectionTab section="soul" value={agent.soul} onChange={v => update('soul', v)} schemas={schemas} label="Soul" placeholder="Define who this agent is — personality, voice, values..." />}
       {tab === 'behavior' && <SectionTab section="behavior" value={agent.behavior} onChange={v => update('behavior', v)} schemas={schemas} label="Behavior" placeholder="Define how this agent works — rules, constraints, decision frameworks..." />}
       {tab === 'bootstrap' && <SectionTab section="bootstrap" value={agent.bootstrap} onChange={v => update('bootstrap', v)} schemas={schemas} label="Bootstrap" placeholder="First-run instructions for the agent's initial conversation..." />}
@@ -148,27 +150,10 @@ export default function AgentEditor({ id }) {
   );
 }
 
-function IdentityTab({ agent, update, isNew, modelData }) {
+function IdentityTab({ agent, update, isNew, modelData, reloadModels }) {
   const models = modelData?.models || [];
   const combos = modelData?.combos || [];
   const connected = modelData?.connected || {};
-
-  // Group models by provider.
-  const grouped = {};
-  models.forEach(m => {
-    if (!grouped[m.provider]) grouped[m.provider] = [];
-    grouped[m.provider].push(m);
-  });
-
-  const providerLabels = {
-    anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google Gemini',
-    openrouter: 'OpenRouter', github: 'GitHub Copilot', ollama: 'Ollama (Local)',
-  };
-
-  const formatCost = (m) => {
-    if (m.input_cost === 0 && m.output_cost === 0) return 'Free';
-    return `$${m.input_cost}/$${m.output_cost} per 1M tokens`;
-  };
 
   return (
     <div style="max-width:600px">
@@ -198,31 +183,16 @@ function IdentityTab({ agent, update, isNew, modelData }) {
       </div>
       <div class="form-group">
         <Label text="Model" tip="Which LLM powers this agent. Tiers auto-route to the best available provider. Or pick a specific model." />
-        <select value={agent.identity?.model} onChange={e => update('identity.model', e.target.value)}>
-          <optgroup label="Auto-route (recommended)">
-            <option value="strong">strong — Best quality (auto-selects)</option>
-            <option value="fast">fast — Lower latency (auto-selects)</option>
-            <option value="local">local — Ollama, free</option>
-          </optgroup>
-          {combos.length > 0 && (
-            <optgroup label="Combos (custom fallback chains)">
-              {combos.map(c => (
-                <option key={c.id} value={`combo:${c.id}`}>
-                  {c.name} — {c.strategy} ({(c.models || []).length} models)
-                </option>
-              ))}
-            </optgroup>
-          )}
-          {Object.entries(grouped).map(([prov, provModels]) => (
-            <optgroup key={prov} label={`${providerLabels[prov] || prov} ${connected[prov] ? '(connected)' : '(not connected)'}`}>
-              {provModels.map(m => (
-                <option key={m.id} value={m.model_id} disabled={!m.available}>
-                  {m.id} — {m.name} ({formatCost(m)})
-                </option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
+        <ModelPicker
+          value={agent.identity?.model}
+          onChange={val => update('identity.model', val)}
+          models={models}
+          combos={combos}
+          connected={connected}
+          stale={modelData?.stale}
+          onRefresh={() => fetch('/api/providers/models/refresh', { method: 'POST' })
+            .then(() => reloadModels?.())}
+        />
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div class="form-group">
@@ -256,6 +226,23 @@ function IdentityTab({ agent, update, isNew, modelData }) {
           onInput={e => update('identity.tags', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
           placeholder="e.g. default, general, research" />
       </div>
+      <details style="margin-top:12px">
+        <summary style="font-size:13px;font-weight:500;cursor:pointer;color:var(--text-secondary)">Advanced</summary>
+        <div style="margin-top:8px">
+          <div class="form-group">
+            <Label text="Token Rate Override (TPM)" tip="Override the provider's rate limit for this agent. 0 = use provider default. Higher values for agents with premium API tiers." />
+            <input type="number" value={agent.identity?.tokens_per_minute || 0}
+              onInput={e => update('identity.tokens_per_minute', parseInt(e.target.value) || 0)} />
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">0 = use provider's configured rate limit</div>
+          </div>
+          <div class="form-group">
+            <Label text="Max Request Tokens" tip="Hard cap on input tokens per API request. 0 = no cap. Use for rate-limited orgs." />
+            <input type="number" value={agent.identity?.max_request_tokens || 0}
+              onInput={e => update('identity.max_request_tokens', parseInt(e.target.value) || 0)} />
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">0 = no cap</div>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

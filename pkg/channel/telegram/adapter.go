@@ -411,7 +411,6 @@ func (a *Adapter) streamChunk(sessionID, chatID, delta string) {
 		return
 	}
 
-	// Accumulate text.
 	sm.text += delta
 
 	// Throttle: send draft at most every 500ms.
@@ -443,7 +442,7 @@ func (a *Adapter) endStream(sessionID string) {
 	a.streamMu.Unlock()
 
 	// Finalize: send the real message with MarkdownV2 (replaces the draft).
-	a.sendMessage(sm.chatID, sm.text)
+	a.sendMessageFinal(sm.chatID, sm.draftID, sm.text)
 }
 
 // sendMessageDraft sends or updates a draft message in the chat.
@@ -454,9 +453,10 @@ func (a *Adapter) sendMessageDraft(chatID string, draftID int, text string) {
 		text = text[:maxMessageLen]
 	}
 	params := url.Values{
-		"chat_id":  {chatID},
-		"draft_id": {strconv.Itoa(draftID)},
-		"text":     {text},
+		"chat_id":    {chatID},
+		"draft_id":   {strconv.Itoa(draftID)},
+		"text":       {toTelegramMarkdown(text)},
+		"parse_mode": {"MarkdownV2"},
 	}
 	resp, err := a.client.PostForm(a.baseURL+"/sendMessageDraft", params)
 	if err != nil {
@@ -517,6 +517,38 @@ func (a *Adapter) sendChatAction(chatID, action string) {
 		return
 	}
 	resp.Body.Close()
+}
+
+// sendMessageFinal finalizes a draft by sending a permanent message with the same draft_id.
+// Bot API: sendMessage with draft_id replaces the ephemeral draft with a real message.
+func (a *Adapter) sendMessageFinal(chatID string, draftID int, text string) error {
+	params := url.Values{
+		"chat_id":    {chatID},
+		"text":       {toTelegramMarkdown(text)},
+		"parse_mode": {"MarkdownV2"},
+		"draft_id":   {strconv.Itoa(draftID)},
+	}
+
+	resp, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
+	if err != nil {
+		return fmt.Errorf("sending final message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), "can't parse") {
+			params.Set("parse_mode", "")
+			resp2, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
+			if err != nil {
+				return err
+			}
+			resp2.Body.Close()
+		}
+		return fmt.Errorf("telegram error: %s", string(body))
+	}
+
+	return nil
 }
 
 func (a *Adapter) sendMessage(chatID, text string) error {

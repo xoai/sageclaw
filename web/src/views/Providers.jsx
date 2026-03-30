@@ -18,6 +18,7 @@ export function Providers() {
   const [msg, setMsg] = useState('');
   const [toast, setToast] = useState(null); // { text, type: 'success'|'error'|'warning' }
   const [testing, setTesting] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const loadProviders = () => fetch('/api/providers').then(r => r.json()).then(setProviders).catch(() => {});
   const loadCombos = () => fetch('/api/combos').then(r => r.json()).then(setCombos).catch(() => {});
@@ -56,7 +57,7 @@ export function Providers() {
     if (data.error) { setMsg(data.error); return; }
     setShowAddProvider(false);
     setProviderForm({ type: 'anthropic', name: '', api_key: '', base_url: '' });
-    setMsg('Provider added. Restart the SageClaw server to activate.');
+    setMsg('Provider activated. You can start chatting now.');
     setTimeout(() => setMsg(''), 5000);
     loadProviders();
   };
@@ -81,7 +82,7 @@ export function Providers() {
       if (status === 'connected') {
         showToast(`${provider.name}: Connected successfully!`, 'success');
       } else {
-        showToast(`${provider.name}: ${status || 'Not reachable'}. Restart SageClaw after adding the key.`, 'warning');
+        showToast(`${provider.name}: ${status || 'Not reachable'}. Try adding the API key again.`, 'warning');
       }
     } catch {
       showToast(`${provider.name}: Connection test failed.`, 'error');
@@ -89,11 +90,13 @@ export function Providers() {
     setTesting(null);
   };
 
-  const saveCombo = async () => {
+  const saveCombo = async (formOverride) => {
+    const payload = { ...(formOverride || comboForm) };
+    if (editingComboId) payload.id = editingComboId;
     const res = await fetch('/api/combos', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(comboForm),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (data.error) { setMsg(data.error); return; }
@@ -136,6 +139,9 @@ export function Providers() {
 
   const needsKey = { anthropic: true, openai: true, gemini: true, openrouter: true, github: true, ollama: false };
 
+  const defaultTPMForType = (type) => ({ anthropic: 30000, openai: 60000, gemini: 1000000, openrouter: 60000, github: 60000, ollama: 0 }[type] || 30000);
+  const tpmHint = (type) => ({ anthropic: 'Tier 1: 30K, Tier 4: 400K', openai: 'Default: 60K', gemini: '~unlimited', ollama: '0 = no limit' }[type] || '');
+
   // Check how many providers are connected for combo validation.
   const connectedCount = providers.filter(p => p.status === 'active').length;
 
@@ -157,7 +163,21 @@ export function Providers() {
 
       {tab === 'providers' && (
         <div>
-          <div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:1rem">
+            <button class="btn-secondary" disabled={refreshing}
+              onClick={async () => {
+                setRefreshing(true);
+                try {
+                  await fetch('/api/providers/models/refresh', { method: 'POST' });
+                  // Reload model data.
+                  const d = await fetch('/api/providers/models').then(r => r.json());
+                  setAllModels(d.models || []);
+                  setMsg('Models refreshed.');
+                  setTimeout(() => setMsg(''), 3000);
+                } finally { setRefreshing(false); }
+              }}>
+              {refreshing ? 'Refreshing...' : '↻ Refresh Models'}
+            </button>
             <button class="btn-primary" onClick={() => setShowAddProvider(true)}>+ Add Provider</button>
           </div>
 
@@ -183,6 +203,20 @@ export function Providers() {
                   <div style="font-size:12px;color:var(--text-muted);margin-top:8px">
                     {p.base_url && <span>Base URL: {p.base_url} · </span>}
                     API Key: {p.has_key ? 'Configured' : 'Missing'}
+                  </div>
+                  <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                    <label style="font-size:12px;font-weight:500;white-space:nowrap">Rate Limit (TPM):</label>
+                    <input type="number" style="width:120px;font-size:12px;padding:4px 8px"
+                      defaultValue={p.config?.tokens_per_minute || defaultTPMForType(p.type)}
+                      onBlur={e => {
+                        const tpm = parseInt(e.target.value) || 0;
+                        fetch(`/api/providers/${p.id}/config`, {
+                          method: 'PATCH',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ tokens_per_minute: tpm }),
+                        }).then(() => loadProviders());
+                      }} />
+                    <span style="font-size:11px;color:var(--text-secondary)">{tpmHint(p.type)}</span>
                   </div>
                 </div>
               ))}
@@ -211,7 +245,7 @@ export function Providers() {
 
           <div class="card-list">
             {combos.map(c => {
-              const comboModels = Array.isArray(c.models) ? c.models : [];
+              const comboModels = Array.isArray(c.models) ? c.models : (typeof c.models === 'string' ? (() => { try { return JSON.parse(c.models); } catch { return []; } })() : []);
               return (
                 <div class="card" key={c.id} style="padding:1rem;cursor:pointer"
                   onClick={() => setExpandedCombo(expandedCombo === c.id ? null : c.id)}>
@@ -427,7 +461,7 @@ export function Providers() {
                   const models = (comboForm.models || []).map(m => ({
                     provider_type: m.provider_type || m.provider, model: m.model || m.model_id, priority: m.priority,
                   }));
-                  saveCombo({ ...comboForm, models: JSON.stringify(models) });
+                  saveCombo({ ...comboForm, models });
                   setEditingComboId(null);
                 }} disabled={!comboForm.name || !(comboForm.models || []).length}>
                   {editingComboId ? 'Save Changes' : 'Create'}

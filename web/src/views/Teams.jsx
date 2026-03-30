@@ -1,5 +1,6 @@
 import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
+import { route } from 'preact-router';
 import { Label } from '../components/InfoTip';
 
 export function Teams({ embedded } = {}) {
@@ -7,7 +8,7 @@ export function Teams({ embedded } = {}) {
   const [tasks, setTasks] = useState({});
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ name: '', lead_id: '', members: [] });
+  const [form, setForm] = useState({ name: '', lead_id: '', members: [], description: '', max_concurrent: 2, chat_verbosity: 'progressive' });
   const [agents, setAgents] = useState([]);
   const [memberSearch, setMemberSearch] = useState('');
 
@@ -32,7 +33,7 @@ export function Teams({ embedded } = {}) {
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ name: '', lead_id: '', members: [] });
+    setForm({ name: '', lead_id: '', members: [], description: '', max_concurrent: 2, chat_verbosity: 'progressive' });
     setMemberSearch('');
     setShowModal(true);
   };
@@ -40,17 +41,27 @@ export function Teams({ embedded } = {}) {
   const openEdit = (team) => {
     setEditing(team.id);
     let members = [];
+    let settings = { max_concurrent: 2, chat_verbosity: 'progressive' };
     try {
       const cfg = JSON.parse(team.config || '{}');
       members = cfg.members || [];
     } catch {}
-    setForm({ name: team.name, lead_id: team.lead, members });
+    try {
+      const s = JSON.parse(team.settings || '{}');
+      if (s.max_concurrent) settings.max_concurrent = s.max_concurrent;
+      if (s.chat_verbosity) settings.chat_verbosity = s.chat_verbosity;
+    } catch {}
+    setForm({ name: team.name, lead_id: team.lead, members, description: team.description || '', ...settings });
     setMemberSearch('');
     setShowModal(true);
   };
 
   const save = async () => {
-    const body = { name: form.name, lead_id: form.lead_id, members: form.members };
+    const body = {
+      name: form.name, lead_id: form.lead_id, members: form.members,
+      description: form.description,
+      settings: JSON.stringify({ max_concurrent: parseInt(form.max_concurrent) || 2, chat_verbosity: form.chat_verbosity }),
+    };
     if (editing) {
       await fetch(`/api/teams/${editing}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -91,8 +102,12 @@ export function Teams({ embedded } = {}) {
   );
 
   const statusColor = {
-    open: 'badge-blue', claimed: 'badge-gray',
+    pending: 'badge-gray', in_progress: 'badge-blue',
     completed: 'badge-green', blocked: 'badge-red',
+    in_review: 'badge-yellow', failed: 'badge-red',
+    cancelled: 'badge-gray',
+    // Legacy compat.
+    open: 'badge-blue', claimed: 'badge-gray',
   };
 
   return (
@@ -111,11 +126,16 @@ export function Teams({ embedded } = {}) {
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <div>
                   <h3 style="font-size:16px;font-weight:600">{team.name}</h3>
+                  {team.description && (
+                    <div style="font-size:12px;color:var(--text-muted);margin-top:2px">{team.description}</div>
+                  )}
                   <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
                     Lead: <strong>{team.lead}</strong> · {team.members || 0} members
                   </div>
                 </div>
                 <div style="display:flex;gap:0.5rem">
+                  <button class="btn-small" style="color:var(--primary);border-color:var(--primary)"
+                    onClick={() => route(`/teams/${team.id}/board`)}>Board</button>
                   <button class="btn-small" onClick={() => openEdit(team)}>Edit</button>
                   <button class="btn-small btn-danger" onClick={() => del(team.id)}>Delete</button>
                 </div>
@@ -150,6 +170,12 @@ export function Teams({ embedded } = {}) {
               <Label text="Team Name" tip="A descriptive name for this agent team." />
               <input type="text" placeholder="e.g. Research Team" value={form.name}
                 onInput={e => setForm({ ...form, name: e.target.value })} />
+            </div>
+
+            <div class="form-group">
+              <Label text="Description" tip="What this team does. Shown on the taskboard." />
+              <input type="text" placeholder="e.g. Researches and writes content" value={form.description}
+                onInput={e => setForm({ ...form, description: e.target.value })} />
             </div>
 
             <div class="form-group">
@@ -203,6 +229,21 @@ export function Teams({ embedded } = {}) {
                     No matching agents found.
                   </div>
                 )}
+              </div>
+            </div>
+
+            <div style="display:flex;gap:12px;margin-top:8px">
+              <div class="form-group" style="flex:1">
+                <Label text="Max Concurrent" tip="Maximum tasks running at the same time." />
+                <input type="number" min="1" max="10" value={form.max_concurrent}
+                  onInput={e => setForm({ ...form, max_concurrent: e.target.value })} />
+              </div>
+              <div class="form-group" style="flex:1">
+                <Label text="Chat Verbosity" tip="Progressive: batched updates. Detailed: per-task updates." />
+                <select value={form.chat_verbosity} onChange={e => setForm({ ...form, chat_verbosity: e.target.value })}>
+                  <option value="progressive">Progressive</option>
+                  <option value="detailed">Detailed</option>
+                </select>
               </div>
             </div>
 

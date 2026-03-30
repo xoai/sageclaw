@@ -135,6 +135,86 @@ func TestToAPIRequest_WithToolCall(t *testing.T) {
 	}
 }
 
+func TestToAPIRequest_ThinkingBudget(t *testing.T) {
+	tests := []struct {
+		level       string
+		wantBudget  int
+		wantMinMax  int // max_tokens must be at least budget + 8192
+	}{
+		{"low", 4096, 4096 + 8192},
+		{"medium", 10000, 10000 + 8192},
+		{"high", 32000, 32000 + 8192},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.level, func(t *testing.T) {
+			req := &canonical.Request{
+				Model:     "claude-sonnet-4-20250514",
+				MaxTokens: 1024, // Too small — should be adjusted.
+				Messages: []canonical.Message{
+					{Role: "user", Content: []canonical.Content{{Type: "text", Text: "think"}}},
+				},
+				Options: map[string]any{"thinking_level": tt.level},
+			}
+
+			data, err := ToAPIRequest(req, false)
+			if err != nil {
+				t.Fatalf("translation failed: %v", err)
+			}
+
+			var raw map[string]any
+			json.Unmarshal(data, &raw)
+
+			// Thinking should be present.
+			thinking := raw["thinking"].(map[string]any)
+			if thinking["type"] != "enabled" {
+				t.Errorf("expected type=enabled, got %v", thinking["type"])
+			}
+			if int(thinking["budget_tokens"].(float64)) != tt.wantBudget {
+				t.Errorf("expected budget=%d, got %v", tt.wantBudget, thinking["budget_tokens"])
+			}
+
+			// max_tokens should be adjusted up.
+			maxTokens := int(raw["max_tokens"].(float64))
+			if maxTokens < tt.wantMinMax {
+				t.Errorf("max_tokens=%d, want at least %d", maxTokens, tt.wantMinMax)
+			}
+
+			// Temperature must NOT be present when thinking is enabled.
+			if _, ok := raw["temperature"]; ok {
+				t.Error("temperature must be omitted when thinking is enabled")
+			}
+		})
+	}
+}
+
+func TestToAPIRequest_ThinkingDisabled_TemperaturePreserved(t *testing.T) {
+	req := &canonical.Request{
+		Model:       "claude-sonnet-4-20250514",
+		MaxTokens:   1024,
+		Temperature: 0.7,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "hello"}}},
+		},
+	}
+
+	data, err := ToAPIRequest(req, false)
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	if raw["thinking"] != nil {
+		t.Error("thinking should not be present without thinking_level")
+	}
+	temp, ok := raw["temperature"].(float64)
+	if !ok || temp != 0.7 {
+		t.Errorf("expected temperature=0.7, got %v", raw["temperature"])
+	}
+}
+
 func TestFromAPIResponse_Text(t *testing.T) {
 	apiResp := `{
 		"id": "msg_123",
@@ -165,6 +245,90 @@ func TestFromAPIResponse_Text(t *testing.T) {
 	}
 	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 8 {
 		t.Fatalf("wrong usage: %+v", resp.Usage)
+	}
+}
+
+func TestFromAPIResponse_Thinking(t *testing.T) {
+	apiResp := `{
+		"id": "msg_think",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "thinking", "thinking": "Let me reason about this...", "signature": "sig_abc123"},
+			{"type": "text", "text": "Here is my answer."}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 10, "output_tokens": 50}
+	}`
+
+	resp, err := FromAPIResponse([]byte(apiResp))
+	if err != nil {
+		t.Fatalf("parsing failed: %v", err)
+	}
+
+	content := resp.Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(content))
+	}
+
+	// First block: thinking with signature in Meta.
+	if content[0].Type != "thinking" {
+		t.Errorf("expected thinking block, got %s", content[0].Type)
+	}
+	if content[0].Thinking != "Let me reason about this..." {
+		t.Errorf("wrong thinking text: %s", content[0].Thinking)
+	}
+	if content[0].Meta["thinking_signature"] != "sig_abc123" {
+		t.Errorf("expected thinking_signature=sig_abc123, got %v", content[0].Meta)
+	}
+
+	// Second block: text.
+	if content[1].Type != "text" || content[1].Text != "Here is my answer." {
+		t.Errorf("unexpected text block: %+v", content[1])
+	}
+}
+
+func TestToAPIRequest_ThinkingSignatureRoundTrip(t *testing.T) {
+	// Simulate a multi-turn conversation with thinking signatures.
+	req := &canonical.Request{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 8192,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Think carefully"}}},
+			{Role: "assistant", Content: []canonical.Content{
+				{Type: "thinking", Thinking: "Let me reason...", Meta: map[string]string{"thinking_signature": "sig_round"}},
+				{Type: "text", Text: "My answer."},
+			}},
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Follow up"}}},
+		},
+		Options: map[string]any{"thinking_level": "medium"},
+	}
+
+	data, err := ToAPIRequest(req, false)
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	msgs := raw["messages"].([]any)
+	// Message[1] should be assistant with thinking + text blocks.
+	assistantMsg := msgs[1].(map[string]any)
+	blocks := assistantMsg["content"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks in assistant message, got %d", len(blocks))
+	}
+
+	thinkingBlock := blocks[0].(map[string]any)
+	if thinkingBlock["type"] != "thinking" {
+		t.Errorf("expected thinking block, got %v", thinkingBlock["type"])
+	}
+	if thinkingBlock["signature"] != "sig_round" {
+		t.Errorf("expected signature=sig_round, got %v", thinkingBlock["signature"])
+	}
+	if thinkingBlock["thinking"] != "Let me reason..." {
+		t.Errorf("expected thinking text, got %v", thinkingBlock["thinking"])
 	}
 }
 
@@ -264,6 +428,9 @@ data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use"
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}
 
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"test.txt\"}"}}
+
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
@@ -280,15 +447,91 @@ data: {"type":"message_stop"}
 		collected = append(collected, evt)
 	}
 
-	hasToolCall := false
+	// Tool call should be emitted as a complete ToolCall (not deltas).
+	var completeTC *canonical.ToolCall
 	for _, evt := range collected {
-		if evt.Type == "tool_call" && evt.Delta != nil {
-			if evt.Delta.ToolName == "read_file" {
-				hasToolCall = true
+		if evt.Type == "tool_call" && evt.Delta != nil && evt.Delta.ToolCall != nil {
+			completeTC = evt.Delta.ToolCall
+		}
+	}
+	if completeTC == nil {
+		t.Fatal("expected complete tool_call event")
+	}
+	if completeTC.ID != "call_1" {
+		t.Errorf("expected ID=call_1, got %q", completeTC.ID)
+	}
+	if completeTC.Name != "read_file" {
+		t.Errorf("expected Name=read_file, got %q", completeTC.Name)
+	}
+	if string(completeTC.Input) != `{"path":"test.txt"}` {
+		t.Errorf("expected accumulated input, got %q", string(completeTC.Input))
+	}
+}
+
+func TestParseSSEStream_ThinkingAndSignature(t *testing.T) {
+	sseData := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","role":"assistant"}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think..."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_stream_123"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Answer."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+	events := make(chan provider.StreamEvent, 32)
+	go ParseSSEStream(strings.NewReader(sseData), events)
+
+	var collected []provider.StreamEvent
+	for evt := range events {
+		collected = append(collected, evt)
+	}
+
+	hasThinking := false
+	hasSignature := false
+	hasText := false
+	for _, evt := range collected {
+		if evt.Type == "content_delta" && evt.Delta != nil {
+			if evt.Delta.Type == "thinking" && evt.Delta.Thinking != "" {
+				hasThinking = true
+			}
+			if evt.Delta.Type == "thinking" && evt.Delta.Meta != nil {
+				if evt.Delta.Meta["thinking_signature"] == "sig_stream_123" {
+					hasSignature = true
+				}
+			}
+			if evt.Delta.Type == "text" && evt.Delta.Text == "Answer." {
+				hasText = true
 			}
 		}
 	}
-	if !hasToolCall {
-		t.Fatal("expected tool_call event for read_file")
+
+	if !hasThinking {
+		t.Error("expected thinking_delta event")
+	}
+	if !hasSignature {
+		t.Error("expected signature_delta event")
+	}
+	if !hasText {
+		t.Error("expected text_delta event")
 	}
 }

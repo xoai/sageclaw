@@ -7,17 +7,23 @@ import (
 
 // Tool group constants.
 const (
+	GroupCore          = "core" // datetime, load_skill, plan — always included
 	GroupFS            = "fs"
 	GroupRuntime       = "runtime"
 	GroupWeb           = "web"
 	GroupMemory        = "memory"
+	GroupGraph         = "graph" // memory_link, memory_graph, knowledge_graph_search
 	GroupKnowledge     = "knowledge"
 	GroupOrchestration = "orchestration"
 	GroupTeam          = "team"
 	GroupCron          = "cron"
 	GroupAudit         = "audit"
 	GroupMCP           = "mcp"
-	GroupOther         = "other"
+	GroupOther         = "other" // legacy — prefer GroupCore for new tools
+	GroupMedia         = "media"
+	GroupBrowser       = "browser"
+	GroupSessions      = "sessions"
+	GroupMessaging     = "messaging"
 )
 
 // Profile constants.
@@ -35,16 +41,18 @@ const (
 var profileDefs = map[string][]string{
 	ProfileFull: nil, // nil means all groups allowed — handled in IsInProfile
 	ProfileCoding: {
-		GroupFS, GroupRuntime, GroupWeb, GroupMemory,
+		GroupCore, GroupFS, GroupRuntime, GroupWeb, GroupMemory, GroupGraph,
 		GroupKnowledge, GroupOrchestration, GroupAudit,
+		GroupMedia, GroupSessions,
 	},
 	ProfileMessaging: {
-		GroupWeb, GroupMemory, GroupTeam,
+		GroupCore, GroupWeb, GroupMemory, GroupTeam,
+		GroupMessaging,
 	},
 	ProfileReadonly: {
-		GroupFS, GroupWeb, GroupMemory, GroupAudit,
+		GroupCore, GroupFS, GroupWeb, GroupMemory, GroupAudit,
 	},
-	ProfileMinimal: {}, // empty slice = no groups in-profile; all tools trigger consent prompts
+	ProfileMinimal: {GroupCore}, // core tools always available
 }
 
 // ProfileGroups returns the set of allowed groups for a profile.
@@ -80,6 +88,7 @@ var AlwaysConsentGroups = map[string]bool{
 	GroupRuntime:       true,
 	GroupMCP:           true,
 	GroupOrchestration: true,
+	GroupBrowser:       true,
 }
 
 // IsInProfile returns true if the group is allowed by the given profile.
@@ -115,6 +124,14 @@ func GroupExplanation(group, source string) string {
 		return "This tool can schedule recurring tasks."
 	case GroupTeam:
 		return "This tool can manage team members and their configurations."
+	case GroupMedia:
+		return "This tool can read images, documents, or generate images using AI providers."
+	case GroupBrowser:
+		return "This tool can automate a headless browser to navigate pages and interact with web content."
+	case GroupSessions:
+		return "This tool can view and interact with other agent sessions."
+	case GroupMessaging:
+		return "This tool can send proactive messages to channels the agent is bound to."
 	default:
 		return "This tool requires permission to proceed."
 	}

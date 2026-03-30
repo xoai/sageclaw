@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 )
 
@@ -162,7 +163,7 @@ func (s *Server) handleChannelConfigure(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.store.DB().QueryContext(r.Context(),
-		`SELECT id, name, lead_id, config FROM teams ORDER BY name`)
+		`SELECT id, name, lead_id, config, COALESCE(description,''), COALESCE(settings,'{}') FROM teams ORDER BY name`)
 	if err != nil {
 		writeJSON(w, []any{})
 		return
@@ -171,8 +172,8 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 
 	var teams []map[string]any
 	for rows.Next() {
-		var id, name, leadID, config string
-		rows.Scan(&id, &name, &leadID, &config)
+		var id, name, leadID, config, description, settings string
+		rows.Scan(&id, &name, &leadID, &config, &description, &settings)
 
 		// Count members from config.
 		members := 0
@@ -186,6 +187,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 		teams = append(teams, map[string]any{
 			"id": id, "name": name, "lead": leadID,
 			"config": config, "members": members,
+			"description": description, "settings": settings,
 		})
 	}
 	if teams == nil {
@@ -196,9 +198,11 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTeamsCreate(w http.ResponseWriter, r *http.Request) {
 	var p struct {
-		Name    string   `json:"name"`
-		LeadID  string   `json:"lead_id"`
-		Members []string `json:"members"`
+		Name        string   `json:"name"`
+		LeadID      string   `json:"lead_id"`
+		Members     []string `json:"members"`
+		Description string   `json:"description"`
+		Settings    string   `json:"settings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -213,11 +217,15 @@ func (s *Server) handleTeamsCreate(w http.ResponseWriter, r *http.Request) {
 
 	id := fmt.Sprintf("team_%s", strings.ReplaceAll(strings.ToLower(p.Name), " ", "_"))
 	config, _ := json.Marshal(map[string]any{"members": p.Members})
+	if p.Settings == "" {
+		p.Settings = "{}"
+	}
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.store.DB().ExecContext(r.Context(),
-		`INSERT INTO teams (id, name, lead_id, config) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, lead_id=excluded.lead_id, config=excluded.config`,
-		id, p.Name, p.LeadID, string(config))
+		`INSERT INTO teams (id, name, lead_id, config, description, settings, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, lead_id=excluded.lead_id, config=excluded.config, description=excluded.description, settings=excluded.settings, updated_at=excluded.updated_at`,
+		id, p.Name, p.LeadID, string(config), p.Description, p.Settings, now, now)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": err.Error()})
@@ -235,9 +243,11 @@ func (s *Server) handleTeamsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var p struct {
-		Name    string   `json:"name"`
-		LeadID  string   `json:"lead_id"`
-		Members []string `json:"members"`
+		Name        string   `json:"name"`
+		LeadID      string   `json:"lead_id"`
+		Members     []string `json:"members"`
+		Description string   `json:"description"`
+		Settings    string   `json:"settings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -246,9 +256,12 @@ func (s *Server) handleTeamsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	config, _ := json.Marshal(map[string]any{"members": p.Members})
+	if p.Settings == "" {
+		p.Settings = "{}"
+	}
 	_, err := s.store.DB().ExecContext(r.Context(),
-		`UPDATE teams SET name=?, lead_id=?, config=? WHERE id=?`,
-		p.Name, p.LeadID, string(config), id)
+		`UPDATE teams SET name=?, lead_id=?, config=?, description=?, settings=?, updated_at=? WHERE id=?`,
+		p.Name, p.LeadID, string(config), p.Description, p.Settings, time.Now().UTC().Format(time.RFC3339), id)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		writeJSON(w, map[string]string{"error": err.Error()})
@@ -281,8 +294,13 @@ func (s *Server) handleTeamsTasks(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.store.DB().QueryContext(r.Context(),
 		`SELECT id, team_id, title, COALESCE(description,''), status, COALESCE(assigned_to,''),
-			created_by, COALESCE(result,''), created_at, updated_at
-		 FROM team_tasks WHERE team_id = ? ORDER BY created_at DESC LIMIT 50`, teamID)
+			created_by, COALESCE(result,''), COALESCE(blocked_by,''), COALESCE(parent_id,''),
+			COALESCE(priority,0), COALESCE(task_number,0), COALESCE(identifier,''),
+			COALESCE(progress_percent,0), COALESCE(require_approval,0),
+			COALESCE(batch_id,''), COALESCE(owner_agent_id,''),
+			COALESCE(retry_count,0), COALESCE(max_retries,0), COALESCE(error_message,''),
+			created_at, updated_at
+		 FROM team_tasks WHERE team_id = ? ORDER BY created_at DESC LIMIT 100`, teamID)
 	if err != nil {
 		writeJSON(w, []any{})
 		return
@@ -291,17 +309,141 @@ func (s *Server) handleTeamsTasks(w http.ResponseWriter, r *http.Request) {
 
 	var tasks []map[string]any
 	for rows.Next() {
-		var id, tid, title, desc, status, assigned, created, result, createdAt, updatedAt string
-		rows.Scan(&id, &tid, &title, &desc, &status, &assigned, &created, &result, &createdAt, &updatedAt)
+		var (
+			id, tid, title, desc, status, assigned, created, result        string
+			blockedBy, parentID, identifier, batchID, ownerAgentID, errMsg string
+			priority, taskNumber, progressPercent, retryCount, maxRetries   int
+			requireApproval                                                 int
+			createdAt, updatedAt                                            string
+		)
+		rows.Scan(&id, &tid, &title, &desc, &status, &assigned,
+			&created, &result, &blockedBy, &parentID,
+			&priority, &taskNumber, &identifier,
+			&progressPercent, &requireApproval,
+			&batchID, &ownerAgentID,
+			&retryCount, &maxRetries, &errMsg,
+			&createdAt, &updatedAt)
 		tasks = append(tasks, map[string]any{
-			"id": id, "title": title, "description": desc, "status": status,
+			"id": id, "team_id": tid, "title": title, "description": desc, "status": status,
 			"assigned_to": assigned, "created_by": created, "result": result,
+			"blocked_by": blockedBy, "parent_id": parentID,
+			"priority": priority, "task_number": taskNumber, "identifier": identifier,
+			"progress_percent": progressPercent, "require_approval": requireApproval == 1,
+			"batch_id": batchID, "owner_agent_id": ownerAgentID,
+			"retry_count": retryCount, "max_retries": maxRetries, "error_message": errMsg,
+			"created_at": createdAt, "updated_at": updatedAt,
 		})
 	}
 	if tasks == nil {
 		tasks = []map[string]any{}
 	}
 	writeJSON(w, tasks)
+}
+
+func (s *Server) handleTeamsTaskAction(w http.ResponseWriter, r *http.Request) {
+	// Extract team ID from path: /api/teams/tasks/{teamId}/action
+	path := r.URL.Path
+	parts := strings.Split(strings.TrimPrefix(path, "/api/teams/tasks/"), "/")
+	if len(parts) < 2 || parts[0] == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "team ID required"})
+		return
+	}
+
+	var p struct {
+		TaskID   string `json:"task_id"`
+		Action   string `json:"action"`
+		Feedback string `json:"feedback"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.TaskID == "" || p.Action == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "task_id and action required"})
+		return
+	}
+
+	ctx := r.Context()
+	var err error
+
+	switch p.Action {
+	case "cancel":
+		err = s.store.CancelTask(ctx, p.TaskID)
+	case "approve":
+		// Approve transitions in_review → completed via UpdateTask (bypasses CompleteTask's in_progress check).
+		task, getErr := s.store.GetTask(ctx, p.TaskID)
+		if getErr != nil || task == nil {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]string{"error": "task not found"})
+			return
+		}
+		if task.Status != "in_review" {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "task is not in_review"})
+			return
+		}
+		err = s.store.UpdateTask(ctx, p.TaskID, map[string]any{
+			"status":       "completed",
+			"completed_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	case "reject":
+		// Reject re-queues the task as pending for rework.
+		task, getErr := s.store.GetTask(ctx, p.TaskID)
+		if getErr != nil || task == nil {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]string{"error": "task not found"})
+			return
+		}
+		if task.Status != "in_review" {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "task is not in_review"})
+			return
+		}
+		err = s.store.UpdateTask(ctx, p.TaskID, map[string]any{
+			"status":        "pending",
+			"error_message": p.Feedback,
+		})
+	case "retry":
+		err = s.store.RetryTask(ctx, p.TaskID)
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "unknown action: " + p.Action})
+		return
+	}
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]string{"task_id": p.TaskID, "action": p.Action, "status": "ok"})
+}
+
+// --- Task Resolution ---
+
+func (s *Server) handleTaskResolve(w http.ResponseWriter, r *http.Request) {
+	identifier := r.URL.Query().Get("id")
+	if identifier == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "id parameter required"})
+		return
+	}
+
+	var teamID, taskID string
+	err := s.store.DB().QueryRowContext(r.Context(),
+		`SELECT team_id, id FROM team_tasks WHERE identifier = ? LIMIT 1`, identifier).Scan(&teamID, &taskID)
+	if err != nil {
+		writeJSON(w, map[string]any{"found": false})
+		return
+	}
+	writeJSON(w, map[string]any{"found": true, "team_id": teamID, "task_id": taskID, "identifier": identifier})
+}
+
+// --- Attention Count ---
+
+func (s *Server) handleTeamsAttentionCount(w http.ResponseWriter, r *http.Request) {
+	var count int
+	s.store.DB().QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM team_tasks WHERE status IN ('in_review','failed','blocked')`).Scan(&count)
+	writeJSON(w, map[string]any{"count": count})
 }
 
 // --- Skills ---
