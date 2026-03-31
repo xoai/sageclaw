@@ -9,8 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "dompurify": "^3.3.3",
     "preact": "^10.25.0",
-    "preact-router": "^4.1.2"
+    "preact-router": "^4.1.2",
+    "snarkdown": "^2.0.0"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.9.0",

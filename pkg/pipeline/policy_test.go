@@ -57,6 +57,9 @@ func (m *mockPolicyStore) UpdateSessionTokens(context.Context, string, int64, in
 func (m *mockPolicyStore) UpdateSessionTitle(context.Context, string, string) error {
 	return nil
 }
+func (m *mockPolicyStore) UpdateSessionMetadata(context.Context, string, map[string]string) error {
+	return nil
+}
 func (m *mockPolicyStore) AppendMessages(context.Context, string, []canonical.Message) error {
 	panic("not implemented")
 }
@@ -245,6 +248,28 @@ func (m *mockPolicyStore) DeleteDiscoveredModelsByProvider(context.Context, stri
 	panic("not implemented")
 }
 func (m *mockPolicyStore) GetDiscoveredModelAge(context.Context, string) (time.Duration, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) RecoverStaleTasks(context.Context, int) ([]store.TeamTask, error) {
+	return nil, nil
+}
+func (m *mockPolicyStore) IncrementDispatchAttempt(context.Context, string) (int, error) {
+	return 0, nil
+}
+func (m *mockPolicyStore) CancelDependentTasks(context.Context, string) ([]store.TeamTask, error) {
+	return nil, nil
+}
+func (m *mockPolicyStore) IncrementSubtaskCount(context.Context, string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) DecrementSubtaskCount(context.Context, string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) FindDuplicateTask(context.Context, string, string, string) (*store.TeamTask, error) {
+	return nil, nil
+}
+func (m *mockPolicyStore) DeleteTask(context.Context, string) error { panic("not implemented") }
+func (m *mockPolicyStore) DeleteTerminalTasks(context.Context, string) (int, error) {
 	panic("not implemented")
 }
 func (m *mockPolicyStore) DB() *sql.DB { return nil }

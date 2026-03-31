@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"io"
 	"log"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/xoai/sageclaw/pkg/channel/cli"
 	"github.com/xoai/sageclaw/pkg/channel/discord"
 	"github.com/xoai/sageclaw/pkg/channel/telegram"
+	"github.com/xoai/sageclaw/pkg/channel/toolstatus"
 	"github.com/xoai/sageclaw/pkg/channel/whatsapp"
 	"github.com/xoai/sageclaw/pkg/channel/zalo"
 	"github.com/xoai/sageclaw/pkg/channel/zalobot"
@@ -563,7 +565,7 @@ func run() error {
 	tool.RegisterMemory(toolReg, memEngine)
 	tool.RegisterGraph(toolReg, graphOps, memEngine)
 	tool.RegisterCron(toolReg, appStore)
-	tool.RegisterSpawn(toolReg)
+	// Spawn tools registered later after SubagentManager is created.
 	tool.RegisterPlan(toolReg)
 	tool.RegisterSkillLoader(toolReg, skillsDir)
 	tool.RegisterDatetime(toolReg)
@@ -579,6 +581,7 @@ func run() error {
 	// --- Agent configs (file-first, with DB/YAML fallback) ---
 	agentsDir := filepath.Join(f.workspace, "agents")
 	agentConfigs := map[string]agent.Config{}
+	var agentMu sync.Mutex // protects fileAgents and agentConfigs
 
 	// Migrate deprecated tools.yaml fields once at startup.
 	agentcfg.MigrateToolsConfig(agentsDir)
@@ -611,7 +614,31 @@ func run() error {
 				return
 			}
 			reloaded.SkillsDir = skillsDir
-			agentConfigs[agentID] = agentcfg.ToRuntimeConfig(reloaded)
+
+			agentMu.Lock()
+			defer agentMu.Unlock()
+
+			// Preserve TeamInfo across hot-reload — it was set during startup
+			// from team config, not from the agent's files on disk.
+			if prev, ok := fileAgents[agentID]; ok && prev.TeamInfo != nil {
+				reloaded.TeamInfo = prev.TeamInfo
+			}
+			fileAgents[agentID] = reloaded
+
+			rc := agentcfg.ToRuntimeConfig(reloaded)
+			// Re-inject task context funcs for team agents.
+			if reloaded.TeamInfo != nil && reloaded.TeamInfo.Role == "lead" {
+				teamIDCopy := reloaded.TeamInfo.TeamID
+				rc.TaskSummaryFunc = func(ctx context.Context) string {
+					return buildLeadTaskSummary(ctx, appStore, teamIDCopy)
+				}
+			} else if reloaded.TeamInfo != nil && reloaded.TeamInfo.Role == "member" {
+				memberAgentID := agentID
+				rc.MemberTaskContextFunc = func(ctx context.Context) string {
+					return buildMemberTaskContext(ctx, appStore, memberAgentID)
+				}
+			}
+			agentConfigs[agentID] = rc
 			agentProvider.Update(agentID, reloaded)
 			if loopPool != nil {
 				loopPool.UpdateConfig(agentID, agentConfigs[agentID])
@@ -682,22 +709,10 @@ Key behaviors:
 
 	// --- Orchestration ---
 
-	// Delegation links from config.
-	var delegationLinks []store.DelegationLink
-	for _, dl := range cfg.Delegation {
-		maxC := dl.MaxConcurrent
-		if maxC == 0 {
-			maxC = 1
-		}
-		delegationLinks = append(delegationLinks, store.DelegationLink{
-			ID: fmt.Sprintf("link_%s_%s", dl.Source, dl.Target),
-			SourceID: dl.Source, TargetID: dl.Target,
-			Direction: dl.Direction, MaxConcurrent: maxC,
-			TimeoutSec: dl.TimeoutSec,
-		})
-	}
+	// Seed delegation links from YAML on first boot (DB is authoritative).
+	seedDelegationLinks(appStore, cfg)
 
-	delegator := orchestration.NewDelegator(appStore, agentConfigs, delegationLinks, defaultProvider, router, toolReg)
+	delegator := orchestration.NewDelegator(appStore, agentConfigs, defaultProvider, router, toolReg)
 
 	// Register delegation tools.
 	tool.RegisterDelegate(toolReg,
@@ -713,67 +728,8 @@ Key behaviors:
 		},
 	)
 
-	// Teams from config.
-	var teams []orchestration.Team
-	for _, tc := range cfg.Teams {
-		teams = append(teams, orchestration.Team{
-			ID: tc.ID, Name: tc.Name, LeadID: tc.Lead, Members: tc.Members,
-		})
-	}
-	teamMgr := orchestration.NewTeamManager(appStore, teams)
-	// v1 team tools removed — superseded by v2 team_tasks (registered in TeamExecutor block below).
-	// tool.RegisterTeam(toolReg, teamMgr)
-	_ = teamMgr // Keep teamMgr alive for orchestration use.
-
-	// Inject team context into agent system prompts for team members.
-	for _, tc := range cfg.Teams {
-		// Build member info list.
-		allAgents := append([]string{tc.Lead}, tc.Members...)
-		var memberInfos []agentcfg.TeamMemberInfo
-		for _, aid := range allAgents {
-			role := "member"
-			if aid == tc.Lead {
-				role = "lead"
-			}
-			displayName := aid
-			desc := ""
-			if fa, ok := fileAgents[aid]; ok {
-				if fa.Identity.Name != "" {
-					displayName = fa.Identity.Name
-				}
-				desc = fa.Identity.Role
-			}
-			memberInfos = append(memberInfos, agentcfg.TeamMemberInfo{
-				AgentID:     aid,
-				DisplayName: displayName,
-				Role:        role,
-				Description: desc,
-			})
-		}
-
-		// Set TeamInfo on each agent's config.
-		leadName := tc.Lead
-		if fa, ok := fileAgents[tc.Lead]; ok && fa.Identity.Name != "" {
-			leadName = fa.Identity.Name
-		}
-		for _, aid := range allAgents {
-			if fa, ok := fileAgents[aid]; ok {
-				role := "member"
-				if aid == tc.Lead {
-					role = "lead"
-				}
-				fa.TeamInfo = &agentcfg.TeamInfo{
-					TeamID:   tc.ID,
-					TeamName: tc.Name,
-					Role:     role,
-					LeadName: leadName,
-					Members:  memberInfos,
-				}
-				// Re-assemble system prompt with team context.
-				agentConfigs[aid] = agentcfg.ToRuntimeConfig(fa)
-			}
-		}
-	}
+	// Teams: DB is authoritative. Seed from YAML on first boot only.
+	seedTeamsFromConfig(appStore, cfg)
 
 	// Handoff.
 	agentNames := map[string]string{"default": "SageClaw"}
@@ -848,6 +804,10 @@ Key behaviors:
 	var sseBroadcast func(agent.Event)
 	var telegramEventForwarder func(agent.Event)
 
+	// Tool activity tracker — surfaces tool call activity to channel adapters.
+	displayMap := toolstatus.DefaultDisplayMap()
+	toolTracker := toolstatus.NewTracker(displayMap, nil, nil) // callbacks set after channel manager is ready
+
 	// Forward-reference for lead wakeup (set after pipeline is created).
 	var wakeLeadFn team.WakeLeadFunc
 
@@ -915,6 +875,17 @@ Key behaviors:
 	}
 	loopOpts = append(loopOpts, agent.WithAudioStore(audioStore))
 
+	// Create SubagentManager before LoopPool so WithSubagentManager is in loopOpts at creation.
+	subagentMgr := agent.NewSubagentManager(agent.SubagentConfig{
+		MaxChildrenPerAgent: 5,
+		MaxConcurrent:       8,
+	}, nil, func(e agent.Event) {
+		if sseBroadcast != nil {
+			sseBroadcast(e)
+		}
+	})
+	loopOpts = append(loopOpts, agent.WithSubagentManager(subagentMgr))
+
 	// Always create LoopPool so hot-reload from dashboard works.
 	// When no providers exist yet, defaultProvider is nil — the router handles resolution.
 	loopPool = agent.NewLoopPool(agentConfigs, defaultProvider, toolReg, preCtx, postTool,
@@ -922,18 +893,28 @@ Key behaviors:
 			switch e.Type {
 			case agent.EventRunStarted:
 				log.Printf("[%s] run started", e.SessionID)
+				toolTracker.OnRunStarted(e.SessionID)
 			case agent.EventRunCompleted:
 				log.Printf("[%s] run completed", e.SessionID)
+				toolTracker.OnRunCompleted(e.SessionID)
 			case agent.EventToolCall:
 				if e.ToolCall != nil {
 					log.Printf("[%s] tool call: %s", e.SessionID, e.ToolCall.Name)
+					toolTracker.OnToolCall(e.SessionID, e.ToolCall)
 				}
+			case agent.EventToolResult:
+				if e.ToolResult != nil {
+					toolTracker.OnToolResult(e.SessionID, e.ToolResult)
+				}
+			case agent.EventChunk:
+				toolTracker.OnChunk(e.SessionID)
 			case agent.EventConsentNeeded:
 				if e.Consent != nil {
 					log.Printf("[%s] consent needed: %s (%s/%s)", e.SessionID, e.Consent.ToolName, e.Consent.Group, e.Consent.RiskLevel)
 				}
 			case agent.EventRunFailed:
 				log.Printf("[%s] run failed: %v", e.SessionID, e.Error)
+				toolTracker.OnRunFailed(e.SessionID, e.Error)
 			}
 			// Broadcast to SSE clients (web dashboard).
 			if sseBroadcast != nil {
@@ -946,24 +927,170 @@ Key behaviors:
 		}, loopOpts...)
 
 	// --- TeamExecutor (needs LoopPool) ---
-	if loopPool != nil && len(teams) > 0 {
-		teamExec := team.NewTeamExecutor(appStore, loopPool, func(e agent.Event) {
+	var teamExec *team.TeamExecutor
+	var teamExecMu sync.Mutex
+
+	// ensureTeamExecutor lazily creates the TeamExecutor on first team.
+	ensureTeamExecutor := func() *team.TeamExecutor {
+		teamExecMu.Lock()
+		defer teamExecMu.Unlock()
+		if teamExec != nil {
+			return teamExec
+		}
+		if loopPool == nil {
+			return nil
+		}
+		teamExec = team.NewTeamExecutor(appStore, loopPool, func(e agent.Event) {
 			if sseBroadcast != nil {
 				sseBroadcast(e)
 			}
 		})
-
-		// Progress notifier: decides when to wake the lead based on verbosity.
 		notifier := team.NewTeamProgressNotifier(appStore, teamExec, func(ctx context.Context, leadAgentID, teamID, systemMessage string) {
 			if wakeLeadFn != nil {
 				wakeLeadFn(ctx, leadAgentID, teamID, systemMessage)
 			}
 		})
 		teamExec.SetNotifier(notifier)
-
 		tool.RegisterTeamTasks(toolReg, appStore, teamExec)
-		log.Printf("team: executor created for %d teams", len(teams))
+		teamExec.StartRecoveryTicker(60 * time.Second)
+		log.Println("team: executor created (hot-reload)")
+		return teamExec
 	}
+
+	// Team executor is initialized lazily by reloadTeams() or ensureTeamExecutor().
+
+	// reloadTeams re-reads teams from DB and updates agent configs.
+	reloadTeams := func() {
+		rows, err := appStore.DB().QueryContext(context.Background(),
+			`SELECT id, name, lead_id, config FROM teams WHERE status = 'active'`)
+		if err != nil {
+			log.Printf("team reload: query failed: %v", err)
+			return
+		}
+		defer rows.Close()
+
+		type teamRow struct {
+			ID, Name, LeadID string
+			Members          []string
+		}
+		var dbTeams []teamRow
+		for rows.Next() {
+			var id, name, leadID, configJSON string
+			rows.Scan(&id, &name, &leadID, &configJSON)
+			var cfg struct {
+				Members []string `json:"members"`
+			}
+			json.Unmarshal([]byte(configJSON), &cfg)
+			dbTeams = append(dbTeams, teamRow{ID: id, Name: name, LeadID: leadID, Members: cfg.Members})
+		}
+
+		agentMu.Lock()
+		defer agentMu.Unlock()
+
+		if len(dbTeams) == 0 {
+			// Clear TeamInfo from all agents.
+			for aid, fa := range fileAgents {
+				if fa.TeamInfo != nil {
+					fa.TeamInfo = nil
+					rc := agentcfg.ToRuntimeConfig(fa)
+					agentConfigs[aid] = rc
+					if loopPool != nil {
+						loopPool.UpdateConfig(aid, rc)
+					}
+				}
+			}
+			log.Println("team reload: no active teams")
+			return
+		}
+
+		// Ensure executor exists.
+		ensureTeamExecutor()
+
+		for _, tc := range dbTeams {
+			allAgents := append([]string{tc.LeadID}, tc.Members...)
+			var memberInfos []agentcfg.TeamMemberInfo
+			for _, aid := range allAgents {
+				role := "member"
+				if aid == tc.LeadID {
+					role = "lead"
+				}
+				displayName := aid
+				desc := ""
+				if fa, ok := fileAgents[aid]; ok {
+					if fa.Identity.Name != "" {
+						displayName = fa.Identity.Name
+					}
+					desc = fa.Identity.Role
+				}
+				memberInfos = append(memberInfos, agentcfg.TeamMemberInfo{
+					AgentID: aid, DisplayName: displayName, Role: role, Description: desc,
+				})
+			}
+
+			leadName := tc.LeadID
+			if fa, ok := fileAgents[tc.LeadID]; ok && fa.Identity.Name != "" {
+				leadName = fa.Identity.Name
+			}
+
+			for _, aid := range allAgents {
+				fa, ok := fileAgents[aid]
+				if !ok {
+					continue
+				}
+				role := "member"
+				if aid == tc.LeadID {
+					role = "lead"
+				}
+				fa.TeamInfo = &agentcfg.TeamInfo{
+					TeamID: tc.ID, TeamName: tc.Name, Role: role,
+					LeadName: leadName, Members: memberInfos,
+				}
+				rc := agentcfg.ToRuntimeConfig(fa)
+				if role == "lead" {
+					teamIDCopy := tc.ID
+					rc.TaskSummaryFunc = func(ctx context.Context) string {
+						return buildLeadTaskSummary(ctx, appStore, teamIDCopy)
+					}
+				} else {
+					memberAgentID := aid
+					rc.MemberTaskContextFunc = func(ctx context.Context) string {
+						return buildMemberTaskContext(ctx, appStore, memberAgentID)
+					}
+				}
+				agentConfigs[aid] = rc
+				if loopPool != nil {
+					loopPool.UpdateConfig(aid, rc)
+				}
+			}
+		}
+		log.Printf("team reload: updated %d teams", len(dbTeams))
+	}
+
+	// Load teams from DB at startup (covers teams created via dashboard, not in YAML).
+	if loopPool != nil {
+		reloadTeams()
+	}
+
+	// Wire SubagentManager's loopPool now that it's created.
+	subagentMgr.SetLoopPool(loopPool)
+
+	// Periodic cleanup of expired subagent results (prevent memory leak).
+	subagentCleanupDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				subagentMgr.Cleanup(30 * time.Minute)
+			case <-subagentCleanupDone:
+				return
+			}
+		}
+	}()
+
+	// Register spawn tools with a bridge adapter.
+	tool.RegisterSpawnTools(toolReg, &subagentBridge{mgr: subagentMgr})
 
 	// --- Channel Pairing ---
 	pairingEnabled := os.Getenv("SAGECLAW_PAIRING") != "off"
@@ -1105,6 +1232,23 @@ Key behaviors:
 		AgentProvider:   agentProvider,
 		LiveSessionPool: livePool,
 		NonceManager:    nonceManager,
+		PostRun: func(ctx context.Context, agentID string) {
+			if teamExec == nil {
+				return
+			}
+			queue := tool.PendingDispatchFromCtx(ctx)
+			if queue == nil {
+				return
+			}
+			tasks := queue.Drain()
+			if len(tasks) > 0 {
+				// Detect cycles once before launching any tasks.
+				teamExec.FailCycleTasks(ctx, tasks[0].TeamID)
+			}
+			for _, task := range tasks {
+				teamExec.LaunchIfReady(ctx, task)
+			}
+		},
 		CostRecorder: func(ctx context.Context, sessionID, agentID, provName, model string, usage canonical.Usage) {
 			budgetEngine.RecordCost(ctx, provider.CostEntry{
 				SessionID:     sessionID,
@@ -1292,6 +1436,7 @@ Key behaviors:
 		rpc.WithConsentStore(consentStore),
 		rpc.WithAudioBasePath(audioStoragePath),
 		rpc.WithLoopPool(loopPool),
+		rpc.WithTeamReload(reloadTeams),
 	)
 	// Wire SSE broadcast now that rpcServer exists.
 	sseBroadcast = rpcServer.EventHandler()
@@ -1501,6 +1646,74 @@ Key behaviors:
 		log.Println("SageClaw is running. Listening for messages...")
 	}
 
+	// --- Tool activity tracker callbacks ---
+	// Set callbacks now that chanMgr and appStore are available.
+	// Dispatch tool status and reactions to channel-specific adapters.
+	toolTracker.SetCallbacks(
+		func(sessionID string, update toolstatus.StatusUpdate) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			sess, err := appStore.GetSession(ctx, sessionID)
+			if err != nil || sess == nil {
+				return
+			}
+			// Dispatch to channel-specific adapter.
+			chanMgr.ForEachChannel(func(ch channel.Channel) {
+				switch adapter := ch.(type) {
+				case *telegram.Adapter:
+					if adapter.ConnID() == sess.Channel {
+						adapter.OnToolStatus(sessionID, sess.ChatID, update)
+					}
+				case *discord.Adapter:
+					if adapter.ConnID() == sess.Channel {
+						adapter.OnToolStatus(sessionID, sess.ChatID, update)
+					}
+				case *whatsapp.Adapter:
+					if adapter.ConnID() == sess.Channel {
+						adapter.OnToolStatus(sessionID, sess.ChatID, update)
+					}
+				case *zalo.Adapter:
+					if adapter.ConnID() == sess.Channel {
+						adapter.OnToolStatus(sessionID, sess.ChatID, update)
+					}
+				case *zalobot.Adapter:
+					if adapter.ConnID() == sess.Channel {
+						adapter.OnToolStatus(sessionID, sess.ChatID, update)
+					}
+				}
+			})
+		},
+		func(sessionID string, update toolstatus.ReactionUpdate) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			sess, err := appStore.GetSession(ctx, sessionID)
+			if err != nil || sess == nil {
+				return
+			}
+			// Reactions need the user's message ID from session metadata.
+			userMsgIDStr := sess.Metadata["user_message_id"]
+			if userMsgIDStr == "" {
+				return
+			}
+			userMsgID, _ := strconv.Atoi(userMsgIDStr) // Telegram uses numeric IDs.
+			// Dispatch to channel-specific adapter.
+			chanMgr.ForEachChannel(func(ch channel.Channel) {
+				switch adapter := ch.(type) {
+				case *telegram.Adapter:
+					if adapter.ConnID() == sess.Channel {
+						adapter.OnReaction(sess.ChatID, userMsgID, update)
+					}
+				case *discord.Adapter:
+					if adapter.ConnID() == sess.Channel {
+						// Discord uses string message IDs.
+						adapter.OnReaction(sess.ChatID, userMsgIDStr, update)
+					}
+				}
+				// WhatsApp/Zalo: no reaction API — skip.
+			})
+		},
+	)
+
 	// --- Channel event forwarder ---
 	// Forward streaming events to Telegram adapters and consent events
 	// to all channel adapters that implement ConsentPrompt.
@@ -1537,20 +1750,36 @@ Key behaviors:
 			return
 		}
 
-		// Streaming events → forward to Telegram adapters only.
-		if e.Type != agent.EventChunk && e.Type != agent.EventRunCompleted && e.Type != agent.EventRunFailed {
+		// Streaming + lifecycle events → forward to channel adapters.
+		if e.Type != agent.EventChunk && e.Type != agent.EventRunStarted && e.Type != agent.EventRunCompleted && e.Type != agent.EventRunFailed {
 			return
 		}
 		sess, err := appStore.GetSession(startCtx, e.SessionID)
 		if err != nil || sess == nil {
 			return
 		}
-		if !strings.HasPrefix(sess.Channel, "tg_") && sess.Channel != "telegram" {
-			return
-		}
 		chanMgr.ForEachChannel(func(ch channel.Channel) {
-			if tg, ok := ch.(*telegram.Adapter); ok && (tg.ConnID() == sess.Channel) {
-				tg.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
+			switch adapter := ch.(type) {
+			case *telegram.Adapter:
+				if adapter.ConnID() == sess.Channel {
+					adapter.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
+				}
+			case *discord.Adapter:
+				if adapter.ConnID() == sess.Channel {
+					adapter.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
+				}
+			case *whatsapp.Adapter:
+				if adapter.ConnID() == sess.Channel {
+					adapter.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
+				}
+			case *zalo.Adapter:
+				if adapter.ConnID() == sess.Channel {
+					adapter.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
+				}
+			case *zalobot.Adapter:
+				if adapter.ConnID() == sess.Channel {
+					adapter.OnAgentEvent(e.SessionID, sess.ChatID, string(e.Type), e.Text)
+				}
 			}
 		})
 	}
@@ -1578,6 +1807,13 @@ Key behaviors:
 	<-sigChan
 
 	log.Println("Shutting down...")
+	close(subagentCleanupDone)
+	subagentMgr.Shutdown()
+	if teamExec != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		teamExec.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
 	cronRunner.Stop()
 	if mcpRegistry != nil {
 		mcpRegistry.Close()
@@ -1705,4 +1941,194 @@ func (g *storeGraphEngine) Unlink(ctx context.Context, sourceID, targetID, relat
 }
 func (g *storeGraphEngine) Graph(ctx context.Context, startID, direction string, depth int) ([]memory.Entry, []memory.Edge, error) {
 	return nil, nil, fmt.Errorf("graph operations require SQLite backend")
+}
+
+// subagentBridge adapts agent.SubagentManager to tool.SubagentSpawner interface.
+type subagentBridge struct {
+	mgr *agent.SubagentManager
+}
+
+func (b *subagentBridge) Spawn(ctx context.Context, parentAgentID, sessionID, task, label, mode string) (string, string, error) {
+	return b.mgr.Spawn(ctx, parentAgentID, sessionID, task, label, mode)
+}
+
+func (b *subagentBridge) List(parentAgentID, sessionID string) []tool.SubagentInfo {
+	tasks := b.mgr.List(parentAgentID, sessionID)
+	infos := make([]tool.SubagentInfo, len(tasks))
+	for i, t := range tasks {
+		infos[i] = tool.SubagentInfo{
+			ID:     t.ID,
+			Label:  t.Label,
+			Status: t.Status,
+			Result: t.Result,
+			Error:  t.Error,
+		}
+	}
+	return infos
+}
+
+func (b *subagentBridge) Cancel(taskID string) error {
+	return b.mgr.Cancel(taskID)
+}
+
+func (b *subagentBridge) CancelAll(parentAgentID, sessionID string) {
+	b.mgr.CancelAll(parentAgentID, sessionID)
+}
+
+// buildLeadTaskSummary builds a [Active team tasks] injection for lead agents.
+func buildLeadTaskSummary(ctx context.Context, s store.Store, teamID string) string {
+	tasks, err := s.ListTasks(ctx, teamID, "")
+	if err != nil || len(tasks) == 0 {
+		return ""
+	}
+
+	var pending, inProgress, blocked, inReview int
+	var lines []string
+	for _, t := range tasks {
+		switch t.Status {
+		case "pending":
+			pending++
+			lines = append(lines, fmt.Sprintf("- %s: \"%s\" → %s (pending)", t.Identifier, t.Title, t.AssignedTo))
+		case "in_progress":
+			inProgress++
+			progress := ""
+			if t.ProgressPercent > 0 {
+				progress = fmt.Sprintf(" (%d%%)", t.ProgressPercent)
+			}
+			lines = append(lines, fmt.Sprintf("- %s: \"%s\" → %s (in_progress%s)", t.Identifier, t.Title, t.AssignedTo, progress))
+		case "blocked":
+			blocked++
+			lines = append(lines, fmt.Sprintf("- %s: \"%s\" (blocked by %s)", t.Identifier, t.Title, t.BlockedBy))
+		case "in_review":
+			inReview++
+			lines = append(lines, fmt.Sprintf("- %s: \"%s\" → needs your approval", t.Identifier, t.Title))
+		}
+	}
+
+	if len(lines) == 0 {
+		return "" // All tasks completed/cancelled — no reminder needed.
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[Active team tasks]\n")
+	sb.WriteString(fmt.Sprintf("You have %d pending, %d in-progress, %d blocked, %d awaiting review.\n",
+		pending, inProgress, blocked, inReview))
+	for _, line := range lines {
+		sb.WriteString(line + "\n")
+	}
+	sb.WriteString("Results arrive automatically. Do NOT re-create, cancel, or re-spawn these tasks.\n")
+	sb.WriteString("[/Active team tasks]")
+	return sb.String()
+}
+
+// buildMemberTaskContext returns a one-line context reminder for a member agent's active task.
+func buildMemberTaskContext(ctx context.Context, s store.Store, agentID string) string {
+	team, _, err := s.GetTeamByAgent(ctx, agentID)
+	if err != nil || team == nil {
+		return ""
+	}
+
+	tasks, err := s.ListTasks(ctx, team.ID, "in_progress")
+	if err != nil {
+		return ""
+	}
+
+	for _, t := range tasks {
+		if t.AssignedTo == agentID {
+			progress := ""
+			if t.ProgressPercent > 0 {
+				progress = fmt.Sprintf(" — progress: %d%%", t.ProgressPercent)
+			}
+			return fmt.Sprintf("[Your task: %s \"%s\"%s]", t.Identifier, t.Title, progress)
+		}
+	}
+	return ""
+}
+
+// seedTeamsFromConfig seeds teams from YAML config into DB on first boot.
+// If DB already has teams, YAML is ignored with a deprecation warning.
+func seedTeamsFromConfig(s store.Store, cfg *config.AppConfig) {
+	if len(cfg.Teams) == 0 {
+		return
+	}
+	ctx := context.Background()
+
+	var count int
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM teams WHERE COALESCE(status,'active') = 'active'`).Scan(&count); err != nil {
+		log.Printf("teams: failed to count existing teams: %v", err)
+		return
+	}
+	if count > 0 {
+		log.Printf("teams: ignoring teams.yaml (DB has %d active teams — DB is authoritative)", count)
+		return
+	}
+
+	seeded := 0
+	for _, tc := range cfg.Teams {
+		membersJSON := `{"members":[]}`
+		if len(tc.Members) > 0 {
+			parts := make([]string, len(tc.Members))
+			for i, m := range tc.Members {
+				parts[i] = `"` + m + `"`
+			}
+			membersJSON = fmt.Sprintf(`{"members":[%s]}`, strings.Join(parts, ","))
+		}
+		_, err := s.DB().ExecContext(ctx,
+			`INSERT OR IGNORE INTO teams (id, name, lead_id, config, description, status, settings, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, '', 'active', '{}', datetime('now'), datetime('now'))`,
+			tc.ID, tc.Name, tc.Lead, membersJSON)
+		if err != nil {
+			log.Printf("teams: failed to seed team %s: %v", tc.ID, err)
+			continue
+		}
+		seeded++
+	}
+	if seeded > 0 {
+		log.Printf("teams: seeded %d teams from config", seeded)
+	}
+}
+
+// seedDelegationLinks seeds delegation links from YAML config into DB on first boot.
+// If DB already has links, YAML is ignored with a deprecation warning.
+func seedDelegationLinks(s store.Store, cfg *config.AppConfig) {
+	if len(cfg.Delegation) == 0 {
+		return
+	}
+	ctx := context.Background()
+
+	// Check if DB already has delegation links.
+	var count int
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM delegation_links`).Scan(&count); err != nil {
+		log.Printf("delegation: failed to count existing links: %v", err)
+		return
+	}
+	if count > 0 {
+		log.Printf("delegation: ignoring delegation.yaml (DB has %d links — DB is authoritative)", count)
+		return
+	}
+
+	// Seed from YAML.
+	seeded := 0
+	for _, dl := range cfg.Delegation {
+		maxC := dl.MaxConcurrent
+		if maxC == 0 {
+			maxC = 1
+		}
+		id := fmt.Sprintf("link_%s_%s", dl.Source, dl.Target)
+		_, err := s.DB().ExecContext(ctx,
+			`INSERT OR IGNORE INTO delegation_links (id, source_id, target_id, direction, max_concurrent) VALUES (?, ?, ?, ?, ?)`,
+			id, dl.Source, dl.Target, dl.Direction, maxC)
+		if err != nil {
+			log.Printf("delegation: failed to seed link %s→%s: %v", dl.Source, dl.Target, err)
+			continue
+		}
+		if _, err := s.DB().ExecContext(ctx,
+			`INSERT OR IGNORE INTO delegation_state (link_id, active_count) VALUES (?, 0)`, id); err != nil {
+			log.Printf("delegation: failed to init state for %s: %v", id, err)
+		}
+		seeded++
+	}
+	if seeded > 0 {
+		log.Printf("delegation: seeded %d links from config", seeded)
+	}
 }

@@ -18,6 +18,8 @@ import (
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/channel"
+	"github.com/xoai/sageclaw/pkg/channel/toolstatus"
+	"github.com/xoai/sageclaw/pkg/channel/typing"
 )
 
 const (
@@ -36,8 +38,8 @@ type AudioStore interface {
 // streamMsg tracks a message being progressively edited during streaming.
 type streamMsg struct {
 	chatID    string
-	messageID int
-	draftID   int // Unique draft identifier for sendMessageDraft (Bot API 9.5).
+	messageID int // Real Telegram message_id (from sendMessage on first chunk).
+	draftID   int // Draft identifier for sendMessageDraft (Bot API 9.5).
 	text      string
 	lastEdit  time.Time
 }
@@ -46,6 +48,13 @@ type streamMsg struct {
 // sendResponse from sending a duplicate message.
 type recentStream struct {
 	endedAt time.Time
+}
+
+// toolStatusDraft tracks a tool status message displayed via a Telegram draft.
+// When text streaming begins, the draft is handed off to streamChunk.
+type toolStatusDraft struct {
+	chatID  string
+	draftID int
 }
 
 // Adapter implements the Channel interface for Telegram.
@@ -69,6 +78,16 @@ type Adapter struct {
 	streamMu      sync.Mutex
 	streams       map[string]*streamMsg    // sessionID → active stream
 	recentStreams map[string]*recentStream // sessionID → recently ended (prevents duplicate sends)
+
+	// Tool activity: typing controllers, tool status drafts, reactions.
+	typingMu     sync.Mutex
+	typingCtrl   map[string]*typing.Controller // sessionID → typing controller
+
+	toolStatusMu sync.Mutex
+	toolStatuses map[string]*toolStatusDraft // sessionID → active tool status draft
+
+	reactionMu     sync.Mutex
+	reactionsOff   map[string]bool // chatID → true if reactions disabled (permission error)
 }
 
 // New creates a new Telegram adapter.
@@ -80,6 +99,9 @@ func New(connID, token string, opts ...Option) *Adapter {
 		baseURL: telegramAPI + token,
 		streams:       make(map[string]*streamMsg),
 		recentStreams: make(map[string]*recentStream),
+		typingCtrl:    make(map[string]*typing.Controller),
+		toolStatuses:  make(map[string]*toolStatusDraft),
+		reactionsOff:  make(map[string]bool),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -319,6 +341,8 @@ func (a *Adapter) handleMessage(ctx context.Context, msg *TelegramMessage) {
 }
 
 func (a *Adapter) sendResponse(env bus.Envelope) {
+	defer a.markTypingDispatchIdle(env.SessionID)
+
 	for _, msg := range env.Messages {
 		// Check for audio content first.
 		if audio := canonical.ExtractAudio(msg); audio != nil {
@@ -348,6 +372,7 @@ func (a *Adapter) sendResponse(env bus.Envelope) {
 
 		if hasStream && sm != nil {
 			// Stream still active — update text and finalize.
+			log.Printf("[telegram-stream] sendResponse: stream still active for %s, finalizing with text_len=%d", env.SessionID, len(text))
 			a.streamMu.Lock()
 			sm.text = text
 			a.streamMu.Unlock()
@@ -357,11 +382,14 @@ func (a *Adapter) sendResponse(env bus.Envelope) {
 		if wasRecentStream {
 			// Stream already ended (event forwarder handled it).
 			// Clean up and skip to avoid duplicate message.
+			log.Printf("[telegram-stream] sendResponse: skipping duplicate for %s (wasRecentStream=true)", env.SessionID)
 			a.streamMu.Lock()
 			delete(a.recentStreams, env.SessionID)
 			a.streamMu.Unlock()
 			continue
 		}
+
+		log.Printf("[telegram-stream] sendResponse: no stream for %s, sending normally (text_len=%d)", env.SessionID, len(text))
 
 		// No streaming — send normally.
 		chunks := chunkText(text, maxMessageLen)
@@ -378,28 +406,51 @@ func (a *Adapter) sendResponse(env bus.Envelope) {
 // Called from the pipeline's onEvent callback for Telegram sessions.
 func (a *Adapter) OnAgentEvent(sessionID, chatID, eventType, text string) {
 	switch eventType {
+	case "run.started":
+		a.startTyping(sessionID, chatID)
 	case "chunk":
 		a.streamChunk(sessionID, chatID, text)
-	case "run.completed", "run.failed":
+	case "run.completed":
+		log.Printf("[telegram-stream] OnAgentEvent: %s for session %s", eventType, sessionID)
+		a.markTypingRunComplete(sessionID)
+		a.endStream(sessionID)
+	case "run.failed":
+		log.Printf("[telegram-stream] OnAgentEvent: %s for session %s", eventType, sessionID)
+		a.markTypingRunComplete(sessionID)
 		a.endStream(sessionID)
 	}
 }
 
+// draftSafeLimit is the max chars for a single draft/message to stay safely
+// under Telegram's 4096 limit after MarkdownV2 escaping overhead.
+const draftSafeLimit = 3800
+
 // streamChunk accumulates text and sends draft updates to Telegram.
-// Uses sendMessageDraft (Bot API 9.5) for real-time streaming — shows a
-// draft bubble that updates with animation when using the same draft_id.
-// Throttled to max 2 drafts per second.
+// Uses sendMessageDraft (Bot API 9.5) for real-time streaming.
+//
+// When accumulated text exceeds draftSafeLimit, the current draft is
+// materialized as a permanent message (broken at the last clean word
+// boundary), and a new draft is started with a fresh draft_id for the
+// continuation. This handles long responses that exceed Telegram's 4096
+// char limit.
 func (a *Adapter) streamChunk(sessionID, chatID, delta string) {
 	a.streamMu.Lock()
 	sm, exists := a.streams[sessionID]
 
 	if !exists {
-		// First chunk — generate a draft_id and initialize stream.
-		// draft_id must be non-zero; use lower 31 bits of current time as unique ID.
-		draftID := int(time.Now().UnixMilli() & 0x7FFFFFFF)
-		if draftID == 0 {
-			draftID = 1
+		// First chunk — check if there's an active tool status draft to reuse.
+		a.toolStatusMu.Lock()
+		ts, hasToolStatus := a.toolStatuses[sessionID]
+		var draftID int
+		if hasToolStatus {
+			// Reuse the tool status draft — text replaces tool status.
+			draftID = ts.draftID
+			delete(a.toolStatuses, sessionID)
+		} else {
+			draftID = allocateDraftID()
 		}
+		a.toolStatusMu.Unlock()
+
 		a.streams[sessionID] = &streamMsg{
 			chatID:   chatID,
 			draftID:  draftID,
@@ -413,8 +464,36 @@ func (a *Adapter) streamChunk(sessionID, chatID, delta string) {
 
 	sm.text += delta
 
-	// Throttle: send draft at most every 500ms.
-	if time.Since(sm.lastEdit) < 500*time.Millisecond {
+	// Check if we need to split: text exceeds safe limit.
+	if len(sm.text) > draftSafeLimit {
+		// Find a clean break point (last newline, or last space).
+		breakAt := findCleanBreak(sm.text, draftSafeLimit)
+		completedText := sm.text[:breakAt]
+		remainder := sm.text[breakAt:]
+		oldDraftID := sm.draftID
+
+		// Start a new draft for the remainder.
+		newDraftID := allocateDraftID()
+		sm.text = remainder
+		sm.draftID = newDraftID
+		sm.lastEdit = time.Now()
+		a.streamMu.Unlock()
+
+		// Materialize the completed chunk as a permanent message.
+		log.Printf("[telegram-stream] chunk split: materializing %d chars, continuing with %d chars (new draft_id=%d)", len(completedText), len(remainder), newDraftID)
+		a.sendOneMessage(chatID, completedText)
+
+		// Send the new draft with remainder text (so user sees continuity).
+		if len(strings.TrimSpace(remainder)) > 0 {
+			a.sendMessageDraft(chatID, newDraftID, remainder)
+		}
+
+		_ = oldDraftID // Draft auto-expires after permanent message is sent.
+		return
+	}
+
+	// Throttle: send draft at most every 1s.
+	if time.Since(sm.lastEdit) < 1*time.Second {
 		a.streamMu.Unlock()
 		return
 	}
@@ -423,12 +502,47 @@ func (a *Adapter) streamChunk(sessionID, chatID, delta string) {
 	sm.lastEdit = time.Now()
 	a.streamMu.Unlock()
 
-	// Update the draft with accumulated text (same draft_id = animated update).
 	a.sendMessageDraft(chatID, draftID, text)
 }
 
-// endStream finalizes streaming: send the real message with MarkdownV2 formatting.
-// The draft is replaced by the final sendMessage call.
+// allocateDraftID generates a unique non-zero draft ID.
+func allocateDraftID() int {
+	id := int(time.Now().UnixNano() & 0x7FFFFFFF)
+	if id == 0 {
+		id = 1
+	}
+	return id
+}
+
+// findCleanBreak finds the best position to break text at or before maxLen.
+// Prefers breaking at paragraph boundary (\n\n), then newline (\n), then
+// last space. Falls back to maxLen if no good break point found.
+func findCleanBreak(text string, maxLen int) int {
+	if len(text) <= maxLen {
+		return len(text)
+	}
+	window := text[:maxLen]
+
+	// Prefer paragraph break.
+	if idx := strings.LastIndex(window, "\n\n"); idx > maxLen/2 {
+		return idx + 1 // Include one newline, leave the other for next chunk.
+	}
+	// Newline break.
+	if idx := strings.LastIndex(window, "\n"); idx > maxLen/2 {
+		return idx + 1
+	}
+	// Space break (don't split words).
+	if idx := strings.LastIndex(window, " "); idx > maxLen/2 {
+		return idx + 1
+	}
+	// No good break — hard cut at maxLen.
+	return maxLen
+}
+
+// endStream finalizes streaming: materialize the draft into a permanent message.
+// Sends the accumulated text as one or more real /sendMessage calls (chunked at 4096).
+// If materialization fails, does NOT mark as recentStream so sendResponse can
+// deliver the message as a fallback.
 func (a *Adapter) endStream(sessionID string) {
 	a.streamMu.Lock()
 	sm, exists := a.streams[sessionID]
@@ -437,12 +551,26 @@ func (a *Adapter) endStream(sessionID string) {
 		return
 	}
 	delete(a.streams, sessionID)
-	// Mark as recently ended so sendResponse skips duplicate send.
-	a.recentStreams[sessionID] = &recentStream{endedAt: time.Now()}
 	a.streamMu.Unlock()
 
-	// Finalize: send the real message with MarkdownV2 (replaces the draft).
-	a.sendMessageFinal(sm.chatID, sm.draftID, sm.text)
+	if sm.text == "" {
+		return
+	}
+
+	// Materialize: send the permanent message (chunked if > 4096 chars).
+	log.Printf("[telegram-stream] materialize: sending permanent message for session %s (draft_id=%d, text_len=%d)", sessionID, sm.draftID, len(sm.text))
+	ok := a.sendFinalChunked(sm.chatID, sm.text)
+
+	if ok {
+		// Success — mark as recent so sendResponse skips (avoids duplicate).
+		a.streamMu.Lock()
+		a.recentStreams[sessionID] = &recentStream{endedAt: time.Now()}
+		a.streamMu.Unlock()
+		log.Printf("[telegram-stream] materialize: success, marked recentStream")
+	} else {
+		// Failure — do NOT mark recentStream. Let sendResponse deliver the fallback.
+		log.Printf("[telegram-stream] materialize: FAILED, leaving sendResponse fallback open")
+	}
 }
 
 // sendMessageDraft sends or updates a draft message in the chat.
@@ -460,9 +588,86 @@ func (a *Adapter) sendMessageDraft(chatID string, draftID int, text string) {
 	}
 	resp, err := a.client.PostForm(a.baseURL+"/sendMessageDraft", params)
 	if err != nil {
+		log.Printf("[telegram-stream] sendMessageDraft error: %v", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("[telegram-stream] sendMessageDraft status=%d body=%s", resp.StatusCode, string(body))
+	}
+}
+
+// sendFinalChunked sends the final text as one or more permanent messages.
+// Chunks at 4096 chars to respect Telegram's limit. Tries MarkdownV2 first,
+// falls back to plain text on parse failure. Returns true if at least one
+// chunk was sent successfully.
+func (a *Adapter) sendFinalChunked(chatID string, text string) bool {
+	chunks := chunkText(text, maxMessageLen)
+	log.Printf("[telegram-stream] sendFinalChunked: %d chunks for text_len=%d", len(chunks), len(text))
+
+	anyOK := false
+	for i, chunk := range chunks {
+		ok := a.sendOneMessage(chatID, chunk)
+		if ok {
+			anyOK = true
+		}
+		log.Printf("[telegram-stream] sendFinalChunked: chunk %d/%d ok=%v", i+1, len(chunks), ok)
+	}
+	return anyOK
+}
+
+// sendOneMessage sends a single message with MarkdownV2, falling back to plain text.
+// Returns true on success.
+func (a *Adapter) sendOneMessage(chatID string, text string) bool {
+	params := url.Values{
+		"chat_id":    {chatID},
+		"text":       {toTelegramMarkdown(text)},
+		"parse_mode": {"MarkdownV2"},
+	}
+
+	resp, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
+	if err != nil {
+		log.Printf("[telegram-stream] sendMessage error: %v", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return true
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	errStr := string(body)
+
+	// Retry without markdown on parse failure.
+	if strings.Contains(errStr, "can't parse") {
+		log.Printf("[telegram-stream] sendMessage markdown failed, retrying plain text")
+		params.Set("parse_mode", "")
+		params.Set("text", text)
+		resp2, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
+		if err != nil {
+			return false
+		}
+		defer resp2.Body.Close()
+		return resp2.StatusCode == http.StatusOK
+	}
+
+	// Retry without markdown on "too long" — MarkdownV2 escaping inflates length.
+	if strings.Contains(errStr, "too long") {
+		log.Printf("[telegram-stream] sendMessage too long with markdown, retrying plain text")
+		params.Set("parse_mode", "")
+		params.Set("text", text)
+		resp2, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
+		if err != nil {
+			return false
+		}
+		defer resp2.Body.Close()
+		return resp2.StatusCode == http.StatusOK
+	}
+
+	log.Printf("[telegram-stream] sendMessage error: %s", errStr)
+	return false
 }
 
 // sendPlainMessage sends a plain text message and returns its message_id.
@@ -519,36 +724,135 @@ func (a *Adapter) sendChatAction(chatID, action string) {
 	resp.Body.Close()
 }
 
-// sendMessageFinal finalizes a draft by sending a permanent message with the same draft_id.
-// Bot API: sendMessage with draft_id replaces the ephemeral draft with a real message.
-func (a *Adapter) sendMessageFinal(chatID string, draftID int, text string) error {
-	params := url.Values{
-		"chat_id":    {chatID},
-		"text":       {toTelegramMarkdown(text)},
-		"parse_mode": {"MarkdownV2"},
-		"draft_id":   {strconv.Itoa(draftID)},
+
+// setMessageReaction sets an emoji reaction on a message using the Bot API 6.0+ method.
+// If the bot lacks permission (403/400), reactions are disabled for that chat.
+func (a *Adapter) setMessageReaction(chatID string, messageID int, emoji string) {
+	if messageID == 0 || emoji == "" {
+		return
 	}
 
-	resp, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
+	a.reactionMu.Lock()
+	if a.reactionsOff[chatID] {
+		a.reactionMu.Unlock()
+		return
+	}
+	a.reactionMu.Unlock()
+
+	// Build the reaction payload: [{"type":"emoji","emoji":"🤔"}]
+	reaction := []map[string]string{{"type": "emoji", "emoji": emoji}}
+	reactionJSON, _ := json.Marshal(reaction)
+
+	params := url.Values{
+		"chat_id":    {chatID},
+		"message_id": {strconv.Itoa(messageID)},
+		"reaction":   {string(reactionJSON)},
+	}
+	resp, err := a.client.PostForm(a.baseURL+"/setMessageReaction", params)
 	if err != nil {
-		return fmt.Errorf("sending final message: %w", err)
+		log.Printf("[telegram] setMessageReaction error: %v", err)
+		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		if strings.Contains(string(body), "can't parse") {
-			params.Set("parse_mode", "")
-			resp2, err := a.client.PostForm(a.baseURL+"/sendMessage", params)
-			if err != nil {
-				return err
-			}
-			resp2.Body.Close()
+		errStr := string(body)
+		// Disable reactions for this chat on permission errors.
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
+			log.Printf("[telegram] reactions disabled for chat %s: %s", chatID, errStr)
+			a.reactionMu.Lock()
+			a.reactionsOff[chatID] = true
+			a.reactionMu.Unlock()
+			return
 		}
-		return fmt.Errorf("telegram error: %s", string(body))
+		log.Printf("[telegram] setMessageReaction status=%d body=%s", resp.StatusCode, errStr)
+	}
+}
+
+// OnToolStatus handles tool status updates from the ToolStatusTracker.
+// Creates or updates a draft message with the current tool activity text.
+// When Done=true, clears the tool status draft (streamChunk takes over).
+func (a *Adapter) OnToolStatus(sessionID, chatID string, update toolstatus.StatusUpdate) {
+	if update.Done {
+		a.toolStatusMu.Lock()
+		delete(a.toolStatuses, sessionID)
+		a.toolStatusMu.Unlock()
+		return
 	}
 
-	return nil
+	if update.Text == "" {
+		return
+	}
+
+	a.toolStatusMu.Lock()
+	ts, exists := a.toolStatuses[sessionID]
+	if !exists {
+		// First tool status — allocate a draft.
+		draftID := allocateDraftID()
+		a.toolStatuses[sessionID] = &toolStatusDraft{
+			chatID:  chatID,
+			draftID: draftID,
+		}
+		a.toolStatusMu.Unlock()
+		a.sendMessageDraft(chatID, draftID, update.Text)
+		return
+	}
+	draftID := ts.draftID
+	a.toolStatusMu.Unlock()
+
+	// Update existing draft with new status text.
+	a.sendMessageDraft(chatID, draftID, update.Text)
+}
+
+// OnReaction handles reaction updates from the ToolStatusTracker.
+// Sets an emoji reaction on the user's original message.
+func (a *Adapter) OnReaction(chatID string, userMsgID int, update toolstatus.ReactionUpdate) {
+	a.setMessageReaction(chatID, userMsgID, update.Emoji)
+}
+
+// startTyping creates and starts a TypingController for a session.
+func (a *Adapter) startTyping(sessionID, chatID string) {
+	a.typingMu.Lock()
+	// Stop existing controller if any.
+	if old, ok := a.typingCtrl[sessionID]; ok {
+		old.Stop()
+	}
+	ctrl := typing.NewController(
+		func() error {
+			a.sendChatAction(chatID, "typing")
+			return nil
+		},
+		nil, // No explicit stop — typing auto-expires in Telegram.
+		4000,  // Keepalive every 4s (Telegram typing expires after 5s).
+		60000, // TTL safety: 60s max.
+	)
+	a.typingCtrl[sessionID] = ctrl
+	a.typingMu.Unlock()
+	ctrl.Start()
+}
+
+// markTypingRunComplete signals that the agent run has finished for this session.
+func (a *Adapter) markTypingRunComplete(sessionID string) {
+	a.typingMu.Lock()
+	ctrl, ok := a.typingCtrl[sessionID]
+	a.typingMu.Unlock()
+	if ok {
+		ctrl.MarkRunComplete()
+	}
+}
+
+// markTypingDispatchIdle signals that all messages have been delivered.
+func (a *Adapter) markTypingDispatchIdle(sessionID string) {
+	a.typingMu.Lock()
+	ctrl, ok := a.typingCtrl[sessionID]
+	if ok {
+		delete(a.typingCtrl, sessionID)
+	}
+	a.typingMu.Unlock()
+	if ok {
+		ctrl.MarkDispatchIdle()
+	}
 }
 
 func (a *Adapter) sendMessage(chatID, text string) error {

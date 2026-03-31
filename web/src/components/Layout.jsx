@@ -12,22 +12,35 @@ export function Layout({ children }) {
 
   // Poll for pending consent requests every 2 seconds.
   // More reliable than SSE for one-shot events that can be missed.
+  // Works on ALL pages — users may chat via Telegram and consent from web.
   useEffect(() => {
     const checkPending = async () => {
       try {
         const res = await fetch('/api/consent/pending', { credentials: 'include' });
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0 && !consent) {
-          const c = data[0]; // Show the first pending consent.
-          setConsent({
-            tool_name: c.tool_name,
-            group: c.group,
-            risk_level: c.risk_level,
-            explanation: c.explanation,
-            agentName: c.agent_name || c.agent_id,
-            nonce: c.nonce,
-          });
-        }
+        const pending = Array.isArray(data) ? data : [];
+
+        setConsent(prev => {
+          // Auto-dismiss: if currently showing a consent that's no longer pending
+          // (answered from another client/tab), clear it.
+          if (prev && !pending.some(p => p.nonce === prev.nonce)) {
+            return null;
+          }
+          // Show first pending consent if nothing currently displayed.
+          if (!prev && pending.length > 0) {
+            const c = pending[0];
+            return {
+              tool_name: c.tool_name,
+              group: c.group,
+              risk_level: c.risk_level,
+              explanation: c.explanation,
+              tool_input: c.tool_input,
+              agentName: c.agent_name || c.agent_id,
+              nonce: c.nonce,
+            };
+          }
+          return prev;
+        });
       } catch {}
     };
 
@@ -83,6 +96,22 @@ export function Layout({ children }) {
                   {consent.explanation && (
                     <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">{consent.explanation}</div>
                   )}
+                  {consent.tool_input && (() => {
+                    try {
+                      const parsed = JSON.parse(consent.tool_input);
+                      return (
+                        <pre style="margin-bottom:8px;padding:8px;background:var(--bg-darker,#1a1a2e);border-radius:4px;font-size:10px;font-family:var(--mono);color:var(--text);overflow-x:auto;max-height:120px;white-space:pre-wrap;word-break:break-all">
+                          {JSON.stringify(parsed, null, 2)}
+                        </pre>
+                      );
+                    } catch {
+                      return (
+                        <pre style="margin-bottom:8px;padding:8px;background:var(--bg-darker,#1a1a2e);border-radius:4px;font-size:10px;font-family:var(--mono);color:var(--text);overflow-x:auto;max-height:120px;white-space:pre-wrap;word-break:break-all">
+                          {consent.tool_input}
+                        </pre>
+                      );
+                    }
+                  })()}
                   <div style="display:flex;gap:8px">
                     <button class="btn-primary" style="padding:6px 16px;font-size:13px" onClick={() => respondConsent(true, 'once')}>Allow once</button>
                     <button class="btn-primary" style="padding:6px 16px;font-size:13px;background:var(--success)" onClick={() => respondConsent(true, 'always')}>Always allow</button>

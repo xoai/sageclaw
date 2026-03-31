@@ -15,13 +15,16 @@ type CacheStats struct {
 	CacheCreation   atomic.Int64 `json:"cache_creation"`    // Tokens written to cache
 	CacheRead       atomic.Int64 `json:"cache_read"`        // Tokens read from cache
 	mu              sync.RWMutex
+	accCostUSD      float64      // Accumulated cost using real per-model pricing.
+	accSavedUSD     float64      // Accumulated savings from caching.
 }
 
 // Global cache stats instance.
 var GlobalCacheStats = &CacheStats{}
 
 // Record adds a request's usage to the stats.
-func (cs *CacheStats) Record(inputTokens, outputTokens, cacheCreation, cacheRead, thinkingTokens int) {
+// model is used to compute per-request cost using real pricing (not hardcoded Sonnet rates).
+func (cs *CacheStats) Record(model string, inputTokens, outputTokens, cacheCreation, cacheRead, thinkingTokens int) {
 	cs.TotalRequests.Add(1)
 	cs.TotalInput.Add(int64(inputTokens))
 	cs.TotalOutput.Add(int64(outputTokens))
@@ -31,10 +34,36 @@ func (cs *CacheStats) Record(inputTokens, outputTokens, cacheCreation, cacheRead
 	if cacheRead > 0 {
 		cs.CacheHits.Add(1)
 	}
+
+	// Accumulate real cost using per-model pricing.
+	modelInfo := FindModel(model)
+	if modelInfo != nil {
+		cost := EstimateCost(modelInfo, inputTokens, outputTokens, cacheRead)
+		saved := float64(cacheRead) / 1_000_000 * (modelInfo.InputCost - modelInfo.CacheCost)
+		if saved < 0 {
+			saved = 0
+		}
+		cs.mu.Lock()
+		cs.accCostUSD += cost
+		cs.accSavedUSD += saved
+		cs.mu.Unlock()
+	} else {
+		// Fallback: Sonnet pricing for unknown models.
+		cost := float64(inputTokens)/1_000_000*3.0 + float64(outputTokens)/1_000_000*15.0
+		saved := float64(cacheRead) / 1_000_000 * 2.7
+		cs.mu.Lock()
+		cs.accCostUSD += cost
+		cs.accSavedUSD += saved
+		cs.mu.Unlock()
+	}
 }
 
 // Snapshot returns a point-in-time copy of the stats.
 func (cs *CacheStats) Snapshot() CacheStatsSnapshot {
+	cs.mu.RLock()
+	cost := cs.accCostUSD
+	saved := cs.accSavedUSD
+	cs.mu.RUnlock()
 	return CacheStatsSnapshot{
 		TotalRequests: cs.TotalRequests.Load(),
 		CacheHits:     cs.CacheHits.Load(),
@@ -43,6 +72,8 @@ func (cs *CacheStats) Snapshot() CacheStatsSnapshot {
 		TotalThinking: cs.TotalThinking.Load(),
 		CacheCreation: cs.CacheCreation.Load(),
 		CacheRead:     cs.CacheRead.Load(),
+		EstCostUSD:    cost,
+		EstSavedUSD:   saved,
 	}
 }
 
@@ -65,15 +96,12 @@ func (s CacheStatsSnapshot) WithCalculations() CacheStatsSnapshot {
 	if s.TotalRequests > 0 {
 		s.HitRate = float64(s.CacheHits) / float64(s.TotalRequests) * 100
 	}
-	// Cache reads cost 10% of regular input tokens (Anthropic pricing).
 	if s.TotalInput > 0 {
 		savedTokens := float64(s.CacheRead) * 0.9
 		s.CostSavings = savedTokens / float64(s.TotalInput+s.CacheRead) * 100
 	}
-	// Estimate cost using Claude Sonnet pricing as baseline ($3/$15 per 1M).
-	s.EstCostUSD = float64(s.TotalInput)/1_000_000*3.0 + float64(s.TotalOutput)/1_000_000*15.0
-	// Savings from cache reads (cached input costs $0.30 instead of $3.00).
-	s.EstSavedUSD = float64(s.CacheRead) / 1_000_000 * 2.7
+	// EstCostUSD and EstSavedUSD are already accumulated from real per-model
+	// pricing during Record(). No need to recompute from raw tokens.
 	return s
 }
 

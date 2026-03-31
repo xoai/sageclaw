@@ -11,11 +11,14 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/channel"
+	"github.com/xoai/sageclaw/pkg/channel/toolstatus"
+	"github.com/xoai/sageclaw/pkg/channel/typing"
 )
 
 const cloudAPIBase = "https://graph.facebook.com/v18.0"
@@ -33,6 +36,12 @@ type Adapter struct {
 	ownerUserID   string             // Platform user ID of the connection owner.
 	consentCB     ConsentCallback    // Called when user responds to consent prompt.
 	ownerStore    channel.OwnerStore // For auto-capturing owner_user_id.
+
+	// Tool activity: typing + single status message.
+	typingMu      sync.Mutex
+	typingCtrl    map[string]*typing.Controller // sessionID → typing controller
+	statusMu      sync.Mutex
+	statusMsgs    map[string]string // sessionID → wamid of status message
 }
 
 // Option configures the WhatsApp adapter.
@@ -46,6 +55,8 @@ func New(connID, phoneNumberID, accessToken, verifyToken string, opts ...Option)
 		accessToken:   accessToken,
 		verifyToken:   verifyToken,
 		client:        &http.Client{Timeout: 30 * time.Second},
+		typingCtrl:    make(map[string]*typing.Controller),
+		statusMsgs:    make(map[string]string),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -70,7 +81,151 @@ func DetectKind(chatID string) string {
 }
 
 func (a *Adapter) ID() string       { return a.connID }
+func (a *Adapter) ConnID() string    { return a.connID }
 func (a *Adapter) Platform() string  { return "whatsapp" }
+
+// OnAgentEvent handles agent lifecycle events for typing indicators.
+func (a *Adapter) OnAgentEvent(sessionID, chatID, eventType, text string) {
+	switch eventType {
+	case "run.started":
+		a.startTyping(sessionID, chatID)
+	case "run.completed", "run.failed":
+		a.markTypingRunComplete(sessionID)
+		a.tryDeleteStatus(sessionID)
+	}
+}
+
+// OnToolStatus handles tool status updates — sends a single status message on first flush.
+func (a *Adapter) OnToolStatus(sessionID, chatID string, update toolstatus.StatusUpdate) {
+	if update.Done {
+		return // Deletion handled in OnAgentEvent(run.completed).
+	}
+	if update.Text == "" {
+		return
+	}
+
+	a.statusMu.Lock()
+	_, alreadySent := a.statusMsgs[sessionID]
+	a.statusMu.Unlock()
+	if alreadySent {
+		return // WhatsApp can't edit — ignore subsequent updates.
+	}
+
+	wamid := a.sendMessageWithID(chatID, update.Text)
+	if wamid != "" {
+		a.statusMu.Lock()
+		a.statusMsgs[sessionID] = wamid
+		a.statusMu.Unlock()
+	}
+}
+
+// sendMessageWithID sends a message and returns the wamid for later deletion.
+func (a *Adapter) sendMessageWithID(to, text string) string {
+	payload, _ := json.Marshal(map[string]any{
+		"messaging_product": "whatsapp",
+		"to":                to,
+		"type":              "text",
+		"text":              map[string]string{"body": text},
+	})
+
+	url := fmt.Sprintf("%s/%s/messages", cloudAPIBase, a.phoneNumberID)
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(payload)))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+a.accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return ""
+	}
+
+	var result struct {
+		Messages []struct {
+			ID string `json:"id"`
+		} `json:"messages"`
+	}
+	json.Unmarshal(body, &result)
+	if len(result.Messages) > 0 {
+		return result.Messages[0].ID
+	}
+	return ""
+}
+
+// tryDeleteStatus attempts to delete the status message (best-effort).
+func (a *Adapter) tryDeleteStatus(sessionID string) {
+	a.statusMu.Lock()
+	wamid, ok := a.statusMsgs[sessionID]
+	delete(a.statusMsgs, sessionID)
+	a.statusMu.Unlock()
+	if !ok || wamid == "" {
+		return
+	}
+
+	url := fmt.Sprintf("%s/%s/messages/%s", cloudAPIBase, a.phoneNumberID, wamid)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+a.accessToken)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		log.Printf("[whatsapp] delete status msg failed: %v", err)
+		return
+	}
+	resp.Body.Close()
+}
+
+// sendTypingIndicator is a no-op — WhatsApp Cloud API v18 has no dedicated typing endpoint.
+func (a *Adapter) sendTypingIndicator(to string) error {
+	return nil
+}
+
+func (a *Adapter) startTyping(sessionID, chatID string) {
+	a.typingMu.Lock()
+	if old, ok := a.typingCtrl[sessionID]; ok {
+		old.Stop()
+	}
+	// WhatsApp Cloud API doesn't have a typing indicator endpoint.
+	// Create a no-op controller for consistent lifecycle management.
+	ctrl := typing.NewController(
+		func() error { return nil }, // No typing API available.
+		nil,
+		5000,  // Keepalive interval (unused but consistent).
+		60000, // TTL.
+	)
+	a.typingCtrl[sessionID] = ctrl
+	a.typingMu.Unlock()
+	ctrl.Start()
+}
+
+func (a *Adapter) markTypingRunComplete(sessionID string) {
+	a.typingMu.Lock()
+	ctrl, ok := a.typingCtrl[sessionID]
+	a.typingMu.Unlock()
+	if ok {
+		ctrl.MarkRunComplete()
+	}
+}
+
+func (a *Adapter) markTypingDispatchIdle(sessionID string) {
+	a.typingMu.Lock()
+	ctrl, ok := a.typingCtrl[sessionID]
+	if ok {
+		delete(a.typingCtrl, sessionID)
+	}
+	a.typingMu.Unlock()
+	if ok {
+		ctrl.MarkDispatchIdle()
+	}
+}
 
 // RegisterWebhook registers WhatsApp webhook routes on the shared HTTP mux.
 func (a *Adapter) RegisterWebhook(mux *http.ServeMux) {
@@ -188,6 +343,8 @@ func (a *Adapter) verifySignature(body []byte, signature string) bool {
 }
 
 func (a *Adapter) sendResponse(env bus.Envelope) {
+	defer a.markTypingDispatchIdle(env.SessionID)
+
 	for _, msg := range env.Messages {
 		if msg.Role != "assistant" {
 			continue

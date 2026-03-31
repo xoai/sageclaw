@@ -423,10 +423,13 @@ func TestAssembleSystemPrompt_WithTeamLead(t *testing.T) {
 	if !contains(prompt, "## Team: Content Team") {
 		t.Error("prompt should contain team header")
 	}
-	if !contains(prompt, "Role: lead") {
+	if !contains(prompt, "team lead") {
 		t.Error("prompt should contain lead role")
 	}
-	if !contains(prompt, "**Researcher** `researcher` (member): Handles research") {
+	if !contains(prompt, "team lead** of Content Team") {
+		t.Error("prompt should use hybrid role format with team name")
+	}
+	if !contains(prompt, "**Researcher** (`researcher`)") {
 		t.Error("prompt should contain member listing")
 	}
 	if !contains(prompt, "team_tasks") {
@@ -434,6 +437,57 @@ func TestAssembleSystemPrompt_WithTeamLead(t *testing.T) {
 	}
 	if !contains(prompt, "team-task-result") {
 		t.Error("prompt should contain injection warning")
+	}
+	if !contains(prompt, "parent_id") {
+		t.Error("prompt should contain subtask creation example with parent_id")
+	}
+	// Hybrid worker-orchestrator model.
+	if !contains(prompt, "Handle yourself") {
+		t.Error("prompt should contain 'Handle yourself' guidance")
+	}
+	if contains(prompt, "MANDATORY DEFAULT") {
+		t.Error("prompt should NOT contain pure-orchestrator MANDATORY DEFAULT")
+	}
+	if contains(prompt, "ORCHESTRATE") {
+		t.Error("prompt should NOT contain 'you ORCHESTRATE' pure-orchestrator framing")
+	}
+	// Task planning section.
+	if !contains(prompt, "Task Planning") {
+		t.Error("prompt should contain Task Planning section")
+	}
+	if !contains(prompt, "Anti-pattern") {
+		t.Error("prompt should contain task planning anti-pattern")
+	}
+	// Hybrid rules.
+	if !contains(prompt, "Handle simple, delegate complex") {
+		t.Error("prompt should contain hybrid rule")
+	}
+	if !contains(prompt, "Search before create") {
+		t.Error("prompt should contain search-before-create rule")
+	}
+	// Communication template removed.
+	if contains(prompt, "### Communication") {
+		t.Error("prompt should NOT contain prescriptive Communication template")
+	}
+}
+
+func TestAssembleSystemPrompt_WithTeamLead_ZeroMembers(t *testing.T) {
+	cfg := &AgentConfig{
+		Identity: Identity{Name: "SoloLead", Role: "team lead"},
+		TeamInfo: &TeamInfo{
+			TeamID:   "team-1",
+			TeamName: "Solo Team",
+			Role:     "lead",
+			LeadName: "SoloLead",
+			Members: []TeamMemberInfo{
+				{AgentID: "solo-lead", DisplayName: "SoloLead", Role: "lead"},
+			},
+		},
+	}
+
+	prompt := AssembleSystemPrompt(cfg)
+	if contains(prompt, "## Team:") {
+		t.Error("zero-member lead should NOT get team section")
 	}
 }
 
@@ -452,11 +506,26 @@ func TestAssembleSystemPrompt_WithTeamMember(t *testing.T) {
 	if !contains(prompt, "## Team: Content Team") {
 		t.Error("prompt should contain team header")
 	}
-	if !contains(prompt, "Role: member") {
-		t.Error("prompt should contain member role")
+	if !contains(prompt, "Role: member of **Content Team**") {
+		t.Error("prompt should contain enriched member role with team name")
 	}
 	if !contains(prompt, "**LeadBot**") {
 		t.Error("prompt should reference lead name")
+	}
+	if !contains(prompt, "### Your Workflow") {
+		t.Error("prompt should contain workflow section")
+	}
+	if !contains(prompt, "blocker:") {
+		t.Error("prompt should contain blocker escalation instructions")
+	}
+	if !contains(prompt, `team_tasks(action: "send"`) {
+		t.Error("prompt should contain send action reference")
+	}
+	if !contains(prompt, "### Rules") {
+		t.Error("prompt should contain rules section")
+	}
+	if !contains(prompt, "auto-completes the task") {
+		t.Error("prompt should warn against manual complete")
 	}
 	if contains(prompt, "team-task-result") {
 		t.Error("member prompt should NOT contain injection warning")

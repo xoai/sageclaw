@@ -34,7 +34,7 @@ func newTestRegistry(t *testing.T) (*Registry, *security.Sandbox, *sqlite.Store)
 	RegisterWeb(reg, nil)
 	RegisterMemory(reg, engine)
 	RegisterCron(reg, store)
-	RegisterSpawn(reg)
+	RegisterSpawnTools(reg, nil)
 
 	return reg, sb, store
 }
@@ -261,35 +261,34 @@ func TestCron_InvalidSchedule(t *testing.T) {
 
 // --- Spawn tests ---
 
-func TestSpawn_Basic(t *testing.T) {
+func TestSpawn_NilSpawner(t *testing.T) {
 	reg := NewRegistry()
-	RegisterSpawn(reg)
+	RegisterSpawnTools(reg, nil)
 
 	result, err := reg.Execute(context.Background(), "spawn",
-		json.RawMessage(`{"prompt":"summarize this file"}`))
-	if err != nil {
-		t.Fatalf("executing: %v", err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content)
-	}
-	if !strings.Contains(result.Content, "Subagent spawned") {
-		t.Fatalf("expected spawn message, got: %s", result.Content)
-	}
-}
-
-func TestSpawn_DepthLimit(t *testing.T) {
-	reg := NewRegistry()
-	RegisterSpawn(reg)
-
-	ctx := WithSpawnDepth(context.Background(), 2)
-	result, err := reg.Execute(ctx, "spawn",
-		json.RawMessage(`{"prompt":"too deep"}`))
+		json.RawMessage(`{"task":"summarize this file"}`))
 	if err != nil {
 		t.Fatalf("executing: %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("expected error at max depth")
+		t.Fatalf("expected error with nil spawner, got: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "not available") {
+		t.Fatalf("expected 'not available', got: %s", result.Content)
+	}
+}
+
+func TestSpawn_RejectsAgentID(t *testing.T) {
+	reg := NewRegistry()
+	RegisterSpawnTools(reg, nil)
+
+	result, err := reg.Execute(context.Background(), "spawn",
+		json.RawMessage(`{"task":"do something","agent_id":"other-agent"}`))
+	if err != nil {
+		t.Fatalf("executing: %v", err)
+	}
+	if !strings.Contains(result.Content, "delegate") {
+		t.Fatalf("expected guidance to use delegate, got: %s", result.Content)
 	}
 }
 

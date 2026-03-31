@@ -20,6 +20,7 @@ type SessionStore interface {
 	FindSessionByKey(ctx context.Context, key string) (*Session, error)
 	UpdateSessionTokens(ctx context.Context, sessionID string, inputTokens, outputTokens int64, model, provider string) error
 	UpdateSessionTitle(ctx context.Context, sessionID, title string) error
+	UpdateSessionMetadata(ctx context.Context, sessionID string, merge map[string]string) error
 	AppendMessages(ctx context.Context, sessionID string, msgs []canonical.Message) error
 	GetMessages(ctx context.Context, sessionID string, limit int) ([]canonical.Message, error)
 	ListSessions(ctx context.Context, limit int) ([]Session, error)
@@ -58,6 +59,7 @@ type DelegationStore interface {
 	DecrementDelegation(ctx context.Context, linkID string) error
 	GetDelegationCount(ctx context.Context, linkID string) (int, error)
 	RecordDelegation(ctx context.Context, entry DelegationRecord) error
+	GetDelegationRecord(ctx context.Context, delegationID string) (*DelegationRecord, error)
 	GetDelegationHistory(ctx context.Context, agentID string, limit int) ([]DelegationRecord, error)
 }
 
@@ -94,6 +96,14 @@ type TeamStore interface {
 	RetryTask(ctx context.Context, taskID string) error
 	SearchTasks(ctx context.Context, teamID, query string) ([]TeamTask, error)
 	NextTaskNumber(ctx context.Context, teamID string) (int, error)
+	RecoverStaleTasks(ctx context.Context, timeoutSeconds int) ([]TeamTask, error)
+	IncrementDispatchAttempt(ctx context.Context, taskID string) (int, error)
+	CancelDependentTasks(ctx context.Context, taskID string) ([]TeamTask, error)
+	FindDuplicateTask(ctx context.Context, teamID, title, assignee string) (*TeamTask, error)
+	IncrementSubtaskCount(ctx context.Context, taskID string) error
+	DecrementSubtaskCount(ctx context.Context, taskID string) error
+	DeleteTask(ctx context.Context, taskID string) error
+	DeleteTerminalTasks(ctx context.Context, teamID string) (int, error)
 
 	// Task comments
 	CreateComment(ctx context.Context, comment TeamTaskComment) (string, error)

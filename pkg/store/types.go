@@ -130,12 +130,15 @@ type TeamTask struct {
 	ProgressPercent int        `json:"progress_percent"` // 0-100
 	RequireApproval bool       `json:"require_approval"` // Needs lead approval before completing
 	SessionID       string     `json:"session_id"` // Session used for execution
-	RetryCount      int        `json:"retry_count"`
-	MaxRetries      int        `json:"max_retries"`
-	ErrorMessage    string     `json:"error_message"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	RetryCount       int        `json:"retry_count"`
+	MaxRetries       int        `json:"max_retries"`
+	ErrorMessage     string     `json:"error_message"`
+	SubtaskCount     int        `json:"subtask_count"`
+	DispatchAttempts int        `json:"dispatch_attempts"`
+	ClaimedAt        *time.Time `json:"claimed_at,omitempty"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 // TeamTaskComment represents a comment on a task.

@@ -1,6 +1,14 @@
 import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { SessionPanel } from '../components/SessionPanel';
+import { ToolTimeline } from '../components/ToolTimeline';
+import snarkdown from 'snarkdown';
+import DOMPurify from 'dompurify';
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  return DOMPurify.sanitize(snarkdown(text));
+}
 
 // Direct fetch wrapper.
 async function callRPC(method, params) {
@@ -30,34 +38,6 @@ function extractText(content) {
     return content.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
   }
   return content.text || String(content);
-}
-
-// Linkify TSK-N identifiers in message text.
-function linkifyTasks(text) {
-  if (!text) return text;
-  const parts = text.split(/(TSK-\d+)/g);
-  if (parts.length === 1) return text; // No matches.
-  return parts.map((part, i) => {
-    if (/^TSK-\d+$/.test(part)) {
-      return h('a', {
-        key: i,
-        href: '#',
-        style: 'color:var(--primary);text-decoration:underline;cursor:pointer',
-        onClick: async (e) => {
-          e.preventDefault();
-          try {
-            const res = await fetch(`/api/teams/resolve-task?id=${encodeURIComponent(part)}`);
-            const data = await res.json();
-            if (data.found) {
-              window.location.hash = '';
-              window.location.href = `/teams/${data.team_id}/board?task=${part}`;
-            }
-          } catch {}
-        },
-      }, part);
-    }
-    return part;
-  });
 }
 
 function extractAudio(content) {
@@ -94,8 +74,11 @@ export function Chat() {
   const [selectedSession, setSelectedSession] = useState(null);
   const [selectedAgent, setSelectedAgent] = useState('');
   const [selectedAgentName, setSelectedAgentName] = useState('');
-  const [consentPrompt, setConsentPrompt] = useState(null);
+  // Consent is handled globally by Layout.jsx (works on all pages).
+  // Chat.jsx only tracks streaming state for "Waiting for permission..." text.
   const [noProvider, setNoProvider] = useState(false);
+  const [toolSteps, setToolSteps] = useState([]);
+  const [toolCollapsed, setToolCollapsed] = useState(false);
   const bottomRef = useRef(null);
   const timerRef = useRef(null);
   const sseRef = useRef(null);
@@ -125,9 +108,10 @@ export function Chat() {
   const findWebSession = useCallback(async (agentId) => {
     const { data: sessions } = await callRPC('sessions.list', { limit: 50 });
     if (!sessions) return null;
+    const chatId = chatIdRef.current;
     const match = agentId
-      ? sessions.find(s => s.channel === 'web' && s.chat_id === 'web-client' && s.agent_id === agentId)
-      : sessions.find(s => s.channel === 'web' && s.chat_id === 'web-client');
+      ? sessions.find(s => s.channel === 'web' && s.chat_id === chatId && s.agent_id === agentId)
+      : sessions.find(s => s.channel === 'web' && s.chat_id === chatId);
     return match ? match.id : null;
   }, []);
 
@@ -170,6 +154,11 @@ export function Chat() {
     setSelectedSession(id);
     setSelectedAgent(agentId);
     setSelectedAgentName(agentName);
+    // Restore chatID from session so subsequent messages go to the right session.
+    const { data: sess } = await callRPC('sessions.get', { id });
+    if (sess && sess.chat_id) {
+      chatIdRef.current = sess.chat_id;
+    }
     const msgs = await loadMessages(id);
     setMessages(msgs);
     setRightPanel('chat');
@@ -198,7 +187,11 @@ export function Chat() {
     setAgentsLoading(false);
   };
 
+  const chatIdRef = useRef('web-client');
+
   const startNewChat = (agent) => {
+    // Generate unique chatID so each conversation gets its own session.
+    chatIdRef.current = 'web-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     setSelectedSession(null);
     setSelectedAgent(agent.id);
     setSelectedAgentName(agent.name || agent.id);
@@ -224,6 +217,8 @@ export function Chat() {
     setMessages(prev => [...prev, { role: 'user', text }]);
     setSending(true);
     setStreaming('');
+    setToolSteps([]);
+    setToolCollapsed(false);
 
     let streamText = '';
     let gotChunks = false;
@@ -244,26 +239,50 @@ export function Chat() {
           setStreaming(streamText);
         }
 
-        if (event.type === 'tool.call' || event.type === 'tool.result') {
+        if (event.type === 'tool.call') {
           gotChunks = true;
-          if (event.type === 'tool.call') setStreaming('Using tools...');
+          const toolCall = event.tool_call || {};
+          let input = null;
+          try { if (toolCall.input) input = JSON.parse(toolCall.input); } catch {}
+          setToolSteps(prev => [...prev, {
+            id: toolCall.id || 'tc_' + Date.now(),
+            name: toolCall.name || 'unknown',
+            input,
+            status: 'running',
+            startedAt: Date.now(),
+          }]);
+        }
+
+        if (event.type === 'tool.result') {
+          gotChunks = true;
+          const toolResult = event.tool_result || {};
+          setToolSteps(prev => prev.map(s =>
+            s.id === toolResult.tool_call_id
+              ? { ...s, status: toolResult.is_error ? 'error' : 'done' }
+              : s
+          ));
         }
 
         if (event.type === 'consent.needed' && event.consent) {
           gotChunks = true;
-          setConsentPrompt(event.consent);
+          // Consent modal handled by Layout.jsx globally.
           setStreaming('Waiting for permission...');
         }
 
         if (event.type === 'consent.result') {
-          setConsentPrompt(null); // Dismiss consent modal (may have been granted from another channel).
+          setStreaming('');
         }
 
         if (event.type === 'run.completed') {
           completed = true;
-          setConsentPrompt(null);
           es.close();
           sseRef.current = null;
+
+          // Mark any remaining running tools as done.
+          setToolSteps(prev => prev.map(s =>
+            s.status === 'running' ? { ...s, status: 'done' } : s
+          ));
+          setToolCollapsed(true);
 
           if (gotChunks && streamText) {
             setStreaming('');
@@ -284,7 +303,7 @@ export function Chat() {
       if (!completed && !gotChunks) startPoll();
     };
 
-    const { error } = await callRPC('chat.send', { text, agent_id: selectedAgent || undefined });
+    const { error } = await callRPC('chat.send', { text, agent_id: selectedAgent || undefined, chat_id: chatIdRef.current });
     if (error) {
       es.close();
       sseRef.current = null;
@@ -350,21 +369,7 @@ export function Chat() {
     }
   };
 
-  const respondConsent = async (granted, tier = 'once') => {
-    if (!consentPrompt) return;
-    const payload = consentPrompt.nonce
-      ? { nonce: consentPrompt.nonce, granted, tier }
-      : { group: consentPrompt.group, granted }; // Legacy fallback.
-    await fetch('/api/consent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify(payload),
-    });
-    setConsentPrompt(null);
-    const msg = !granted ? 'Permission denied.' : tier === 'always' ? 'Always allowed, continuing...' : 'Permission granted, continuing...';
-    setStreaming(msg);
-  };
+  // Consent response handled by Layout.jsx globally.
 
   // ==================== RENDER ====================
 
@@ -492,18 +497,32 @@ export function Chat() {
                       )}
                     </div>
                   )}
-                  {msg.text && <div class="message-text">{linkifyTasks(msg.text)}</div>}
+                  {msg.text && msg.role === 'assistant'
+                    ? <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
+                    : msg.text && <div class="message-text">{msg.text}</div>
+                  }
                 </div>
               ))}
+
+              {/* Tool timeline — shown during and after tool execution */}
+              {toolSteps.length > 0 && (
+                <div class="message assistant">
+                  <ToolTimeline
+                    steps={toolSteps}
+                    collapsed={toolCollapsed}
+                    onToggle={() => setToolCollapsed(c => !c)}
+                  />
+                </div>
+              )}
 
               {streaming && (
                 <div class="message assistant">
                   <div class="message-role">assistant</div>
-                  <div class="message-text">{streaming}<span class="cursor-blink">|</span></div>
+                  <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streaming) + '<span class="cursor-blink">|</span>' }} />
                 </div>
               )}
 
-              {sending && !streaming && (
+              {sending && !streaming && toolSteps.length === 0 && (
                 <div class="message assistant">
                   <div class="message-role">assistant</div>
                   <div class="message-text" style="color:var(--text-muted)">
@@ -515,30 +534,7 @@ export function Chat() {
               <div ref={bottomRef} />
             </div>
 
-            {/* Consent modal */}
-            {consentPrompt && (
-              <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:var(--z-modal)"
-                role="dialog" aria-modal="true" aria-labelledby="consent-title">
-                <div class="card" style="padding:24px;max-width:420px;width:100%">
-                  <h3 id="consent-title" style="margin-top:0;font-size:16px;font-weight:700">Permission Required</h3>
-                  <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">The agent wants to use a tool that requires your approval.</p>
-                  <div style="background:var(--bg);padding:14px;border-radius:6px;margin-bottom:16px">
-                    <div style="font-weight:700;font-family:var(--mono);font-size:13px;margin-bottom:6px">{consentPrompt.tool_name}</div>
-                    <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text-muted)">
-                      <span style="text-transform:capitalize">{consentPrompt.source && consentPrompt.source.startsWith('mcp:') ? consentPrompt.source : consentPrompt.group}</span>
-                    </div>
-                    {consentPrompt.explanation && (
-                      <div style="color:var(--text-muted);font-size:12px;margin-top:8px;line-height:1.5">{consentPrompt.explanation}</div>
-                    )}
-                  </div>
-                  <div style="display:flex;gap:8px;justify-content:flex-end">
-                    <button class="btn-secondary" onClick={() => respondConsent(false, 'deny')}>Deny</button>
-                    <button class="btn-primary" onClick={() => respondConsent(true, 'once')}>Allow once</button>
-                    <button class="btn-primary" style="background:var(--success)" onClick={() => respondConsent(true, 'always')}>Always allow</button>
-                  </div>
-                </div>
-              </div>
-            )}
+            {/* Consent handled by Layout.jsx global banner */}
 
             <div class="chat-input-row">
               <input

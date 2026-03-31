@@ -504,6 +504,263 @@ func TestUpdateTeam(t *testing.T) {
 	}
 }
 
+// --- Reliability store tests ---
+
+func TestClaimTaskSetsClaimed(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	taskID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Claim me", CreatedBy: "lead-1",
+	})
+
+	s.ClaimTask(ctx, taskID, "agent-a")
+	task, _ := s.GetTask(ctx, taskID)
+	if task.ClaimedAt == nil {
+		t.Fatal("expected ClaimedAt to be set after ClaimTask")
+	}
+}
+
+func TestRecoverStaleTasks(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	taskID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Stale task", CreatedBy: "lead-1",
+	})
+
+	// Claim the task (sets claimed_at to now).
+	s.ClaimTask(ctx, taskID, "agent-a")
+
+	// Backdate claimed_at to simulate staleness.
+	s.db.ExecContext(ctx,
+		`UPDATE team_tasks SET claimed_at = datetime('now', '-700 seconds') WHERE id = ?`, taskID)
+
+	// Recover with 600s timeout — should recover the stale task.
+	recovered, err := s.RecoverStaleTasks(ctx, 600)
+	if err != nil {
+		t.Fatalf("RecoverStaleTasks: %v", err)
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("expected 1 recovered task, got %d", len(recovered))
+	}
+	if recovered[0].ID != taskID {
+		t.Fatalf("expected task ID %s, got %s", taskID, recovered[0].ID)
+	}
+	if recovered[0].Status != "failed" {
+		t.Fatalf("expected failed status, got %q", recovered[0].Status)
+	}
+
+	// Verify DB state.
+	task, _ := s.GetTask(ctx, taskID)
+	if task.Status != "failed" {
+		t.Fatalf("expected DB status failed, got %q", task.Status)
+	}
+}
+
+func TestRecoverStaleTasks_NullClaimedAt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	taskID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Pre-migration task", CreatedBy: "lead-1",
+	})
+
+	// Manually set to in_progress with NULL claimed_at (pre-migration).
+	s.db.ExecContext(ctx,
+		`UPDATE team_tasks SET status = 'in_progress', claimed_at = NULL,
+		 updated_at = datetime('now', '-700 seconds') WHERE id = ?`, taskID)
+
+	recovered, err := s.RecoverStaleTasks(ctx, 600)
+	if err != nil {
+		t.Fatalf("RecoverStaleTasks: %v", err)
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("expected 1 recovered task (NULL claimed_at fallback), got %d", len(recovered))
+	}
+}
+
+func TestRecoverStaleTasks_RecentNotRecovered(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	taskID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Fresh task", CreatedBy: "lead-1",
+	})
+
+	s.ClaimTask(ctx, taskID, "agent-a")
+
+	// Should NOT recover a recently-claimed task.
+	recovered, err := s.RecoverStaleTasks(ctx, 600)
+	if err != nil {
+		t.Fatalf("RecoverStaleTasks: %v", err)
+	}
+	if len(recovered) != 0 {
+		t.Fatalf("expected 0 recovered tasks for fresh task, got %d", len(recovered))
+	}
+}
+
+func TestIncrementDispatchAttempt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	taskID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Dispatch test", CreatedBy: "lead-1",
+	})
+
+	count1, err := s.IncrementDispatchAttempt(ctx, taskID)
+	if err != nil {
+		t.Fatalf("IncrementDispatchAttempt: %v", err)
+	}
+	if count1 != 1 {
+		t.Fatalf("expected 1, got %d", count1)
+	}
+
+	count2, _ := s.IncrementDispatchAttempt(ctx, taskID)
+	if count2 != 2 {
+		t.Fatalf("expected 2, got %d", count2)
+	}
+
+	count3, _ := s.IncrementDispatchAttempt(ctx, taskID)
+	if count3 != 3 {
+		t.Fatalf("expected 3, got %d", count3)
+	}
+}
+
+func TestCancelDependentTasks(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	idA, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Parent task", CreatedBy: "lead-1",
+	})
+	idB, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Dep B", CreatedBy: "lead-1", BlockedBy: idA,
+	})
+	idC, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Dep C", CreatedBy: "lead-1", BlockedBy: idA,
+	})
+	// D is blocked by B, not A — should NOT be cancelled.
+	idD, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Dep D", CreatedBy: "lead-1", BlockedBy: idB,
+	})
+
+	cancelled, err := s.CancelDependentTasks(ctx, idA)
+	if err != nil {
+		t.Fatalf("CancelDependentTasks: %v", err)
+	}
+	if len(cancelled) != 2 {
+		t.Fatalf("expected 2 cancelled tasks, got %d", len(cancelled))
+	}
+
+	// Verify B and C are cancelled.
+	taskB, _ := s.GetTask(ctx, idB)
+	taskC, _ := s.GetTask(ctx, idC)
+	if taskB.Status != "cancelled" {
+		t.Fatalf("expected B cancelled, got %q", taskB.Status)
+	}
+	if taskC.Status != "cancelled" {
+		t.Fatalf("expected C cancelled, got %q", taskC.Status)
+	}
+
+	// D should still be blocked (not directly dependent on A).
+	taskD, _ := s.GetTask(ctx, idD)
+	if taskD.Status != "blocked" {
+		t.Fatalf("expected D still blocked, got %q", taskD.Status)
+	}
+}
+
+func TestCancelDependentTasks_NoSubstringMatch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	// Create a task with ID "abc" and another blocked by "abcdef".
+	// Cancelling "abc" should NOT cancel the task blocked by "abcdef".
+	idA, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "A", CreatedBy: "lead-1",
+	})
+	idB, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "B-not-dep", CreatedBy: "lead-1", BlockedBy: idA + "extra",
+	})
+
+	cancelled, _ := s.CancelDependentTasks(ctx, idA)
+	if len(cancelled) != 0 {
+		t.Fatalf("expected 0 cancelled (no substring match), got %d", len(cancelled))
+	}
+	taskB, _ := s.GetTask(ctx, idB)
+	if taskB.Status != "blocked" {
+		t.Fatalf("expected B still blocked, got %q", taskB.Status)
+	}
+}
+
+func TestSubtaskCount(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	parentID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Parent", CreatedBy: "lead-1",
+	})
+
+	// Initially 0.
+	task, _ := s.GetTask(ctx, parentID)
+	if task.SubtaskCount != 0 {
+		t.Fatalf("expected subtask_count 0, got %d", task.SubtaskCount)
+	}
+
+	// Increment twice.
+	if err := s.IncrementSubtaskCount(ctx, parentID); err != nil {
+		t.Fatalf("IncrementSubtaskCount: %v", err)
+	}
+	if err := s.IncrementSubtaskCount(ctx, parentID); err != nil {
+		t.Fatalf("IncrementSubtaskCount 2: %v", err)
+	}
+	task, _ = s.GetTask(ctx, parentID)
+	if task.SubtaskCount != 2 {
+		t.Fatalf("expected subtask_count 2, got %d", task.SubtaskCount)
+	}
+
+	// Decrement once.
+	if err := s.DecrementSubtaskCount(ctx, parentID); err != nil {
+		t.Fatalf("DecrementSubtaskCount: %v", err)
+	}
+	task, _ = s.GetTask(ctx, parentID)
+	if task.SubtaskCount != 1 {
+		t.Fatalf("expected subtask_count 1, got %d", task.SubtaskCount)
+	}
+
+	// Decrement below 0 should clamp to 0.
+	s.DecrementSubtaskCount(ctx, parentID)
+	s.DecrementSubtaskCount(ctx, parentID) // This one would go below 0.
+	task, _ = s.GetTask(ctx, parentID)
+	if task.SubtaskCount != 0 {
+		t.Fatalf("expected subtask_count 0 (clamped), got %d", task.SubtaskCount)
+	}
+
+	// Verify scanTasks also picks up subtask_count.
+	s.IncrementSubtaskCount(ctx, parentID)
+	tasks, _ := s.ListTasks(ctx, teamID, "")
+	found := false
+	for _, tt := range tasks {
+		if tt.ID == parentID {
+			if tt.SubtaskCount != 1 {
+				t.Fatalf("expected subtask_count 1 in ListTasks, got %d", tt.SubtaskCount)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("parent task not found in ListTasks")
+	}
+}
+
 func TestBlockedByCreatesBlockedStatus(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -528,5 +785,191 @@ func TestBlockedByCreatesBlockedStatus(t *testing.T) {
 	}
 	if len(blocked) != 1 || blocked[0].ID != idB {
 		t.Fatalf("expected 1 blocked task, got %d", len(blocked))
+	}
+}
+
+func TestDeleteTask(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	taskID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Delete me", CreatedBy: "lead-1",
+	})
+
+	// Cannot delete a pending (non-terminal) task.
+	if err := s.DeleteTask(ctx, taskID); err == nil {
+		t.Fatal("expected error deleting non-terminal task")
+	}
+
+	// Complete the task, then delete.
+	s.ClaimTask(ctx, taskID, "agent-a")
+	s.CompleteTask(ctx, taskID, "done")
+
+	// Add a comment — it should be cascade-deleted.
+	s.CreateComment(ctx, store.TeamTaskComment{TaskID: taskID, Content: "note"})
+
+	if err := s.DeleteTask(ctx, taskID); err != nil {
+		t.Fatalf("DeleteTask: %v", err)
+	}
+
+	// Task should be gone.
+	task, err := s.GetTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("GetTask after delete: %v", err)
+	}
+	if task != nil {
+		t.Fatal("expected nil after delete")
+	}
+
+	// Comments should be gone.
+	comments, _ := s.ListComments(ctx, taskID)
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 comments after delete, got %d", len(comments))
+	}
+}
+
+func TestDeleteTask_DecrementsParentSubtaskCount(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	parentID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Parent", CreatedBy: "lead-1",
+	})
+	childID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Child", CreatedBy: "lead-1", ParentID: parentID,
+	})
+	s.IncrementSubtaskCount(ctx, parentID) // Simulate M1 create logic.
+
+	parent, _ := s.GetTask(ctx, parentID)
+	if parent.SubtaskCount != 1 {
+		t.Fatalf("expected subtask_count 1, got %d", parent.SubtaskCount)
+	}
+
+	// Complete child, then delete.
+	s.ClaimTask(ctx, childID, "agent-a")
+	s.CompleteTask(ctx, childID, "done")
+	if err := s.DeleteTask(ctx, childID); err != nil {
+		t.Fatalf("DeleteTask child: %v", err)
+	}
+
+	parent, _ = s.GetTask(ctx, parentID)
+	if parent.SubtaskCount != 0 {
+		t.Fatalf("expected subtask_count 0 after child delete, got %d", parent.SubtaskCount)
+	}
+}
+
+func TestDeleteTerminalTasks(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	// Create 3 tasks: 2 terminal, 1 active.
+	id1, _ := s.CreateTask(ctx, store.TeamTask{TeamID: teamID, Title: "Done 1", CreatedBy: "lead-1"})
+	id2, _ := s.CreateTask(ctx, store.TeamTask{TeamID: teamID, Title: "Done 2", CreatedBy: "lead-1"})
+	s.CreateTask(ctx, store.TeamTask{TeamID: teamID, Title: "Active", CreatedBy: "lead-1"})
+
+	s.ClaimTask(ctx, id1, "agent-a")
+	s.CompleteTask(ctx, id1, "done")
+	s.CancelTask(ctx, id2)
+
+	// Add comments to terminal tasks.
+	s.CreateComment(ctx, store.TeamTaskComment{TaskID: id1, Content: "note1"})
+	s.CreateComment(ctx, store.TeamTaskComment{TaskID: id2, Content: "note2"})
+
+	count, err := s.DeleteTerminalTasks(ctx, teamID)
+	if err != nil {
+		t.Fatalf("DeleteTerminalTasks: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 deleted, got %d", count)
+	}
+
+	// Active task should remain.
+	tasks, _ := s.ListTasks(ctx, teamID, "")
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 remaining task, got %d", len(tasks))
+	}
+	if tasks[0].Title != "Active" {
+		t.Fatalf("expected 'Active' task to remain, got %q", tasks[0].Title)
+	}
+
+	// Comments for deleted tasks should be gone.
+	c1, _ := s.ListComments(ctx, id1)
+	c2, _ := s.ListComments(ctx, id2)
+	if len(c1)+len(c2) != 0 {
+		t.Fatalf("expected 0 comments after bulk delete, got %d", len(c1)+len(c2))
+	}
+}
+
+func TestDeleteTerminalTasks_DecrementsParentSubtaskCount(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	parentID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Parent", CreatedBy: "lead-1",
+	})
+
+	// Create 2 children with parent_id, simulate M1 subtask_count increments.
+	child1, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Child 1", CreatedBy: "lead-1", ParentID: parentID,
+	})
+	child2, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Child 2", CreatedBy: "lead-1", ParentID: parentID,
+	})
+	s.IncrementSubtaskCount(ctx, parentID)
+	s.IncrementSubtaskCount(ctx, parentID)
+
+	parent, _ := s.GetTask(ctx, parentID)
+	if parent.SubtaskCount != 2 {
+		t.Fatalf("expected subtask_count 2 before delete, got %d", parent.SubtaskCount)
+	}
+
+	// Complete both children so they become terminal.
+	s.ClaimTask(ctx, child1, "agent-a")
+	s.CompleteTask(ctx, child1, "done")
+	s.ClaimTask(ctx, child2, "agent-b")
+	s.CompleteTask(ctx, child2, "done")
+
+	// Bulk delete terminal tasks.
+	count, err := s.DeleteTerminalTasks(ctx, teamID)
+	if err != nil {
+		t.Fatalf("DeleteTerminalTasks: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 deleted, got %d", count)
+	}
+
+	// Parent subtask_count should be 0.
+	parent, _ = s.GetTask(ctx, parentID)
+	if parent.SubtaskCount != 0 {
+		t.Fatalf("expected subtask_count 0 after bulk delete, got %d", parent.SubtaskCount)
+	}
+}
+
+func TestDeleteTerminalTasks_ZeroTerminal(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	teamID := createTestTeam(t, s, "lead-1")
+
+	s.CreateTask(ctx, store.TeamTask{TeamID: teamID, Title: "Active", CreatedBy: "lead-1"})
+
+	count, err := s.DeleteTerminalTasks(ctx, teamID)
+	if err != nil {
+		t.Fatalf("DeleteTerminalTasks: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 deleted, got %d", count)
+	}
+}
+
+func TestDeleteTask_NotFound(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.DeleteTask(ctx, "nonexistent"); err == nil {
+		t.Fatal("expected error for nonexistent task")
 	}
 }

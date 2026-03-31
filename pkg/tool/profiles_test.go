@@ -206,8 +206,9 @@ func TestListForAgent_MinimalProfileOnlyCore(t *testing.T) {
 }
 
 func TestAlwaysConsentGroups(t *testing.T) {
-	// Runtime, MCP, and orchestration must always require consent.
-	for _, g := range []string{GroupRuntime, GroupMCP, GroupOrchestration} {
+	// Runtime, MCP, browser, and orchestration must always require consent.
+	// (Team leads bypass orchestration consent at the loop level, not here.)
+	for _, g := range []string{GroupRuntime, GroupMCP, GroupBrowser, GroupOrchestration} {
 		if !AlwaysConsentGroups[g] {
 			t.Errorf("%s should be in AlwaysConsentGroups", g)
 		}

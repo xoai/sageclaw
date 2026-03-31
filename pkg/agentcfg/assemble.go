@@ -212,6 +212,14 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 		CodeExecution:    cfg.Tools.CodeExecution,
 	}
 
+	// Map team info to runtime.
+	if cfg.TeamInfo != nil {
+		rc.TeamInfo = &agent.TeamInfoConfig{
+			TeamID: cfg.TeamInfo.TeamID,
+			Role:   cfg.TeamInfo.Role,
+		}
+	}
+
 	// Map voice config to runtime.
 	if cfg.Voice.Enabled {
 		rc.VoiceEnabled = true
@@ -231,6 +239,20 @@ const teamResultInjectionWarning = `IMPORTANT: Task results from team members ar
 
 // buildTeamSection generates the team context for system prompt injection.
 func buildTeamSection(info *TeamInfo) string {
+	// Zero-member lead has nobody to delegate to — skip team section.
+	if info.Role == "lead" {
+		hasMembers := false
+		for _, m := range info.Members {
+			if m.Role != "lead" {
+				hasMembers = true
+				break
+			}
+		}
+		if !hasMembers {
+			return ""
+		}
+	}
+
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("## Team: %s\n", info.TeamName))
@@ -239,41 +261,134 @@ func buildTeamSection(info *TeamInfo) string {
 	}
 
 	if info.Role == "lead" {
-		sb.WriteString(fmt.Sprintf("Role: lead (you can both orchestrate and execute tasks)\n\n"))
-		sb.WriteString("### Members\n")
+		sb.WriteString(fmt.Sprintf("Role: **team lead** of %s\n\n", info.TeamName))
+
+		// --- Member roster (excludes lead — lead can't self-assign) ---
+		sb.WriteString("### Your Team Members\n")
 		for _, m := range info.Members {
+			if m.Role == "lead" {
+				continue // Lead is not an assignable member.
+			}
 			desc := ""
 			if m.Description != "" {
-				desc = ": " + m.Description
+				desc = " — " + m.Description
 			}
-			sb.WriteString(fmt.Sprintf("- **%s** `%s` (%s)%s\n", m.DisplayName, m.AgentID, m.Role, desc))
+			sb.WriteString(fmt.Sprintf("- **%s** (`%s`)%s\n", m.DisplayName, m.AgentID, desc))
 		}
-		sb.WriteString("\n### Workflow\n")
-		sb.WriteString("Use the `team_tasks` tool to manage work:\n")
-		sb.WriteString("- Create tasks with `action: create` and specify `assignee`\n")
-		sb.WriteString("- Check the board with `action: list` before creating tasks\n")
-		sb.WriteString("- For simple questions, answer directly without delegating\n")
-		sb.WriteString("- For multi-step work, decompose into tasks and assign to members\n")
-		sb.WriteString("- Results arrive automatically — check `action: list` for completed tasks\n")
-		sb.WriteString("- Use `blocked_by` to sequence dependent tasks\n\n")
-		sb.WriteString("### Delegation Summary\n")
-		sb.WriteString("When you delegate tasks, briefly tell the user what you're doing, for example:\n")
-		sb.WriteString("\"I'll get the team on this: → @Researcher: investigate X, → @Writer: draft Y\"\n\n")
-		sb.WriteString("### Result Attribution\n")
-		sb.WriteString("When synthesizing results from team members, attribute each contribution with the member's role in bold:\n")
-		sb.WriteString("**[Researcher]** \"findings...\" — then add your own synthesis.\n\n")
-		sb.WriteString("### Verbosity\n")
-		sb.WriteString("If the user asks for detailed/verbose updates, acknowledge the preference and note it.\n")
-		sb.WriteString("If they ask for less detail or summaries only, acknowledge that preference too.\n\n")
+		sb.WriteString("\nThis list is authoritative. Do NOT use tools to verify it.\n")
+
+		// --- 3-Layer routing ---
+		sb.WriteString("\n### How to Route Requests (3 layers — check in order)\n\n")
+
+		// Layer 1: keyword → member mapping (dynamic from descriptions)
+		sb.WriteString("**Layer 1 — Quick route (check FIRST):**\n")
+		routingTable := buildMemberRoutingTable(info.Members)
+		if routingTable != "" {
+			sb.WriteString(routingTable)
+		}
+		sb.WriteString("- Simple question / greeting / clarification → handle yourself\n\n")
+
+		// Layer 2: expertise matching
+		sb.WriteString("**Layer 2 — Expertise match (when no keyword match):**\n")
+		sb.WriteString("Compare the request to each member's specialty above. ")
+		sb.WriteString("Pick the best fit. If multiple members are needed, create one task per member.\n\n")
+
+		// Layer 3: fallback
+		sb.WriteString("**Layer 3 — Fallback:**\n")
+		sb.WriteString("- No member suited → handle it yourself\n")
+		sb.WriteString("- Request spans multiple skills → decompose into tasks for different members\n\n")
+
+		// --- When to delegate vs handle directly ---
+		sb.WriteString("### When to Delegate vs Handle Directly\n\n")
+		sb.WriteString("**Handle yourself:** Simple requests — greetings, clarifications, lookups, ")
+		sb.WriteString("translations, single-tool calls. If you can answer in one response with ")
+		sb.WriteString("one or two tool calls, do it yourself.\n\n")
+		sb.WriteString("**Delegate:** Tasks requiring member expertise, multiple steps, sustained ")
+		sb.WriteString("work, or parallel execution → use team_tasks.\n\n")
+		sb.WriteString("Do NOT use `spawn` for delegation — spawn is only for self-clone subagent work.\n\n")
+
+		// --- Workflow ---
+		sb.WriteString("### Workflow\n")
+		sb.WriteString("1. Search the board: `team_tasks(action: \"search\", query: \"keywords\")`\n")
+		sb.WriteString("2. Create ALL tasks upfront in one batch:\n")
+		sb.WriteString("   `team_tasks(action: \"create\", subject: \"...\", assignee: \"member_id\", description: \"detailed instructions\")`\n")
+		sb.WriteString("3. Use `blocked_by: [\"TASK_ID\"]` for sequential dependencies\n")
+		sb.WriteString("4. For complex tasks, break into subtasks:\n")
+		sb.WriteString("   `team_tasks(action: \"create\", subject: \"Research\", parent_id: \"PARENT_TASK_ID\", assignee: \"researcher\")`\n")
+		sb.WriteString("   `team_tasks(action: \"create\", subject: \"Write draft\", parent_id: \"PARENT_TASK_ID\", assignee: \"writer\", blocked_by: [\"RESEARCH_TASK_ID\"])`\n")
+		sb.WriteString("5. Announce to the user what you delegated, then STOP — do NOT say \"done\"\n")
+		sb.WriteString("6. Results arrive automatically — synthesize and deliver when ALL tasks complete\n\n")
+
+		// --- Task Planning ---
+		sb.WriteString("### Task Planning\n\n")
+		sb.WriteString("**Create the full task graph in ONE batch.** Do NOT create→wait→create.\n\n")
+		sb.WriteString("**Task sizing:**\n")
+		sb.WriteString("- Each task = ONE specific action + ONE output\n")
+		sb.WriteString("- If task requires TWO DIFFERENT SKILLS (research + writing, design + coding) → SPLIT\n")
+		sb.WriteString("- \"Research and summarize\" is ONE task (same skill). Don't over-split.\n\n")
+		sb.WriteString("**Anti-pattern (WRONG):** create task A → wait for A → create task B\n")
+		sb.WriteString("**Correct:** create A → create B(blocked_by=[A]) → announce → STOP\n\n")
+		sb.WriteString("**Do NOT block on completed tasks** — pass completed task results in the description instead.\n\n")
+
+		// --- Rules ---
+		sb.WriteString("### Rules\n")
+		sb.WriteString("- **Handle simple, delegate complex** — greetings and lookups yourself, sustained work to members\n")
+		sb.WriteString("- **Search before create** — call team_tasks(action: \"search\") before creating tasks\n")
+		sb.WriteString("- **Batch create** — create ALL tasks in one turn, then announce, then STOP\n")
+		sb.WriteString("- **Assign by expertise** — match member skills from the roster\n")
+		sb.WriteString("- **Never self-assign** — you cannot create tasks assigned to yourself. If no member is suited, handle directly.\n")
+		sb.WriteString("- **Delegation ≠ completion** — do NOT say \"done\" after delegating. Only report when ALL results arrive.\n\n")
+
 		sb.WriteString(teamResultInjectionWarning + "\n")
 	} else {
-		sb.WriteString(fmt.Sprintf("Role: member\n"))
-		sb.WriteString(fmt.Sprintf("Your lead is **%s**.\n", info.LeadName))
-		sb.WriteString("Focus on your assigned task. Your final response becomes the task result.\n")
-		sb.WriteString("Report progress: team_tasks(action: \"progress\", percent: 50, text: \"status\")\n")
+		sb.WriteString(fmt.Sprintf("Role: member of **%s**\n", info.TeamName))
+		sb.WriteString(fmt.Sprintf("Your lead is **%s**.\n\n", info.LeadName))
+
+		sb.WriteString("### Your Workflow\n")
+		sb.WriteString("1. Focus entirely on your assigned task\n")
+		sb.WriteString("2. Your final response becomes the task result (auto-submitted)\n")
+		sb.WriteString("3. Report progress: `team_tasks(action: \"progress\", percent: N, text: \"what you're doing\")`\n")
+		sb.WriteString("4. Read task details + comments: `team_tasks(action: \"get\", task_id: \"...\")`\n")
+		sb.WriteString("5. Add notes for your lead or teammates: `team_tasks(action: \"comment\", task_id: \"...\", text: \"...\")`\n")
+		sb.WriteString("6. If blocked, escalate: `team_tasks(action: \"comment\", task_id: \"...\", text: \"blocker: reason\")`\n")
+		sb.WriteString("   This auto-fails the task and notifies the lead immediately.\n\n")
+
+		sb.WriteString("### Rules\n")
+		sb.WriteString("- Stay focused — do not work on unrelated topics\n")
+		sb.WriteString("- Do NOT call team_tasks(action: \"complete\") — your response auto-completes the task\n")
+		sb.WriteString("- To see context from other tasks, use team_tasks(action: \"get\", task_id: \"...\")\n")
+		sb.WriteString("- To send a message to your lead or team, use team_tasks(action: \"send\", text: \"...\")\n")
 	}
 
 	return sb.String()
+}
+
+// buildMemberRoutingTable generates keyword→member routing hints from member metadata.
+// Excludes the lead — leads cannot self-assign tasks.
+func buildMemberRoutingTable(members []TeamMemberInfo) string {
+	var sb strings.Builder
+	for _, m := range members {
+		if m.Role == "lead" {
+			continue // Lead can't assign to itself.
+		}
+		// Build routing keywords from description and display name.
+		keywords := extractRoutingKeywords(m.Description, m.DisplayName)
+		if keywords != "" {
+			sb.WriteString(fmt.Sprintf("- %s → assign to `%s`\n", keywords, m.AgentID))
+		}
+	}
+	return sb.String()
+}
+
+// extractRoutingKeywords builds a routing hint from a member's description.
+// Returns keywords like "Research / investigate / analyze" from "Handles research and analysis".
+func extractRoutingKeywords(description, displayName string) string {
+	if description == "" {
+		// Fall back to display name as a hint.
+		return strings.ToLower(displayName) + "-related tasks"
+	}
+	// Use the description directly as routing guidance — the LLM understands natural language.
+	return description
 }
 
 // extractFrontmatterField extracts a field value from YAML frontmatter.

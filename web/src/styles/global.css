@@ -694,6 +694,20 @@ button { font-family: var(--sans); }
 .thinking-dots::after { content: ''; animation: dots 1.5s infinite; }
 @keyframes dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
 
+/* Tool Timeline */
+.tool-timeline { font-size: 13px; line-height: 1.6; }
+.tool-timeline-header { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-muted); font-size: 12px; padding: 2px 0; user-select: none; }
+.tool-timeline-header:hover { color: var(--text); }
+.tool-timeline-toggle { font-size: 9px; width: 14px; text-align: center; }
+.tool-timeline-summary { font-weight: 500; }
+.tool-timeline-steps { padding: 4px 0 2px 0; }
+.tool-step { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 13px; }
+.tool-step-icon { font-size: 12px; width: 18px; text-align: center; flex-shrink: 0; }
+.tool-step-emoji { flex-shrink: 0; }
+.tool-step-text { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-step-running .tool-step-icon { animation: pulse 1.5s infinite; }
+.tool-step-stale { color: var(--warning); font-style: italic; font-size: 11px; }
+
 /* Theme toggle */
 .theme-toggle { cursor: pointer; background: none; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text-muted); font-size: 16px; min-height: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s; }
 .theme-toggle:hover { background: var(--surface-hover); color: var(--text); }
@@ -963,3 +977,22 @@ button { font-family: var(--sans); }
   width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); display: inline-block;
 }
 .model-picker-dot.connected { background: var(--success); }
+
+/* Markdown rendered in chat messages */
+.markdown-body h1 { font-size: 1.4em; font-weight: 700; margin: 12px 0 8px; }
+.markdown-body h2 { font-size: 1.2em; font-weight: 700; margin: 10px 0 6px; }
+.markdown-body h3 { font-size: 1.05em; font-weight: 600; margin: 8px 0 4px; }
+.markdown-body p { margin: 6px 0; }
+.markdown-body ul, .markdown-body ol { margin: 6px 0; padding-left: 20px; }
+.markdown-body li { margin: 2px 0; }
+.markdown-body code { background: var(--bg-darker, #1a1a2e); padding: 2px 5px; border-radius: 3px; font-family: var(--mono); font-size: 0.9em; }
+.markdown-body pre { background: var(--bg-darker, #1a1a2e); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+.markdown-body pre code { background: none; padding: 0; }
+.markdown-body blockquote { border-left: 3px solid var(--primary); padding-left: 12px; margin: 8px 0; color: var(--text-muted); }
+.markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.markdown-body a { color: var(--primary); text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
+.markdown-body strong { font-weight: 700; }
+.markdown-body table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 6px 10px; font-size: 13px; text-align: left; }
+.markdown-body th { background: var(--bg-darker, #1a1a2e); font-weight: 600; }

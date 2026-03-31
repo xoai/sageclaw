@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xoai/sageclaw/pkg/store"
 )
 
 // channelConfig defines what each channel needs.
@@ -231,6 +232,12 @@ func (s *Server) handleTeamsCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
+
+	// Hot-reload team config into the runtime (agent loops, tools, etc.).
+	if s.teamReloadFunc != nil {
+		go s.teamReloadFunc()
+	}
+
 	writeJSON(w, map[string]string{"id": id, "status": "created"})
 }
 
@@ -267,6 +274,9 @@ func (s *Server) handleTeamsUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": err.Error()})
 		return
 	}
+	if s.teamReloadFunc != nil {
+		go s.teamReloadFunc()
+	}
 	writeJSON(w, map[string]string{"id": id, "status": "updated"})
 }
 
@@ -278,10 +288,45 @@ func (s *Server) handleTeamsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete team tasks first.
-	s.store.DB().ExecContext(r.Context(), `DELETE FROM team_tasks WHERE team_id = ?`, id)
-	s.store.DB().ExecContext(r.Context(), `DELETE FROM team_messages WHERE team_id = ?`, id)
-	s.store.DB().ExecContext(r.Context(), `DELETE FROM teams WHERE id = ?`, id)
+	// Delete team and related data in a transaction.
+	tx, err := s.store.DB().BeginTx(r.Context(), nil)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "failed to start transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM team_tasks WHERE team_id = ?`, id); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "failed to delete team tasks"})
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM team_messages WHERE team_id = ?`, id); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "failed to delete team messages"})
+		return
+	}
+	res, err := tx.ExecContext(r.Context(), `DELETE FROM teams WHERE id = ?`, id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "failed to delete team"})
+		return
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "team not found"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "failed to commit delete"})
+		return
+	}
+	if s.teamReloadFunc != nil {
+		go s.teamReloadFunc()
+	}
 	writeJSON(w, map[string]string{"id": id, "status": "deleted"})
 }
 
@@ -350,14 +395,28 @@ func (s *Server) handleTeamsTaskAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	teamID := parts[0]
+
 	var p struct {
-		TaskID   string `json:"task_id"`
-		Action   string `json:"action"`
-		Feedback string `json:"feedback"`
+		TaskID      string `json:"task_id"`
+		Action      string `json:"action"`
+		Feedback    string `json:"feedback"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		AssignTo    string `json:"assign_to"`
+		ParentID    string `json:"parent_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.TaskID == "" || p.Action == "" {
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "task_id and action required"})
+		writeJSON(w, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	// Create action doesn't require task_id.
+	if p.Action == "" || (p.TaskID == "" && p.Action != "create" && p.Action != "delete-bulk") {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "action required (task_id required for most actions)"})
 		return
 	}
 
@@ -403,6 +462,143 @@ func (s *Server) handleTeamsTaskAction(w http.ResponseWriter, r *http.Request) {
 		})
 	case "retry":
 		err = s.store.RetryTask(ctx, p.TaskID)
+
+	case "delete":
+		err = s.store.DeleteTask(ctx, p.TaskID)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "not found") {
+				status = http.StatusNotFound
+			} else if strings.Contains(err.Error(), "not in terminal state") {
+				status = http.StatusBadRequest
+			}
+			w.WriteHeader(status)
+			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		// Broadcast SSE event.
+		data, _ := json.Marshal(map[string]any{"type": "team.task.deleted", "task_id": p.TaskID, "team_id": teamID})
+		s.broadcast(data)
+		writeJSON(w, map[string]string{"task_id": p.TaskID, "action": "delete", "status": "ok"})
+		return
+
+	case "delete-bulk":
+		count, delErr := s.store.DeleteTerminalTasks(ctx, teamID)
+		if delErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]string{"error": delErr.Error()})
+			return
+		}
+		// Broadcast SSE event.
+		data, _ := json.Marshal(map[string]any{"type": "team.task.cleared", "team_id": teamID, "count": count})
+		s.broadcast(data)
+		writeJSON(w, map[string]any{"action": "delete-bulk", "deleted": count})
+		return
+
+	case "create":
+		if strings.TrimSpace(p.Title) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "title required"})
+			return
+		}
+		if len(p.Title) > 500 {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "title must be 500 characters or less"})
+			return
+		}
+		if p.Priority < 0 || p.Priority > 3 {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "priority must be 0-3"})
+			return
+		}
+		// Validate assign_to is a team member.
+		if p.AssignTo != "" {
+			members, memErr := s.store.ListTeamMembers(ctx, teamID)
+			if memErr != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]string{"error": "failed to list team members"})
+				return
+			}
+			found := false
+			for _, m := range members {
+				if m.AgentID == p.AssignTo {
+					found = true
+					break
+				}
+			}
+			if !found {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]string{"error": "assign_to is not a team member"})
+				return
+			}
+		}
+		// Validate parent_id.
+		if p.ParentID != "" {
+			parent, pErr := s.store.GetTask(ctx, p.ParentID)
+			if pErr != nil || parent == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]string{"error": "parent task not found"})
+				return
+			}
+			if parent.TeamID != teamID {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]string{"error": "parent task belongs to different team"})
+				return
+			}
+			if parent.Status == "completed" || parent.Status == "cancelled" || parent.Status == "failed" {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]string{"error": "parent task is in terminal state"})
+				return
+			}
+		}
+
+		taskNum, numErr := s.store.NextTaskNumber(ctx, teamID)
+		if numErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]string{"error": "failed to get task number"})
+			return
+		}
+
+		task := store.TeamTask{
+			TeamID:      teamID,
+			Title:       strings.TrimSpace(p.Title),
+			Description: p.Description,
+			Priority:    p.Priority,
+			CreatedBy:   "dashboard",
+			ParentID:    p.ParentID,
+			TaskNumber:  taskNum,
+			Identifier:  fmt.Sprintf("TSK-%d", taskNum),
+		}
+
+		taskID, createErr := s.store.CreateTask(ctx, task)
+		if createErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]string{"error": createErr.Error()})
+			return
+		}
+
+		// Increment parent subtask_count if applicable.
+		if p.ParentID != "" {
+			_ = s.store.IncrementSubtaskCount(ctx, p.ParentID)
+		}
+
+		// Assign if requested.
+		if p.AssignTo != "" {
+			_ = s.store.ClaimTask(ctx, taskID, p.AssignTo)
+		}
+
+		// Read back full task.
+		created, _ := s.store.GetTask(ctx, taskID)
+		if created != nil {
+			// SSE: team.task.created is broadcast by existing infrastructure if wired.
+			data, _ := json.Marshal(map[string]any{"type": "team.task.created", "task_id": taskID, "team_id": teamID, "task": created, "seq": created.UpdatedAt.UnixMilli()})
+			s.broadcast(data)
+			writeJSON(w, created)
+		} else {
+			writeJSON(w, map[string]string{"id": taskID, "status": "created"})
+		}
+		return
+
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]string{"error": "unknown action: " + p.Action})
@@ -444,6 +640,68 @@ func (s *Server) handleTeamsAttentionCount(w http.ResponseWriter, r *http.Reques
 	s.store.DB().QueryRowContext(r.Context(),
 		`SELECT COUNT(*) FROM team_tasks WHERE status IN ('in_review','failed','blocked')`).Scan(&count)
 	writeJSON(w, map[string]any{"count": count})
+}
+
+// --- Task Comments (Dashboard) ---
+
+func (s *Server) handleTeamsTaskComments(w http.ResponseWriter, r *http.Request) {
+	// Path: /api/teams/task-comments/{taskId}
+	taskID := extractPathParam(r.URL.Path, "/api/teams/task-comments/")
+	if taskID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "task ID required"})
+		return
+	}
+
+	ctx := r.Context()
+
+	switch r.Method {
+	case http.MethodGet:
+		comments, err := s.store.ListComments(ctx, taskID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		if comments == nil {
+			comments = []store.TeamTaskComment{}
+		}
+		writeJSON(w, comments)
+
+	case http.MethodPost:
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Text) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "text required"})
+			return
+		}
+
+		// Verify task exists.
+		task, err := s.store.GetTask(ctx, taskID)
+		if err != nil || task == nil {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]string{"error": "task not found"})
+			return
+		}
+
+		id, err := s.store.CreateComment(ctx, store.TeamTaskComment{
+			TaskID:      taskID,
+			UserID:      "dashboard",
+			Content:     strings.TrimSpace(body.Text),
+			CommentType: "note",
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]string{"id": id, "status": "created"})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 // --- Skills ---

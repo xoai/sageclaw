@@ -27,6 +27,13 @@ type LoopFactory interface {
 	NewTaskLoop(agentID string) *agent.Loop
 }
 
+// MaxDispatchAttempts is the maximum number of times a task can be dispatched
+// before being permanently failed (circuit breaker).
+const MaxDispatchAttempts = 3
+
+// DefaultStaleTimeout is the default timeout in seconds for stale task recovery.
+const DefaultStaleTimeout = 600
+
 // TeamExecutor is the orchestration engine that dispatches tasks to member agents.
 type TeamExecutor struct {
 	store        store.Store
@@ -34,10 +41,14 @@ type TeamExecutor struct {
 	eventHandler agent.EventHandler
 	notifier     *TeamProgressNotifier
 
-	mu       sync.Mutex
-	inboxes  map[string]*TeamInbox    // teamID → completion inbox
-	limiters map[string]chan struct{}  // teamID → concurrency semaphore
-	wg       sync.WaitGroup           // tracks in-flight execute goroutines
+	mu          sync.Mutex
+	inboxes     map[string]*TeamInbox           // teamID → completion inbox
+	limiters    map[string]chan struct{}         // teamID → concurrency semaphore
+	cancelFuncs map[string]context.CancelFunc   // taskID → cancel function
+	wg          sync.WaitGroup                  // tracks in-flight execute goroutines
+
+	// Recovery ticker lifecycle.
+	recoveryStop   func()
 }
 
 // NewTeamExecutor creates an executor.
@@ -52,6 +63,7 @@ func NewTeamExecutor(
 		eventHandler: eventHandler,
 		inboxes:      make(map[string]*TeamInbox),
 		limiters:     make(map[string]chan struct{}),
+		cancelFuncs:  make(map[string]context.CancelFunc),
 	}
 }
 
@@ -70,13 +82,9 @@ func (e *TeamExecutor) Dispatch(ctx context.Context, task store.TeamTask) (strin
 		if team.ID != task.TeamID {
 			return "", fmt.Errorf("assignee %q belongs to team %q, not %q", task.AssignedTo, team.ID, task.TeamID)
 		}
-		_ = role // lead or member — both valid assignees
-	}
-
-	// Cycle detection for blocked_by.
-	if task.BlockedBy != "" {
-		if err := e.detectCycle(ctx, task.TeamID, task.BlockedBy); err != nil {
-			return "", err
+		// Block dispatch to lead agent — tasks must go to members.
+		if role == "lead" {
+			return "", fmt.Errorf("cannot dispatch task to team lead %q — assign to a member instead", task.AssignedTo)
 		}
 	}
 
@@ -91,14 +99,33 @@ func (e *TeamExecutor) Dispatch(ctx context.Context, task store.TeamTask) (strin
 
 	// If not blocked and has an assignee, launch execution.
 	if task.BlockedBy == "" && task.AssignedTo != "" {
-		e.launchExecute(task.TeamID, taskID, task.AssignedTo)
+		e.launchExecute(ctx, task.TeamID, taskID, task.AssignedTo)
 	}
 
 	return taskID, nil
 }
 
-// launchExecute starts a goroutine for task execution.
-func (e *TeamExecutor) launchExecute(teamID, taskID, agentID string) {
+// launchExecute increments dispatch attempts, checks the circuit breaker,
+// and starts a goroutine for task execution. All dispatch paths go through
+// this method so the circuit breaker cannot be bypassed.
+func (e *TeamExecutor) launchExecute(_ context.Context, teamID, taskID, agentID string) {
+	// Use a fresh context for dispatch operations — the caller's context may
+	// be near expiry (e.g., when unblocking dependent tasks after completion).
+	dispatchCtx, dispatchCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dispatchCancel()
+
+	// Circuit breaker: increment and check.
+	attempts, err := e.store.IncrementDispatchAttempt(dispatchCtx, taskID)
+	if err != nil {
+		log.Printf("[team] task %s: failed to increment dispatch attempt: %v", taskID[:min(8, len(taskID))], err)
+	}
+	if attempts >= MaxDispatchAttempts {
+		log.Printf("[team] task %s: circuit breaker tripped after %d dispatch attempts", taskID[:min(8, len(taskID))], attempts)
+		e.failTask(dispatchCtx, taskID, teamID, "max_dispatch_attempts_exceeded",
+			fmt.Sprintf("task failed after %d dispatch attempts", attempts))
+		return
+	}
+
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
@@ -111,9 +138,19 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultTaskTimeout)
 	defer cancel()
 
+	// Store cancel func for cascade stop.
+	e.mu.Lock()
+	e.cancelFuncs[taskID] = cancel
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		delete(e.cancelFuncs, taskID)
+		e.mu.Unlock()
+	}()
+
 	// Acquire concurrency slot.
 	if err := e.acquireConcurrency(ctx, teamID); err != nil {
-		log.Printf("[team] task %s: failed to acquire concurrency: %v", taskID[:8], err)
+		log.Printf("[team] task %s: failed to acquire concurrency: %v", taskID[:min(8, len(taskID))], err)
 		e.failTask(ctx, taskID, teamID, "concurrency_timeout", err.Error())
 		return
 	}
@@ -121,7 +158,7 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 
 	// Claim the task (pending → in_progress).
 	if err := e.store.ClaimTask(ctx, taskID, agentID); err != nil {
-		log.Printf("[team] task %s: failed to claim: %v", taskID[:8], err)
+		log.Printf("[team] task %s: failed to claim: %v", taskID[:min(8, len(taskID))], err)
 		return
 	}
 	e.emitEvent(agent.EventTeamTaskClaimed, teamID, taskID, nil)
@@ -129,7 +166,7 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 	// Load task details.
 	task, err := e.store.GetTask(ctx, taskID)
 	if err != nil || task == nil {
-		log.Printf("[team] task %s: failed to load: %v", taskID[:8], err)
+		log.Printf("[team] task %s: failed to load: %v", taskID[:min(8, len(taskID))], err)
 		e.failTask(ctx, taskID, teamID, "load_error", "failed to load task details")
 		return
 	}
@@ -138,9 +175,9 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 	prompt := e.buildTaskPrompt(ctx, task)
 
 	// Create fresh session for this task.
-	session, err := e.store.CreateSessionWithKind(ctx, "internal", taskID[:8], agentID, "team_task")
+	session, err := e.store.CreateSessionWithKind(ctx, "internal", taskID[:min(8, len(taskID))], agentID, "team_task")
 	if err != nil {
-		log.Printf("[team] task %s: failed to create session: %v", taskID[:8], err)
+		log.Printf("[team] task %s: failed to create session: %v", taskID[:min(8, len(taskID))], err)
 		e.failTask(ctx, taskID, teamID, "session_error", err.Error())
 		return
 	}
@@ -151,7 +188,7 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 	// Create ephemeral Loop for this task.
 	loop := e.loopFactory.NewTaskLoop(agentID)
 	if loop == nil {
-		log.Printf("[team] task %s: no loop factory output for agent %s", taskID[:8], agentID)
+		log.Printf("[team] task %s: no loop factory output for agent %s", taskID[:min(8, len(taskID))], agentID)
 		e.failTask(ctx, taskID, teamID, "agent_not_found", fmt.Sprintf("agent %q not configured", agentID))
 		return
 	}
@@ -174,7 +211,7 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 
 	// Complete the task.
 	if err := e.store.CompleteTask(ctx, taskID, responseText); err != nil {
-		log.Printf("[team] task %s: failed to complete: %v", taskID[:8], err)
+		log.Printf("[team] task %s: failed to complete: %v", taskID[:min(8, len(taskID))], err)
 		e.failTask(ctx, taskID, teamID, "complete_error", err.Error())
 		return
 	}
@@ -204,12 +241,12 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 		for _, t := range unblocked {
 			e.emitEvent(agent.EventTeamTaskUnblocked, teamID, t.ID, nil)
 			if t.AssignedTo != "" {
-				e.launchExecute(teamID, t.ID, t.AssignedTo)
+				e.launchExecute(ctx, teamID, t.ID, t.AssignedTo)
 			}
 		}
 	}
 
-	log.Printf("[team] task %s (%s) completed by %s", taskID[:8], task.Title, agentID)
+	log.Printf("[team] task %s (%s) completed by %s", taskID[:min(8, len(taskID))], task.Title, agentID)
 }
 
 // handleFailure classifies errors and either retries or fails permanently.
@@ -221,7 +258,7 @@ func (e *TeamExecutor) handleFailure(ctx context.Context, task *store.TeamTask, 
 		log.Printf("[team] task %s: transient failure, retrying (%d/%d): %v",
 			task.ID[:8], task.RetryCount+1, task.MaxRetries, err)
 		if retryErr := e.store.RetryTask(ctx, task.ID); retryErr == nil {
-			e.launchExecute(teamID, task.ID, task.AssignedTo)
+			e.launchExecute(ctx, teamID, task.ID, task.AssignedTo)
 			return
 		}
 	}
@@ -346,6 +383,181 @@ func (e *TeamExecutor) GetInbox(teamID string) *TeamInbox {
 	return e.getInbox(teamID)
 }
 
+// StartRecoveryTicker launches a goroutine that periodically recovers stale tasks.
+// Returns a stop function. Call it (or Shutdown) to stop the ticker.
+func (e *TeamExecutor) StartRecoveryTicker(interval time.Duration) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				e.recoverStaleTasks()
+			}
+		}
+	}()
+
+	stop := func() {
+		select {
+		case <-done:
+			// Already stopped.
+		default:
+			close(done)
+		}
+		<-stopped
+	}
+
+	e.mu.Lock()
+	e.recoveryStop = stop
+	e.mu.Unlock()
+
+	return stop
+}
+
+// recoverStaleTasks finds and fails tasks that have been in_progress too long.
+func (e *TeamExecutor) recoverStaleTasks() {
+	ctx := context.Background()
+	recovered, err := e.store.RecoverStaleTasks(ctx, e.getStaleTimeout())
+	if err != nil {
+		log.Printf("[team] stale recovery error: %v", err)
+		return
+	}
+	for _, task := range recovered {
+		log.Printf("[team] recovered stale task %s (%s)", task.ID[:min(8, len(task.ID))], task.Title)
+		e.emitEvent(agent.EventTeamTaskFailed, task.TeamID, task.ID, nil)
+
+		// Push failure to inbox for lead notification.
+		inbox := e.getInbox(task.TeamID)
+		inbox.Push(TaskCompletion{
+			TaskID:  task.ID,
+			Subject: task.Title,
+			Status:  "failed",
+			Error:   "stale_timeout: task not completed within configured timeout",
+			BatchID: task.BatchID,
+		})
+	}
+}
+
+// getStaleTimeout reads the stale timeout from the first available team's settings.
+// Falls back to DefaultStaleTimeout. Uses global default since RecoverStaleTasks
+// queries across all teams.
+func (e *TeamExecutor) getStaleTimeout() int {
+	return DefaultStaleTimeout
+}
+
+// CancelTask cancels a specific in-flight task by ID.
+func (e *TeamExecutor) CancelTask(ctx context.Context, taskID string) error {
+	// Cancel the context if the task is running.
+	e.mu.Lock()
+	cancelFn, running := e.cancelFuncs[taskID]
+	e.mu.Unlock()
+	if running {
+		cancelFn()
+	}
+
+	// Mark as cancelled in DB.
+	if err := e.store.CancelTask(ctx, taskID); err != nil {
+		return fmt.Errorf("cancelling task: %w", err)
+	}
+
+	// Cascade cancel dependent tasks.
+	dependents, err := e.store.CancelDependentTasks(ctx, taskID)
+	if err != nil {
+		log.Printf("[team] cascade cancel for %s error: %v", taskID[:min(8, len(taskID))], err)
+	}
+
+	// Emit events for cancelled dependents.
+	task, _ := e.store.GetTask(ctx, taskID)
+	teamID := ""
+	if task != nil {
+		teamID = task.TeamID
+	}
+	for _, dep := range dependents {
+		log.Printf("[team] cascade cancelled dependent %s (%s)", dep.ID[:min(8, len(dep.ID))], dep.Title)
+		if teamID != "" {
+			e.emitEvent(agent.EventTeamTaskCancelled, teamID, dep.ID, nil)
+		}
+	}
+
+	return nil
+}
+
+// CancelTeam cancels all in-flight tasks for a team.
+func (e *TeamExecutor) CancelTeam(ctx context.Context, teamID string) error {
+	// Get all in-progress tasks for the team.
+	tasks, err := e.store.ListTasks(ctx, teamID, "in_progress")
+	if err != nil {
+		return fmt.Errorf("listing in-progress tasks: %w", err)
+	}
+
+	var errs []error
+	for _, task := range tasks {
+		if err := e.CancelTask(ctx, task.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("cancelled %d/%d tasks, %d errors", len(tasks)-len(errs), len(tasks), len(errs))
+	}
+	return nil
+}
+
+// LaunchIfReady checks if a task can be dispatched and launches execution if so.
+// Used by the post-turn dispatch queue to launch tasks after the lead's turn.
+func (e *TeamExecutor) LaunchIfReady(ctx context.Context, task store.TeamTask) {
+	if task.AssignedTo == "" {
+		return
+	}
+
+	// Re-read the task — cycle detection may have already failed it.
+	current, err := e.store.GetTask(ctx, task.ID)
+	if err != nil || current == nil || current.Status == "failed" || current.Status == "cancelled" || current.Status == "completed" {
+		return
+	}
+
+	if current.BlockedBy != "" {
+		// Check if all blockers are resolved.
+		blockers := strings.Split(current.BlockedBy, ",")
+		for _, bid := range blockers {
+			bid = strings.TrimSpace(bid)
+			if bid == "" {
+				continue
+			}
+			bt, err := e.store.GetTask(ctx, bid)
+			if err != nil || bt == nil || bt.Status != "completed" {
+				return // Still blocked.
+			}
+		}
+	}
+
+	// Circuit breaker is inside launchExecute — no need to check here.
+	e.launchExecute(ctx, current.TeamID, current.ID, current.AssignedTo)
+}
+
+// EmitTaskFailed emits a task failed event for external callers (e.g. blocker escalation).
+func (e *TeamExecutor) EmitTaskFailed(ctx context.Context, teamID, taskID string) {
+	e.emitEvent(agent.EventTeamTaskFailed, teamID, taskID, nil)
+
+	// Push to inbox for lead notification.
+	task, _ := e.store.GetTask(ctx, taskID)
+	if task != nil {
+		inbox := e.getInbox(teamID)
+		inbox.Push(TaskCompletion{
+			TaskID:  taskID,
+			Subject: task.Title,
+			Status:  "failed",
+			Error:   task.ErrorMessage,
+			BatchID: task.BatchID,
+		})
+	}
+}
+
 // SetNotifier attaches a progress notifier to the executor.
 func (e *TeamExecutor) SetNotifier(n *TeamProgressNotifier) {
 	e.notifier = n
@@ -375,8 +587,26 @@ func (e *TeamExecutor) emitEvent(eventType agent.EventType, teamID, taskID strin
 	}
 }
 
-// Shutdown waits for in-flight tasks to complete within the given context.
+// Shutdown stops the recovery ticker, cancels all in-flight tasks, and waits
+// for goroutines to finish within the given context.
 func (e *TeamExecutor) Shutdown(ctx context.Context) error {
+	// 1. Stop recovery ticker.
+	e.mu.Lock()
+	stopFn := e.recoveryStop
+	e.mu.Unlock()
+	if stopFn != nil {
+		stopFn()
+	}
+
+	// 2. Cancel all in-flight tasks.
+	e.mu.Lock()
+	for taskID, cancel := range e.cancelFuncs {
+		cancel()
+		log.Printf("[team] shutdown: cancelled task %s", taskID[:min(8, len(taskID))])
+	}
+	e.mu.Unlock()
+
+	// 3. Wait for goroutines to finish.
 	done := make(chan struct{})
 	go func() {
 		e.wg.Wait()
@@ -387,53 +617,91 @@ func (e *TeamExecutor) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("shutdown timed out: %d tasks still in-flight", e.inFlightCount())
+		return fmt.Errorf("shutdown timed out: tasks still in-flight")
 	}
 }
 
-// inFlightCount is an approximation (for logging only).
-func (e *TeamExecutor) inFlightCount() int {
-	// WaitGroup doesn't expose its counter, so this is best-effort.
-	return 0
-}
-
-// detectCycle checks for circular dependencies using DFS.
-func (e *TeamExecutor) detectCycle(ctx context.Context, teamID, blockedBy string) error {
-	blockers := strings.Split(blockedBy, ",")
-	visited := make(map[string]bool)
-
-	var dfs func(taskID string) error
-	dfs = func(taskID string) error {
-		taskID = strings.TrimSpace(taskID)
-		if taskID == "" {
-			return nil
-		}
-		if visited[taskID] {
-			return fmt.Errorf("circular dependency detected involving task %s", taskID[:min(8, len(taskID))])
-		}
-		visited[taskID] = true
-
-		task, err := e.store.GetTask(ctx, taskID)
-		if err != nil || task == nil {
-			return nil // Task doesn't exist yet, no cycle possible.
-		}
-		if task.BlockedBy == "" {
-			return nil
-		}
-		for _, dep := range strings.Split(task.BlockedBy, ",") {
-			if err := dfs(dep); err != nil {
-				return err
-			}
-		}
+// detectCycles uses Kahn's algorithm to find ALL circular dependencies
+// among non-terminal tasks in a team. Returns IDs of tasks in cycles.
+func (e *TeamExecutor) detectCycles(ctx context.Context, teamID string) []string {
+	tasks, err := e.store.ListTasks(ctx, teamID, "")
+	if err != nil {
 		return nil
 	}
 
-	for _, b := range blockers {
-		if err := dfs(b); err != nil {
-			return err
+	// Build adjacency: task → tasks it blocks (reverse of blocked_by).
+	// Only consider non-terminal tasks.
+	inDegree := make(map[string]int)
+	dependents := make(map[string][]string) // blocker → tasks that depend on it
+
+	for _, t := range tasks {
+		if t.Status == "completed" || t.Status == "cancelled" || t.Status == "failed" {
+			continue
+		}
+		if _, ok := inDegree[t.ID]; !ok {
+			inDegree[t.ID] = 0
+		}
+		if t.BlockedBy == "" {
+			continue
+		}
+		for _, dep := range strings.Split(t.BlockedBy, ",") {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				continue
+			}
+			inDegree[t.ID]++
+			dependents[dep] = append(dependents[dep], t.ID)
+			if _, ok := inDegree[dep]; !ok {
+				inDegree[dep] = 0
+			}
 		}
 	}
-	return nil
+
+	// Kahn's: start with nodes that have no incoming edges.
+	var queue []string
+	for id, deg := range inDegree {
+		if deg == 0 {
+			queue = append(queue, id)
+		}
+	}
+
+	processed := 0
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		processed++
+		for _, dep := range dependents[node] {
+			inDegree[dep]--
+			if inDegree[dep] == 0 {
+				queue = append(queue, dep)
+			}
+		}
+	}
+
+	// Nodes not processed are in cycles.
+	if processed == len(inDegree) {
+		return nil
+	}
+
+	var cycleIDs []string
+	for id, deg := range inDegree {
+		if deg > 0 {
+			cycleIDs = append(cycleIDs, id)
+		}
+	}
+	return cycleIDs
+}
+
+// FailCycleTasks detects and fails any tasks involved in circular dependencies.
+func (e *TeamExecutor) FailCycleTasks(ctx context.Context, teamID string) {
+	cycleIDs := e.detectCycles(ctx, teamID)
+	for _, id := range cycleIDs {
+		e.store.UpdateTask(ctx, id, map[string]any{
+			"status":        "failed",
+			"error_message": "circular dependency detected",
+		})
+		e.emitEvent(agent.EventTeamTaskFailed, teamID, id, nil)
+	}
 }
 
 // extractResponse extracts the assistant's text from run result messages.

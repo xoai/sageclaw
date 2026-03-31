@@ -45,10 +45,21 @@ type Config struct {
 	Grounding     string // Search grounding: "google_search" (Gemini), "web_search" (OpenAI).
 	CodeExecution bool   // Native code execution (Gemini).
 
+	// Team context (set at runtime for agents in a team).
+	TeamInfo              *TeamInfoConfig                  // nil if agent is not in a team.
+	TaskSummaryFunc       func(ctx context.Context) string // Returns active task summary for lead injection. Nil if not a lead.
+	MemberTaskContextFunc func(ctx context.Context) string // Returns per-turn task context for member agents. Nil if not a member.
+
 	// Voice configuration.
 	VoiceEnabled  bool   // If true, this loop can handle voice messages.
 	VoiceModel    string // Audio model ID for Gemini Live.
 	VoiceName     string // Voice preset (e.g. "Kore").
+}
+
+// TeamInfoConfig holds team context for the agent loop.
+type TeamInfoConfig struct {
+	TeamID string
+	Role   string // "lead" or "member"
 }
 
 // OwnerResolver looks up connection owner and platform from a session's channel field.
@@ -78,6 +89,10 @@ type Loop struct {
 	audioCodec       AudioCodec
 	audioStore       AudioStore
 	audioTranscriber AudioTranscriber
+
+	subagentMgr *SubagentManager // Optional: for subagent result injection.
+
+	consentSessionID string // If set, consent events use this session ID instead of the run session.
 
 	mu         sync.Mutex
 	injectChan chan canonical.Message // For steer/inject.
@@ -136,6 +151,11 @@ func WithAudioTranscriber(t AudioTranscriber) LoopOption {
 	return func(l *Loop) { l.audioTranscriber = t }
 }
 
+// WithSubagentManager enables async subagent spawning and result injection.
+func WithSubagentManager(sm *SubagentManager) LoopOption {
+	return func(l *Loop) { l.subagentMgr = sm }
+}
+
 // WithCompactionManager adds auto-compaction for long sessions.
 func WithCompactionManager(cm *CompactionManager) LoopOption {
 	return func(l *Loop) { l.compactionMgr = cm }
@@ -180,6 +200,15 @@ func NewLoop(
 }
 
 // Inject adds a message to the loop's injection queue (steer/inject pattern).
+// SetConsentSessionID overrides the session ID used in consent events.
+// Used by subagents to route consent to the parent session's channel.
+// Must be called before Run().
+func (l *Loop) SetConsentSessionID(sessionID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.consentSessionID = sessionID
+}
+
 func (l *Loop) Inject(msg canonical.Message) {
 	select {
 	case l.injectChan <- msg:
@@ -241,10 +270,29 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 	// Sanitize history before starting.
 	history = SanitizeHistory(history)
 
+	// Team lead guard: persists across all iterations in this Run().
+	var teamGuardCtx func(context.Context) context.Context
+	if l.config.TeamInfo != nil && l.config.TeamInfo.Role == "lead" {
+		guard := &tool.TeamTasksGuard{} // shared pointer — survives across iterations
+		teamGuardCtx = func(ctx context.Context) context.Context {
+			return tool.WithTeamTasksGuardValue(ctx, guard)
+		}
+	}
+
 	maxIter := l.config.MaxIterations
 	for iteration := 0; iteration < maxIter; iteration++ {
 		// Check for injected messages (steer/inject).
 		l.drainInjections(&history)
+
+		// Inject completed subagent results into history (for LLM) and pending messages (for persistence).
+		if l.subagentMgr != nil {
+			completed := l.subagentMgr.ConsumeCompleted(l.config.AgentID, sessionID)
+			if len(completed) > 0 {
+				injection := buildSubagentResultsMessage(completed)
+				history = append(history, injection)
+				pendingMsgs = append(pendingMsgs, injection)
+			}
+		}
 
 		// Layer 1: Prune history using calibrated budget.
 		// If MaxRequestTokens is set, cap the history budget to fit rate limits.
@@ -351,6 +399,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		totalUsage.CacheRead += resp.Usage.CacheRead
 		totalUsage.ThinkingTokens += resp.Usage.ThinkingTokens
 		provider.GlobalCacheStats.Record(
+			l.config.Model,
 			resp.Usage.InputTokens, resp.Usage.OutputTokens,
 			resp.Usage.CacheCreation, resp.Usage.CacheRead,
 			resp.Usage.ThinkingTokens,
@@ -384,6 +433,16 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 
 			// Set iteration context for adaptive tool behavior (e.g. web_fetch maxChars scaling).
 			toolCtx := tool.WithIteration(ctx, tool.IterationInfo{Current: iteration, Max: maxIter})
+
+			// Inject agent ID and session ID into tool context.
+			toolCtx = tool.WithAgentID(toolCtx, l.config.AgentID)
+			toolCtx = tool.WithSessionID(toolCtx, sessionID)
+
+			// Inject team task guard for lead agents (list-before-create enforcement).
+			// The guard persists across iterations (pointer-based, shared state).
+			if teamGuardCtx != nil {
+				toolCtx = teamGuardCtx(toolCtx)
+			}
 
 			// Set per-agent exec security config (read from context by execute_command).
 			toolCtx = l.withExecConfig(toolCtx, sessionID, iteration)
@@ -487,10 +546,37 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 		system += "\n\n" + strings.Join(injections, "\n\n")
 	}
 
+	// Inject active task reminders for team leads.
+	// Use a short timeout so a slow DB doesn't block the agent loop.
+	if l.config.TaskSummaryFunc != nil {
+		summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if summary := l.config.TaskSummaryFunc(summaryCtx); summary != "" {
+			system += "\n\n" + summary
+		}
+		summaryCancel()
+	}
+
+	// Per-turn task context for member agents.
+	if l.config.MemberTaskContextFunc != nil {
+		tctx, tcancel := context.WithTimeout(context.Background(), 1*time.Second)
+		if taskLine := l.config.MemberTaskContextFunc(tctx); taskLine != "" {
+			system += "\n\n" + taskLine
+		}
+		tcancel()
+	}
+
 	// Get tool definitions filtered by profile and access control.
+	// Copy denyList to avoid mutating the shared config slice.
+	denyList := append([]string{}, l.config.ToolDeny...)
+	if l.config.TeamInfo != nil && l.config.TeamInfo.Role == "lead" {
+		denyList = append(denyList, "spawn")
+	}
+	if l.config.TeamInfo == nil {
+		denyList = append(denyList, "team_tasks")
+	}
 	tools := l.toolRegistry.ListForAgent(
 		l.config.ToolProfile,
-		l.config.ToolDeny,
+		denyList,
 		l.config.AllowedMCPServers,
 	)
 
@@ -914,7 +1000,12 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 	// Step 2: Determine if consent is needed.
 	needsConsent := false
 	if tool.AlwaysConsentGroups[group] {
-		needsConsent = true // Always-consent regardless of profile.
+		// Team leads bypass orchestration consent — delegation must be friction-free.
+		if group == tool.GroupOrchestration && l.config.TeamInfo != nil && l.config.TeamInfo.Role == "lead" {
+			needsConsent = false
+		} else {
+			needsConsent = true // Always-consent regardless of profile.
+		}
 	} else if !tool.IsInProfile(l.config.ToolProfile, group) {
 		needsConsent = true // Out-of-profile tool.
 	}
@@ -976,9 +1067,15 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 		riskLevel = "sensitive"
 	}
 
+	// Use consentSessionID if set (subagents route to parent session).
+	consentSessID := sessionID
+	if l.consentSessionID != "" {
+		consentSessID = l.consentSessionID
+	}
+
 	l.onEvent(Event{
 		Type:      EventConsentNeeded,
-		SessionID: sessionID,
+		SessionID: consentSessID,
 		AgentID:   l.config.AgentID,
 		Iteration: iteration,
 		Consent: &ConsentRequest{
@@ -987,6 +1084,7 @@ func (l *Loop) checkConsent(ctx context.Context, sessionID string, tc canonical.
 			Source:      source,
 			RiskLevel:   riskLevel,
 			Explanation: tool.GroupExplanation(group, source),
+			ToolInput:   string(tc.Input),
 			Nonce:       nonce,
 		},
 	})
@@ -1139,9 +1237,15 @@ func (l *Loop) requestExecApproval(ctx context.Context, sessionID, command strin
 		nonce = pc.Nonce
 	}
 
+	// Use consentSessionID if set (subagents route to parent session).
+	execConsentSessID := sessionID
+	if l.consentSessionID != "" {
+		execConsentSessID = l.consentSessionID
+	}
+
 	l.onEvent(Event{
 		Type:      EventConsentNeeded,
-		SessionID: sessionID,
+		SessionID: execConsentSessID,
 		AgentID:   l.config.AgentID,
 		Iteration: iteration,
 		Consent: &ConsentRequest{

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/xoai/sageclaw/pkg/activity"
 	"github.com/xoai/sageclaw/pkg/agent"
+	"github.com/xoai/sageclaw/pkg/tool"
 	"github.com/xoai/sageclaw/pkg/agentcfg"
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -18,6 +20,10 @@ import (
 
 // CostRecorderFunc is called after each agent run with usage data.
 type CostRecorderFunc func(ctx context.Context, sessionID, agentID, providerName, model string, usage canonical.Usage)
+
+// PostRunFunc is called after loop.Run() completes with the context used for the run.
+// Used by the team executor to flush pending dispatch queues.
+type PostRunFunc func(ctx context.Context, agentID string)
 
 // Pipeline orchestrates the 5-stage message processing pipeline.
 type Pipeline struct {
@@ -34,6 +40,12 @@ type Pipeline struct {
 	agentProvider    agentcfg.Provider
 	liveSessionPool  agent.LiveSessionPool // Optional: for voice messaging.
 	nonceManager     *agent.NonceManager   // Optional: for nonce-based consent.
+	postRun          PostRunFunc           // Optional: called after loop.Run().
+
+	// lastMetadata caches the most recent envelope metadata per composite key,
+	// used to thread user_message_id into session metadata for reactions.
+	metadataMu   sync.Mutex
+	lastMetadata map[string]map[string]string
 }
 
 // Config for the pipeline.
@@ -46,6 +58,7 @@ type PipelineConfig struct {
 	AgentProvider   agentcfg.Provider                   // Optional: agent config lookup for channel filtering.
 	LiveSessionPool agent.LiveSessionPool               // Optional: for voice messaging dispatch.
 	NonceManager    *agent.NonceManager                 // Optional: for nonce-based consent.
+	PostRun         PostRunFunc                         // Optional: called after loop.Run() with context + agentID.
 }
 
 // New creates a new pipeline.
@@ -68,6 +81,8 @@ func New(
 		agentProvider:   config.AgentProvider,
 		liveSessionPool: config.LiveSessionPool,
 		nonceManager:    config.NonceManager,
+		postRun:         config.PostRun,
+		lastMetadata:    make(map[string]map[string]string),
 	}
 
 	// Create debouncer that feeds into intent classification.
@@ -237,6 +252,14 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			kind = "dm"
 		}
 		key := channelKey(env.Channel, kind, env.ChatID, env.ThreadID, env.AgentID)
+
+		// Cache envelope metadata (e.g., telegram_message_id) for userMsgID threading.
+		if len(env.Metadata) > 0 {
+			p.metadataMu.Lock()
+			p.lastMetadata[key] = env.Metadata
+			p.metadataMu.Unlock()
+		}
+
 		for _, msg := range env.Messages {
 			// S2: Debouncer.
 			p.debouncer.Add(key, msg)
@@ -394,6 +417,21 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 			agentName+" on "+channel, sess.ID, agentID+" on %")
 	}
 
+	// Thread user_message_id from envelope metadata into session metadata.
+	compositeKey := channelKey(channel, kind, chatID, threadID, requestAgentID)
+	p.metadataMu.Lock()
+	envMeta := p.lastMetadata[compositeKey]
+	delete(p.lastMetadata, compositeKey) // consumed
+	p.metadataMu.Unlock()
+	if envMeta != nil {
+		userMsgID := extractUserMessageID(envMeta)
+		if userMsgID != "" {
+			p.store.UpdateSessionMetadata(ctx, sess.ID, map[string]string{
+				"user_message_id": userMsgID,
+			})
+		}
+	}
+
 	// S4: Schedule on the main lane.
 	req := RunRequest{
 		SessionID: sess.ID,
@@ -503,7 +541,18 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 				}
 			}
 		}
-		result = loop.Run(ctx, req.SessionID, allMsgs)
+		// Inject pending dispatch queue into context for post-turn dispatch pattern.
+		// The team_tasks tool detects this and queues tasks instead of dispatching immediately.
+		// Queue is injected for all agents (not just leads) — ttCreate's requireRole("lead")
+		// gate ensures only leads push tasks. This avoids coupling pipeline to team role knowledge.
+		queue := tool.NewPendingDispatchQueue()
+		runCtx := tool.WithPendingDispatch(ctx, queue)
+		result = loop.Run(runCtx, req.SessionID, allMsgs)
+
+		// Flush pending dispatch queue after the agent's turn completes.
+		if p.postRun != nil && queue.Len() > 0 {
+			p.postRun(runCtx, req.AgentID)
+		}
 	}
 
 	// Update Activity with result.
@@ -626,6 +675,23 @@ func extractSummary(msgs []canonical.Message) string {
 				return text[:80]
 			}
 			return text
+		}
+	}
+	return ""
+}
+
+// extractUserMessageID finds the platform message ID from envelope metadata.
+// Each channel adapter stores its platform-specific key (e.g., telegram_message_id).
+func extractUserMessageID(meta map[string]string) string {
+	for _, key := range []string{
+		"telegram_message_id",
+		"discord_message_id",
+		"whatsapp_message_id",
+		"zalo_message_id",
+		"zalobot_message_id",
+	} {
+		if v := meta[key]; v != "" {
+			return v
 		}
 	}
 	return ""

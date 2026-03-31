@@ -58,6 +58,27 @@ func (s *Store) RecordDelegation(ctx context.Context, entry store.DelegationReco
 	return err
 }
 
+func (s *Store) GetDelegationRecord(ctx context.Context, delegationID string) (*store.DelegationRecord, error) {
+	var r store.DelegationRecord
+	var startedAt, completedAt *string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, link_id, source_id, target_id, prompt, COALESCE(result,''), status, started_at, completed_at
+		 FROM delegation_history WHERE id = ?`, delegationID,
+	).Scan(&r.ID, &r.LinkID, &r.SourceID, &r.TargetID, &r.Prompt,
+		&r.Result, &r.Status, &startedAt, &completedAt)
+	if err != nil {
+		return nil, err
+	}
+	if startedAt != nil {
+		r.StartedAt, _ = time.Parse(time.RFC3339, *startedAt)
+	}
+	if completedAt != nil && *completedAt != "" {
+		t, _ := time.Parse(time.RFC3339, *completedAt)
+		r.CompletedAt = &t
+	}
+	return &r, nil
+}
+
 func (s *Store) GetDelegationHistory(ctx context.Context, agentID string, limit int) ([]store.DelegationRecord, error) {
 	if limit <= 0 {
 		limit = 20

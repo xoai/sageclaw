@@ -3,7 +3,6 @@ package orchestration
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/agent"
@@ -21,21 +20,19 @@ const (
 type delegationDepthKey struct{}
 
 // Delegator manages agent-to-agent delegation.
+// Delegation links are read from the database per-request (DB-authoritative).
 type Delegator struct {
 	store    store.Store
 	configs  map[string]agent.Config
-	links    []store.DelegationLink
 	provider provider.Provider
 	router   *provider.Router
 	toolReg  *tool.Registry
-	mu       sync.RWMutex
 }
 
 // NewDelegator creates a new delegator.
 func NewDelegator(
 	s store.Store,
 	configs map[string]agent.Config,
-	links []store.DelegationLink,
 	prov provider.Provider,
 	router *provider.Router,
 	toolReg *tool.Registry,
@@ -43,7 +40,6 @@ func NewDelegator(
 	return &Delegator{
 		store:    s,
 		configs:  configs,
-		links:    links,
 		provider: prov,
 		router:   router,
 		toolReg:  toolReg,
@@ -58,8 +54,8 @@ func (d *Delegator) Delegate(ctx context.Context, sourceID, targetID, prompt, mo
 		return "", "", fmt.Errorf("max delegation depth (%d) reached", maxDelegationDepth)
 	}
 
-	// Find the link.
-	link, err := d.findLink(sourceID, targetID)
+	// Find the link (reads from DB per-request).
+	link, err := d.findLink(ctx, sourceID, targetID)
 	if err != nil {
 		return "", "", err
 	}
@@ -139,24 +135,17 @@ func (d *Delegator) Delegate(ctx context.Context, sourceID, targetID, prompt, mo
 
 // Status returns the current status of a delegation.
 func (d *Delegator) Status(ctx context.Context, delegationID string) (*store.DelegationRecord, error) {
-	records, err := d.store.GetDelegationHistory(ctx, "", 100)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range records {
-		if r.ID == delegationID {
-			return &r, nil
-		}
-	}
-	return nil, fmt.Errorf("delegation not found: %s", delegationID)
+	return d.store.GetDelegationRecord(ctx, delegationID)
 }
 
-func (d *Delegator) findLink(sourceID, targetID string) (*store.DelegationLink, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	for _, link := range d.links {
-		if link.SourceID == sourceID && link.TargetID == targetID {
-			return &link, nil
+func (d *Delegator) findLink(ctx context.Context, sourceID, targetID string) (*store.DelegationLink, error) {
+	links, err := d.store.GetDelegationLinks(ctx, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("querying delegation links: %w", err)
+	}
+	for i := range links {
+		if links[i].TargetID == targetID {
+			return &links[i], nil
 		}
 	}
 	return nil, fmt.Errorf("no delegation link from %s to %s", sourceID, targetID)

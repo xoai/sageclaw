@@ -20,6 +20,14 @@ func (m *mockTeamExecutor) Dispatch(ctx context.Context, task store.TeamTask) (s
 	return m.store.CreateTask(ctx, task)
 }
 
+func (m *mockTeamExecutor) LaunchIfReady(ctx context.Context, task store.TeamTask) {
+	// No-op in tests.
+}
+
+func (m *mockTeamExecutor) EmitTaskFailed(ctx context.Context, teamID, taskID string) {
+	// No-op in tests.
+}
+
 // setupTeamTasks creates a test registry with team_tasks tool, a team, and agents.
 func setupTeamTasks(t *testing.T) (*Registry, *sqlite.Store, string) {
 	t.Helper()
@@ -372,5 +380,270 @@ func TestTeamTasks_UnknownAction(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatalf("expected error for unknown action, got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_DuplicatePrevention(t *testing.T) {
+	reg, _, teamID := setupTeamTasks(t)
+
+	// First create succeeds.
+	result, err := reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"`+teamID+`","subject":"Duplicate test","assignee":"member-a"}`))
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("first create error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "Task created") {
+		t.Fatalf("expected 'Task created', got: %s", result.Content)
+	}
+
+	// Second create with same title+assignee is rejected.
+	result, err = reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"`+teamID+`","subject":"Duplicate test","assignee":"member-a"}`))
+	if err != nil {
+		t.Fatalf("duplicate create: %v", err)
+	}
+	if !strings.Contains(result.Content, "already exists") {
+		t.Fatalf("expected 'already exists', got: %s", result.Content)
+	}
+
+	// Same title but different assignee is allowed.
+	result, err = reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"`+teamID+`","subject":"Duplicate test","assignee":"member-b"}`))
+	if err != nil {
+		t.Fatalf("different assignee create: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("different assignee should succeed: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "Task created") {
+		t.Fatalf("expected 'Task created', got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_CreateWithParentID(t *testing.T) {
+	reg, s, teamID := setupTeamTasks(t)
+	ctx := context.Background()
+
+	// Create parent task directly in DB.
+	parentID, err := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Parent task", CreatedBy: "lead-agent", Status: "pending",
+	})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	// Lead creates subtask with parent_id.
+	result, err := reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"`+teamID+`","subject":"Subtask","assignee":"member-a","parent_id":"`+parentID+`"}`))
+	if err != nil {
+		t.Fatalf("create subtask: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("create subtask error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "Task created") {
+		t.Fatalf("expected 'Task created', got: %s", result.Content)
+	}
+
+	// Verify subtask_count incremented on parent.
+	parent, _ := s.GetTask(ctx, parentID)
+	if parent.SubtaskCount != 1 {
+		t.Fatalf("expected parent subtask_count 1, got %d", parent.SubtaskCount)
+	}
+
+	// Verify subtask has parent_id set.
+	children, _ := s.GetTasksByParent(ctx, parentID)
+	if len(children) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(children))
+	}
+	if children[0].Title != "Subtask" {
+		t.Fatalf("expected child title 'Subtask', got %q", children[0].Title)
+	}
+}
+
+func TestTeamTasks_CreateWithInvalidParent(t *testing.T) {
+	reg, _, teamID := setupTeamTasks(t)
+
+	// Non-existent parent.
+	result, err := reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"`+teamID+`","subject":"Orphan","assignee":"member-a","parent_id":"nonexistent"}`))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error for nonexistent parent, got: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "parent task not found") {
+		t.Fatalf("expected 'parent task not found', got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_CreateWithTerminalParent(t *testing.T) {
+	reg, s, teamID := setupTeamTasks(t)
+	ctx := context.Background()
+
+	// Create a completed parent.
+	parentID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Done parent", CreatedBy: "lead-agent", Status: "completed",
+	})
+
+	result, err := reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"`+teamID+`","subject":"Child of done","assignee":"member-a","parent_id":"`+parentID+`"}`))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error for terminal parent, got: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "terminal state") {
+		t.Fatalf("expected 'terminal state', got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_CreateSelfAssign(t *testing.T) {
+	reg, _, teamID := setupTeamTasks(t)
+
+	// Lead tries to assign task to itself.
+	result, err := reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"`+teamID+`","subject":"Self task","assignee":"lead-agent"}`))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error for self-assign, got: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "handle this work directly") {
+		t.Fatalf("expected 'handle this work directly' guidance, got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_CreateWithWrongTeamParent(t *testing.T) {
+	reg, s, _ := setupTeamTasks(t)
+	ctx := context.Background()
+
+	// Create a second team with its own task.
+	otherTeamID := "other-team-id"
+	_, err := s.DB().ExecContext(ctx,
+		`INSERT INTO teams (id, name, lead_id, config, description, status, settings, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, '', 'active', '{}', datetime('now'), datetime('now'))`,
+		otherTeamID, "Other Team", "other-lead", `{"members":[]}`)
+	if err != nil {
+		t.Fatalf("creating other team: %v", err)
+	}
+	otherParentID, err := s.CreateTask(ctx, store.TeamTask{
+		TeamID: otherTeamID, Title: "Other team task", CreatedBy: "other-lead", Status: "pending",
+	})
+	if err != nil {
+		t.Fatalf("create other task: %v", err)
+	}
+
+	// Try to create a subtask in test-team-id with parent from other-team-id.
+	result, err := reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"create","team_id":"test-team-id","subject":"Cross-team child","assignee":"member-a","parent_id":"`+otherParentID+`"}`))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error for wrong-team parent, got: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "different team") {
+		t.Fatalf("expected 'different team', got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_SendAndInbox(t *testing.T) {
+	reg, _, _ := setupTeamTasks(t)
+
+	// Member sends a message to team.
+	result, err := reg.Execute(ctxWithAgent("member-a"), "team_tasks",
+		json.RawMessage(`{"action":"send","text":"Need help with research"}`))
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("send error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "broadcast") {
+		t.Fatalf("expected broadcast confirmation, got: %s", result.Content)
+	}
+
+	// Lead sends a direct message to member-a.
+	result, err = reg.Execute(ctxWithAgent("lead-agent"), "team_tasks",
+		json.RawMessage(`{"action":"send","to_agent":"member-a","text":"Check the API docs"}`))
+	if err != nil {
+		t.Fatalf("send DM: %v", err)
+	}
+	if !strings.Contains(result.Content, "member-a") {
+		t.Fatalf("expected DM confirmation, got: %s", result.Content)
+	}
+
+	// Member-a checks inbox (should see the DM + broadcast).
+	result, err = reg.Execute(ctxWithAgent("member-a"), "team_tasks",
+		json.RawMessage(`{"action":"inbox"}`))
+	if err != nil {
+		t.Fatalf("inbox: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("inbox error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "Check the API docs") {
+		t.Fatalf("expected DM in inbox, got: %s", result.Content)
+	}
+
+	// Check inbox again — should be empty (messages marked read).
+	result, err = reg.Execute(ctxWithAgent("member-a"), "team_tasks",
+		json.RawMessage(`{"action":"inbox"}`))
+	if err != nil {
+		t.Fatalf("inbox 2: %v", err)
+	}
+	if !strings.Contains(result.Content, "No unread") {
+		t.Fatalf("expected no unread after read, got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_SendNoText(t *testing.T) {
+	reg, _, _ := setupTeamTasks(t)
+
+	result, err := reg.Execute(ctxWithAgent("member-a"), "team_tasks",
+		json.RawMessage(`{"action":"send"}`))
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error for missing text, got: %s", result.Content)
+	}
+}
+
+func TestTeamTasks_BlockerEscalation(t *testing.T) {
+	reg, s, teamID := setupTeamTasks(t)
+	ctx := context.Background()
+
+	// Create a task.
+	taskID, _ := s.CreateTask(ctx, store.TeamTask{
+		TeamID: teamID, Title: "Task with blocker", CreatedBy: "lead-agent",
+		AssignedTo: "member-a",
+	})
+	s.ClaimTask(ctx, taskID, "member-a")
+
+	// Member adds a blocker comment.
+	result, err := reg.Execute(ctxWithAgent("member-a"), "team_tasks",
+		json.RawMessage(`{"action":"comment","task_id":"`+taskID+`","text":"blocker: cannot proceed without API keys","status":"blocker"}`))
+	if err != nil {
+		t.Fatalf("blocker comment: %v", err)
+	}
+	if !strings.Contains(result.Content, "Blocker added") {
+		t.Fatalf("expected 'Blocker added', got: %s", result.Content)
+	}
+
+	// Verify task is now failed.
+	task, _ := s.GetTask(ctx, taskID)
+	if task.Status != "failed" {
+		t.Fatalf("expected failed after blocker, got %q", task.Status)
+	}
+	if !strings.Contains(task.ErrorMessage, "[blocker]") {
+		t.Fatalf("expected [blocker] in error message, got: %s", task.ErrorMessage)
 	}
 }

@@ -47,3 +47,9 @@ type sessionIDKey struct{}
 func WithSessionID(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sessionIDKey{}, sessionID)
 }
+
+// SessionIDFromCtx retrieves the session ID from context.
+func SessionIDFromCtx(ctx context.Context) string {
+	s, _ := ctx.Value(sessionIDKey{}).(string)
+	return s
+}

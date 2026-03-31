@@ -8,11 +8,14 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/channel"
+	"github.com/xoai/sageclaw/pkg/channel/toolstatus"
+	"github.com/xoai/sageclaw/pkg/channel/typing"
 )
 
 const (
@@ -34,15 +37,23 @@ type Adapter struct {
 	ownerUserID string             // Platform user ID of the connection owner.
 	consentCB   ConsentCallback    // Called when user responds to consent prompt.
 	ownerStore  channel.OwnerStore // For auto-capturing owner_user_id.
+
+	// Tool activity: typing + single status message.
+	typingMu   sync.Mutex
+	typingCtrl map[string]*typing.Controller
+	statusMu   sync.Mutex
+	statusSent map[string]bool
 }
 
 // New creates a new Zalo Bot adapter.
 func New(connID, token string, opts ...Option) *Adapter {
 	a := &Adapter{
-		connID:  connID,
-		token:   token,
-		client:  &http.Client{Timeout: time.Duration(pollTimeout+10) * time.Second},
-		baseURL: zaloBotAPI + token,
+		connID:     connID,
+		token:      token,
+		client:     &http.Client{Timeout: time.Duration(pollTimeout+10) * time.Second},
+		baseURL:    zaloBotAPI + token,
+		typingCtrl: make(map[string]*typing.Controller),
+		statusSent: make(map[string]bool),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -59,7 +70,73 @@ func WithBaseURL(url string) Option {
 }
 
 func (a *Adapter) ID() string       { return a.connID }
+func (a *Adapter) ConnID() string    { return a.connID }
 func (a *Adapter) Platform() string  { return "zalo_bot" }
+
+// OnAgentEvent handles agent lifecycle events for typing indicators.
+func (a *Adapter) OnAgentEvent(sessionID, chatID, eventType, text string) {
+	switch eventType {
+	case "run.started":
+		a.startTyping(sessionID, chatID)
+	case "run.completed", "run.failed":
+		a.markTypingRunComplete(sessionID)
+		a.statusMu.Lock()
+		delete(a.statusSent, sessionID)
+		a.statusMu.Unlock()
+	}
+}
+
+// OnToolStatus handles tool status updates — sends a single status message.
+func (a *Adapter) OnToolStatus(sessionID, chatID string, update toolstatus.StatusUpdate) {
+	if update.Done || update.Text == "" {
+		return
+	}
+	a.statusMu.Lock()
+	sent := a.statusSent[sessionID]
+	if !sent {
+		a.statusSent[sessionID] = true
+	}
+	a.statusMu.Unlock()
+	if sent {
+		return
+	}
+	a.sendMessage(chatID, update.Text)
+}
+
+func (a *Adapter) startTyping(sessionID, chatID string) {
+	a.typingMu.Lock()
+	if old, ok := a.typingCtrl[sessionID]; ok {
+		old.Stop()
+	}
+	ctrl := typing.NewController(
+		func() error { return nil },
+		nil, 5000, 60000,
+	)
+	a.typingCtrl[sessionID] = ctrl
+	a.typingMu.Unlock()
+	ctrl.Start()
+}
+
+func (a *Adapter) markTypingRunComplete(sessionID string) {
+	a.typingMu.Lock()
+	ctrl, ok := a.typingCtrl[sessionID]
+	a.typingMu.Unlock()
+	if ok {
+		ctrl.MarkRunComplete()
+	}
+}
+
+func (a *Adapter) markTypingDispatchIdle(sessionID string) {
+	a.typingMu.Lock()
+	ctrl, ok := a.typingCtrl[sessionID]
+	if ok {
+		delete(a.typingCtrl, sessionID)
+	}
+	a.typingMu.Unlock()
+	if ok {
+		ctrl.MarkDispatchIdle()
+	}
+}
 
 // UpdateWebhookURL logs the webhook URL. Zalobot uses long polling rather
 // than webhooks, but the URL is logged for informational purposes.
@@ -235,6 +312,8 @@ func (a *Adapter) handleUpdate(ctx context.Context, update Update) {
 }
 
 func (a *Adapter) sendResponse(env bus.Envelope) {
+	defer a.markTypingDispatchIdle(env.SessionID)
+
 	for _, msg := range env.Messages {
 		text := extractText(msg)
 		if text == "" {

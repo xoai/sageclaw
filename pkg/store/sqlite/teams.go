@@ -99,6 +99,12 @@ func (s *Store) GetTeamByAgent(ctx context.Context, agentID string) (*store.Team
 	return nil, "", nil
 }
 
+// allowedTeamColumns prevents SQL injection via dynamic column names.
+var allowedTeamColumns = map[string]bool{
+	"name": true, "lead_id": true, "status": true, "config": true,
+	"description": true, "settings": true, "updated_at": true,
+}
+
 func (s *Store) UpdateTeam(ctx context.Context, teamID string, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
@@ -107,6 +113,9 @@ func (s *Store) UpdateTeam(ctx context.Context, teamID string, fields map[string
 	setClauses := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+1)
 	for k, v := range fields {
+		if !allowedTeamColumns[k] {
+			return fmt.Errorf("disallowed column in UpdateTeam: %q", k)
+		}
 		setClauses = append(setClauses, k+" = ?")
 		args = append(args, v)
 	}
@@ -194,6 +203,7 @@ func (s *Store) CreateTask(ctx context.Context, task store.TeamTask) (string, er
 func (s *Store) GetTask(ctx context.Context, taskID string) (*store.TeamTask, error) {
 	var t store.TeamTask
 	var completedAt sql.NullString
+	var claimedAt sql.NullString
 	var parentID sql.NullString
 	var requireApproval int
 	var createdAt, updatedAt string
@@ -204,14 +214,14 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (*store.TeamTask, er
 			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
 			COALESCE(identifier,''), progress_percent, require_approval,
 			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
-			completed_at, created_at, updated_at
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
 		 FROM team_tasks WHERE id = ?`, taskID).Scan(
 		&t.ID, &t.TeamID, &t.Title, &t.Description, &t.Status, &t.AssignedTo,
 		&t.CreatedBy, &t.Result, &t.BlockedBy, &parentID,
 		&t.Priority, &t.OwnerAgentID, &t.BatchID, &t.TaskNumber,
 		&t.Identifier, &t.ProgressPercent, &requireApproval,
 		&t.SessionID, &t.RetryCount, &t.MaxRetries, &t.ErrorMessage,
-		&completedAt, &createdAt, &updatedAt)
+		&t.SubtaskCount, &t.DispatchAttempts, &claimedAt, &completedAt, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -222,6 +232,10 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (*store.TeamTask, er
 		t.ParentID = parentID.String
 	}
 	t.RequireApproval = requireApproval == 1
+	if claimedAt.Valid {
+		ca, _ := time.Parse(time.RFC3339, claimedAt.String)
+		t.ClaimedAt = &ca
+	}
 	if completedAt.Valid {
 		ct, _ := time.Parse(time.RFC3339, completedAt.String)
 		t.CompletedAt = &ct
@@ -229,6 +243,14 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (*store.TeamTask, er
 	t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return &t, nil
+}
+
+// allowedTaskColumns prevents SQL injection via dynamic column names.
+var allowedTaskColumns = map[string]bool{
+	"status": true, "assigned_to": true, "priority": true, "result": true,
+	"error_message": true, "session_id": true, "blocked_by": true,
+	"progress_percent": true, "completed_at": true, "claimed_at": true,
+	"dispatch_attempts": true, "updated_at": true,
 }
 
 func (s *Store) UpdateTask(ctx context.Context, taskID string, fields map[string]any) error {
@@ -239,6 +261,9 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, fields map[string
 	setClauses := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+1)
 	for k, v := range fields {
+		if !allowedTaskColumns[k] {
+			return fmt.Errorf("disallowed column in UpdateTask: %q", k)
+		}
 		setClauses = append(setClauses, k+" = ?")
 		args = append(args, v)
 	}
@@ -269,17 +294,31 @@ func (s *Store) UpdateTaskProgress(ctx context.Context, taskID string, percent i
 
 func (s *Store) ClaimTask(ctx context.Context, taskID, agentID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := s.db.ExecContext(ctx,
-		`UPDATE team_tasks SET status = 'in_progress', assigned_to = ?, updated_at = ? WHERE id = ? AND status = 'pending'`,
-		agentID, now, taskID)
-	if err != nil {
-		return err
+	// Retry on SQLITE_BUSY — task dispatch races with session saves.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		result, err := s.db.ExecContext(ctx,
+			`UPDATE team_tasks SET status = 'in_progress', assigned_to = ?, claimed_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'`,
+			agentID, now, now, taskID)
+		if err != nil {
+			if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+				lastErr = err
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Duration(100*(attempt+1)) * time.Millisecond):
+				}
+				continue
+			}
+			return err
+		}
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			return fmt.Errorf("task %s is not pending or does not exist", taskID)
+		}
+		return nil
 	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("task %s is not pending or does not exist", taskID)
-	}
-	return nil
+	return fmt.Errorf("failed to claim task after retries: %w", lastErr)
 }
 
 func (s *Store) CompleteTask(ctx context.Context, taskID string, result string) error {
@@ -330,7 +369,7 @@ func (s *Store) ListTasks(ctx context.Context, teamID string, status string) ([]
 		priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
 		COALESCE(identifier,''), progress_percent, require_approval,
 		COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
-		completed_at, created_at, updated_at
+		COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
 	FROM team_tasks WHERE team_id = ?`
 	args := []any{teamID}
 	if status != "" {
@@ -348,7 +387,7 @@ func (s *Store) GetTasksByParent(ctx context.Context, parentID string) ([]store.
 			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
 			COALESCE(identifier,''), progress_percent, require_approval,
 			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
-			completed_at, created_at, updated_at
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
 		 FROM team_tasks WHERE parent_id = ? ORDER BY task_number ASC`, parentID)
 }
 
@@ -359,7 +398,7 @@ func (s *Store) GetBlockedTasks(ctx context.Context, teamID string) ([]store.Tea
 			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
 			COALESCE(identifier,''), progress_percent, require_approval,
 			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
-			completed_at, created_at, updated_at
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
 		 FROM team_tasks WHERE team_id = ? AND status = 'blocked'`, teamID)
 }
 
@@ -371,7 +410,7 @@ func (s *Store) UnblockTasks(ctx context.Context, completedTaskID string) ([]sto
 			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
 			COALESCE(identifier,''), progress_percent, require_approval,
 			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
-			completed_at, created_at, updated_at
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
 		 FROM team_tasks WHERE status = 'blocked' AND blocked_by LIKE ?`,
 		"%"+completedTaskID+"%")
 	if err != nil {
@@ -383,6 +422,8 @@ func (s *Store) UnblockTasks(ctx context.Context, completedTaskID string) ([]sto
 
 	for _, task := range blocked {
 		// Check if ALL blockers are completed.
+		// Try exact match first, fall back to prefix match for legacy
+		// truncated IDs (8-char prefix from older tool responses).
 		blockerIDs := splitBlockers(task.BlockedBy)
 		allCompleted := true
 		for _, bid := range blockerIDs {
@@ -392,6 +433,12 @@ func (s *Store) UnblockTasks(ctx context.Context, completedTaskID string) ([]sto
 			var bstatus string
 			err := s.db.QueryRowContext(ctx,
 				`SELECT status FROM team_tasks WHERE id = ?`, bid).Scan(&bstatus)
+			if err != nil {
+				// Prefix fallback for truncated IDs.
+				err = s.db.QueryRowContext(ctx,
+					`SELECT status FROM team_tasks WHERE id LIKE ? LIMIT 1`,
+					bid+"%").Scan(&bstatus)
+			}
 			if err != nil || bstatus != "completed" {
 				allCompleted = false
 				break
@@ -428,15 +475,17 @@ func (s *Store) RetryTask(ctx context.Context, taskID string) error {
 }
 
 func (s *Store) SearchTasks(ctx context.Context, teamID, query string) ([]store.TeamTask, error) {
-	pattern := "%" + query + "%"
+	// Escape LIKE metacharacters to prevent wildcard injection.
+	escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(query)
+	pattern := "%" + escaped + "%"
 	return s.scanTasks(ctx,
 		`SELECT id, team_id, title, COALESCE(description,''), status, COALESCE(assigned_to,''),
 			created_by, COALESCE(result,''), COALESCE(blocked_by,''), parent_id,
 			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
 			COALESCE(identifier,''), progress_percent, require_approval,
 			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
-			completed_at, created_at, updated_at
-		 FROM team_tasks WHERE team_id = ? AND (title LIKE ? OR description LIKE ? OR identifier LIKE ?)
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
+		 FROM team_tasks WHERE team_id = ? AND (title LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\' OR identifier LIKE ? ESCAPE '\')
 		 ORDER BY created_at DESC LIMIT 50`,
 		teamID, pattern, pattern, pattern)
 }
@@ -545,6 +594,166 @@ func (s *Store) MarkMessageRead(ctx context.Context, messageID string) error {
 	return err
 }
 
+// --- Reliability ---
+
+func (s *Store) RecoverStaleTasks(ctx context.Context, timeoutSeconds int) ([]store.TeamTask, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	timeout := fmt.Sprintf("%d", timeoutSeconds)
+
+	// Find in_progress tasks that exceeded the timeout.
+	// NULL claimed_at fallback handles pre-migration tasks.
+	tasks, err := s.scanTasks(ctx,
+		`SELECT id, team_id, title, COALESCE(description,''), status, COALESCE(assigned_to,''),
+			created_by, COALESCE(result,''), COALESCE(blocked_by,''), parent_id,
+			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
+			COALESCE(identifier,''), progress_percent, require_approval,
+			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
+		 FROM team_tasks
+		 WHERE status = 'in_progress'
+		   AND (
+		     (claimed_at IS NOT NULL AND claimed_at < datetime('now', '-' || ? || ' seconds'))
+		     OR (claimed_at IS NULL AND updated_at < datetime('now', '-' || ? || ' seconds'))
+		   )`,
+		timeout, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("querying stale tasks: %w", err)
+	}
+
+	// Mark each stale task as failed.
+	for i := range tasks {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE team_tasks SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ? AND status = 'in_progress'`,
+			"stale_timeout: task not completed within configured timeout", now, tasks[i].ID)
+		if err != nil {
+			return nil, fmt.Errorf("recovering task %s: %w", tasks[i].ID, err)
+		}
+		tasks[i].Status = "failed"
+		tasks[i].ErrorMessage = "stale_timeout: task not completed within configured timeout"
+	}
+	return tasks, nil
+}
+
+func (s *Store) IncrementDispatchAttempt(ctx context.Context, taskID string) (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	// Single atomic operation: UPDATE + SELECT in one transaction to prevent TOCTOU.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE team_tasks SET dispatch_attempts = dispatch_attempts + 1, updated_at = ? WHERE id = ?`,
+		now, taskID)
+	if err != nil {
+		return 0, fmt.Errorf("incrementing dispatch attempts: %w", err)
+	}
+
+	var count int
+	err = tx.QueryRowContext(ctx,
+		`SELECT dispatch_attempts FROM team_tasks WHERE id = ?`, taskID).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return count, nil
+}
+
+func (s *Store) CancelDependentTasks(ctx context.Context, taskID string) ([]store.TeamTask, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// First, find dependent tasks that will be cancelled.
+	// Use comma-delimited matching to prevent substring false positives.
+	dependents, err := s.scanTasks(ctx,
+		`SELECT id, team_id, title, COALESCE(description,''), status, COALESCE(assigned_to,''),
+			created_by, COALESCE(result,''), COALESCE(blocked_by,''), parent_id,
+			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
+			COALESCE(identifier,''), progress_percent, require_approval,
+			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
+		 FROM team_tasks
+		 WHERE (',' || blocked_by || ',') LIKE ('%,' || ? || ',%')
+		   AND status IN ('pending', 'blocked')`,
+		taskID)
+	if err != nil {
+		return nil, fmt.Errorf("finding dependents: %w", err)
+	}
+	if len(dependents) == 0 {
+		return nil, nil
+	}
+
+	// Cancel them.
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE team_tasks SET status = 'cancelled', error_message = 'parent_cancelled', updated_at = ?
+		 WHERE (',' || blocked_by || ',') LIKE ('%,' || ? || ',%')
+		   AND status IN ('pending', 'blocked')`,
+		now, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("cancelling dependents: %w", err)
+	}
+
+	// Update returned task snapshots.
+	for i := range dependents {
+		dependents[i].Status = "cancelled"
+		dependents[i].ErrorMessage = "parent_cancelled"
+	}
+	return dependents, nil
+}
+
+func (s *Store) FindDuplicateTask(ctx context.Context, teamID, title, assignee string) (*store.TeamTask, error) {
+	var t store.TeamTask
+	var completedAt sql.NullString
+	var claimedAt sql.NullString
+	var parentID sql.NullString
+	var requireApproval int
+	var createdAt, updatedAt string
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, team_id, title, COALESCE(description,''), status, COALESCE(assigned_to,''),
+			created_by, COALESCE(result,''), COALESCE(blocked_by,''), parent_id,
+			priority, COALESCE(owner_agent_id,''), COALESCE(batch_id,''), task_number,
+			COALESCE(identifier,''), progress_percent, require_approval,
+			COALESCE(session_id,''), retry_count, max_retries, COALESCE(error_message,''),
+			COALESCE(subtask_count,0), COALESCE(dispatch_attempts, 0), claimed_at, completed_at, created_at, updated_at
+		 FROM team_tasks
+		 WHERE team_id = ? AND title = ? AND COALESCE(assigned_to,'') = ?
+		   AND status IN ('pending', 'in_progress', 'blocked')
+		   AND created_at > datetime('now', '-5 minutes')
+		 LIMIT 1`,
+		teamID, title, assignee).Scan(
+		&t.ID, &t.TeamID, &t.Title, &t.Description, &t.Status, &t.AssignedTo,
+		&t.CreatedBy, &t.Result, &t.BlockedBy, &parentID,
+		&t.Priority, &t.OwnerAgentID, &t.BatchID, &t.TaskNumber,
+		&t.Identifier, &t.ProgressPercent, &requireApproval,
+		&t.SessionID, &t.RetryCount, &t.MaxRetries, &t.ErrorMessage,
+		&t.SubtaskCount, &t.DispatchAttempts, &claimedAt, &completedAt, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find duplicate task: %w", err)
+	}
+	if parentID.Valid {
+		t.ParentID = parentID.String
+	}
+	t.RequireApproval = requireApproval == 1
+	if claimedAt.Valid {
+		ca, _ := time.Parse(time.RFC3339, claimedAt.String)
+		t.ClaimedAt = &ca
+	}
+	if completedAt.Valid {
+		ct, _ := time.Parse(time.RFC3339, completedAt.String)
+		t.CompletedAt = &ct
+	}
+	t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	return &t, nil
+}
+
 // --- Helpers ---
 
 func (s *Store) scanTasks(ctx context.Context, query string, args ...any) ([]store.TeamTask, error) {
@@ -558,6 +767,7 @@ func (s *Store) scanTasks(ctx context.Context, query string, args ...any) ([]sto
 	for rows.Next() {
 		var t store.TeamTask
 		var completedAt sql.NullString
+		var claimedAt sql.NullString
 		var parentID sql.NullString
 		var requireApproval int
 		var createdAt, updatedAt string
@@ -567,13 +777,17 @@ func (s *Store) scanTasks(ctx context.Context, query string, args ...any) ([]sto
 			&t.Priority, &t.OwnerAgentID, &t.BatchID, &t.TaskNumber,
 			&t.Identifier, &t.ProgressPercent, &requireApproval,
 			&t.SessionID, &t.RetryCount, &t.MaxRetries, &t.ErrorMessage,
-			&completedAt, &createdAt, &updatedAt); err != nil {
+			&t.SubtaskCount, &t.DispatchAttempts, &claimedAt, &completedAt, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		if parentID.Valid {
 			t.ParentID = parentID.String
 		}
 		t.RequireApproval = requireApproval == 1
+		if claimedAt.Valid {
+			ca, _ := time.Parse(time.RFC3339, claimedAt.String)
+			t.ClaimedAt = &ca
+		}
 		if completedAt.Valid {
 			ct, _ := time.Parse(time.RFC3339, completedAt.String)
 			t.CompletedAt = &ct
@@ -583,6 +797,126 @@ func (s *Store) scanTasks(ctx context.Context, query string, args ...any) ([]sto
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
+}
+
+func (s *Store) IncrementSubtaskCount(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE team_tasks SET subtask_count = subtask_count + 1 WHERE id = ?`, taskID)
+	return err
+}
+
+func (s *Store) DecrementSubtaskCount(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE team_tasks SET subtask_count = MAX(0, subtask_count - 1) WHERE id = ?`, taskID)
+	return err
+}
+
+func (s *Store) DeleteTask(ctx context.Context, taskID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Check terminal state and get parent_id within the transaction.
+	var parentID sql.NullString
+	var status string
+	err = tx.QueryRowContext(ctx,
+		`SELECT status, parent_id FROM team_tasks WHERE id = ?`, taskID).Scan(&status, &parentID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("task not found")
+	}
+	if err != nil {
+		return fmt.Errorf("checking task: %w", err)
+	}
+	if status != "completed" && status != "cancelled" && status != "failed" {
+		return fmt.Errorf("task is not in terminal state (status: %s)", status)
+	}
+
+	// Delete comments first (no FK cascade in SQLite).
+	if _, err := tx.ExecContext(ctx, `DELETE FROM team_task_comments WHERE task_id = ?`, taskID); err != nil {
+		return fmt.Errorf("deleting comments: %w", err)
+	}
+
+	// Delete the task (terminal guard in WHERE for defense-in-depth).
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM team_tasks WHERE id = ? AND status IN ('completed','cancelled','failed')`,
+		taskID); err != nil {
+		return fmt.Errorf("deleting task: %w", err)
+	}
+
+	// Decrement parent's subtask_count if this task had a parent.
+	if parentID.Valid && parentID.String != "" {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE team_tasks SET subtask_count = MAX(0, subtask_count - 1) WHERE id = ?`,
+			parentID.String); err != nil {
+			return fmt.Errorf("decrementing parent subtask_count: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *Store) DeleteTerminalTasks(ctx context.Context, teamID string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Decrement subtask_count for each parent atomically (single UPDATE per parent).
+	rows, err := tx.QueryContext(ctx,
+		`SELECT parent_id, COUNT(*) FROM team_tasks
+		 WHERE team_id = ? AND status IN ('completed','cancelled','failed')
+		   AND parent_id IS NOT NULL AND parent_id != ''
+		 GROUP BY parent_id`, teamID)
+	if err != nil {
+		return 0, fmt.Errorf("querying parents: %w", err)
+	}
+	type parentCount struct {
+		id    string
+		count int
+	}
+	var parents []parentCount
+	for rows.Next() {
+		var pc parentCount
+		if err := rows.Scan(&pc.id, &pc.count); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scanning parent: %w", err)
+		}
+		parents = append(parents, pc)
+	}
+	rows.Close()
+
+	for _, pc := range parents {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE team_tasks SET subtask_count = MAX(0, subtask_count - ?) WHERE id = ?`,
+			pc.count, pc.id); err != nil {
+			return 0, fmt.Errorf("decrementing parent %s subtask_count: %w", pc.id, err)
+		}
+	}
+
+	// Delete comments for terminal tasks.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM team_task_comments WHERE task_id IN
+		 (SELECT id FROM team_tasks WHERE team_id = ? AND status IN ('completed','cancelled','failed'))`,
+		teamID); err != nil {
+		return 0, fmt.Errorf("deleting comments: %w", err)
+	}
+
+	// Delete the terminal tasks.
+	result, err := tx.ExecContext(ctx,
+		`DELETE FROM team_tasks WHERE team_id = ? AND status IN ('completed','cancelled','failed')`,
+		teamID)
+	if err != nil {
+		return 0, fmt.Errorf("deleting terminal tasks: %w", err)
+	}
+	affected, _ := result.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return int(affected), nil
 }
 
 func splitBlockers(blockedBy string) []string {

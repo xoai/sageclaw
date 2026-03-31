@@ -24,9 +24,12 @@ func New(dsn string) (*Store, error) {
 	}
 
 	// Apply pragmas for performance and correctness.
+	// Note: these apply to the connection that runs them. With Go's pool,
+	// new connections won't inherit them. We mitigate this by using a
+	// generous busy_timeout and WAL mode (set once, persists in the file).
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
+		"PRAGMA busy_timeout=10000",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA cache_size=2000",
 		"PRAGMA synchronous=NORMAL",
@@ -37,6 +40,11 @@ func New(dsn string) (*Store, error) {
 			return nil, fmt.Errorf("setting pragma %q: %w", p, err)
 		}
 	}
+
+	// Keep pool small to reduce connections without busy_timeout.
+	// 2 allows one reader + one writer without deadlock.
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {

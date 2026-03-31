@@ -84,11 +84,12 @@ func AllProfiles() []string {
 
 // AlwaysConsentGroups require consent regardless of profile.
 // These are security-critical and non-configurable.
+// Team leads bypass orchestration consent at the loop level (see checkConsent).
 var AlwaysConsentGroups = map[string]bool{
 	GroupRuntime:       true,
 	GroupMCP:           true,
-	GroupOrchestration: true,
 	GroupBrowser:       true,
+	GroupOrchestration: true,
 }
 
 // IsInProfile returns true if the group is allowed by the given profile.

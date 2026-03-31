@@ -185,10 +185,36 @@ func TestCheckConsent_HeadlessPreAuthorized(t *testing.T) {
 		t.Errorf("pre-authorized mcp:weather should be allowed, got: %s", result.Content)
 	}
 
-	// orchestration is NOT pre-authorized → blocked.
+	// orchestration is NOT pre-authorized → blocked for non-team-lead agents.
 	result = l.checkConsent(context.Background(), "s1", canonical.ToolCall{ID: "3", Name: "delegate_task"}, 0)
 	if result == nil {
-		t.Fatal("non-pre-authorized orchestration should be blocked")
+		t.Fatal("non-pre-authorized orchestration should be blocked for non-team-lead")
+	}
+}
+
+func TestCheckConsent_TeamLeadBypassesOrchestration(t *testing.T) {
+	reg := makeTestRegistry()
+	cs := tool.NewPersistentConsentStore(nil)
+	l := NewLoop(Config{
+		AgentID:     "lead-1",
+		ToolProfile: "coding",
+		Headless:    true,
+		TeamInfo: &TeamInfoConfig{
+			TeamID: "team-1",
+			Role:   "lead",
+		},
+	}, nil, reg, nil, nil, nil, WithConsentStore(cs))
+
+	// Team lead bypasses orchestration consent — delegation is friction-free.
+	result := l.checkConsent(context.Background(), "s1", canonical.ToolCall{ID: "1", Name: "delegate_task"}, 0)
+	if result != nil {
+		t.Errorf("team lead should bypass orchestration consent, got: %s", result.Content)
+	}
+
+	// But runtime still requires pre-authorization even for leads.
+	result = l.checkConsent(context.Background(), "s1", canonical.ToolCall{ID: "2", Name: "execute_command"}, 0)
+	if result == nil {
+		t.Fatal("team lead should NOT bypass runtime consent")
 	}
 }
 

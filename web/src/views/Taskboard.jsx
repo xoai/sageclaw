@@ -17,6 +17,9 @@ const KANBAN_COLUMNS = [
 const PRIORITY_COLORS = { 3: 'var(--error)', 2: 'var(--warning)', 1: 'var(--primary)', 0: 'var(--text-muted)' };
 const PRIORITY_LABELS = { 3: 'Urgent', 2: 'High', 1: 'Normal', 0: 'Low' };
 
+const ACTIVE_STATUSES = new Set(['pending', 'in_progress', 'blocked', 'in_review']);
+const DONE_STATUSES = new Set(['completed', 'cancelled', 'failed']);
+
 function relativeTime(ts) {
   if (!ts) return '';
   const d = new Date(ts);
@@ -39,6 +42,96 @@ function statusBadgeClass(status) {
   }
 }
 
+// --- Comments Section ---
+
+function CommentsSection({ taskId }) {
+  const [comments, setComments] = useState(null);
+  const [text, setText] = useState('');
+  const [posting, setPosting] = useState(false);
+  const loaded = useRef(false);
+
+  useEffect(() => {
+    loaded.current = false;
+    setComments(null);
+    fetch(`/api/teams/task-comments/${taskId}`).then(r => r.json()).then(data => {
+      setComments(data || []);
+      loaded.current = true;
+    }).catch(() => { setComments([]); loaded.current = true; });
+  }, [taskId]);
+
+  const submit = useCallback(async () => {
+    const trimmed = text.trim();
+    if (!trimmed || posting) return;
+    setPosting(true);
+    try {
+      const r = await fetch(`/api/teams/task-comments/${taskId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ text: trimmed }),
+      });
+      if (!r.ok) { setPosting(false); return; }
+      setText('');
+      // Refetch comments.
+      const listR = await fetch(`/api/teams/task-comments/${taskId}`);
+      const data = await listR.json();
+      setComments(data || []);
+    } catch {}
+    setPosting(false);
+  }, [taskId, text, posting]);
+
+  if (comments === null) {
+    return <div style="font-size:12px;color:var(--text-muted);margin-top:8px">Loading comments...</div>;
+  }
+
+  return (
+    <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">
+        Comments ({comments.length})
+      </div>
+      {comments.map(c => (
+        <div key={c.ID} style={`font-size:12px;margin-bottom:6px;${c.CommentType === 'blocker' ? 'color:var(--error)' : ''}`}>
+          <strong>{c.AgentID || c.UserID || 'system'}</strong>
+          <span style="color:var(--text-muted);margin-left:6px">{relativeTime(c.CreatedAt)}</span>
+          <div style="margin-top:2px">{c.Content}</div>
+        </div>
+      ))}
+      <div style="display:flex;gap:6px;margin-top:8px" onClick={e => e.stopPropagation()}>
+        <input type="text" placeholder="Add a comment..." value={text}
+          onInput={e => setText(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+          style="flex:1;font-size:12px" />
+        <button class="btn-small" onClick={submit} disabled={posting}>Post</button>
+      </div>
+    </div>
+  );
+}
+
+// --- Subtask Tree ---
+
+function SubtaskTree({ task, tasks, onToggle }) {
+  const subtasks = tasks.filter(t => t.parent_id === task.id);
+  if (subtasks.length === 0) return null;
+
+  const doneCount = subtasks.filter(s => s.status === 'completed').length;
+
+  return (
+    <div style="margin-top:8px">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">
+        Subtasks ({doneCount}/{subtasks.length})
+      </div>
+      {subtasks.map(sub => (
+        <div key={sub.id} style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px;cursor:pointer"
+          onClick={(e) => { e.stopPropagation(); onToggle(sub.id); }}>
+          <span>{sub.status === 'completed' ? '\u2705' : sub.status === 'failed' ? '\u274C' : '\u23F3'}</span>
+          <span style="flex:1">{sub.title}</span>
+          <span class={`badge ${statusBadgeClass(sub.status)}`} style="font-size:10px">{sub.status}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // --- TaskCard ---
 
 function PriorityDot({ priority }) {
@@ -57,10 +150,11 @@ function ProgressBar({ percent }) {
   );
 }
 
-function TaskCard({ task, expanded, onToggle, onAction, agents }) {
+function TaskCard({ task, expanded, onToggle, onAction, agents, allTasks }) {
   const agentName = agents[task.assigned_to] || task.assigned_to || '\u2014';
   const subtasks = task.subtask_count || 0;
   const subtasksDone = task.subtasks_done || 0;
+  const isTerminal = DONE_STATUSES.has(task.status);
 
   return (
     <div class="card clickable" onClick={() => onToggle(task.id)}
@@ -133,6 +227,11 @@ function TaskCard({ task, expanded, onToggle, onAction, agents }) {
             </div>
           )}
 
+          {/* Subtask tree (M3.5) */}
+          {(task.subtask_count > 0 || allTasks.some(t => t.parent_id === task.id)) && (
+            <SubtaskTree task={task} tasks={allTasks} onToggle={onToggle} />
+          )}
+
           {/* Cross-links */}
           {task.session_id && (
             <div style="margin-bottom:8px">
@@ -169,7 +268,16 @@ function TaskCard({ task, expanded, onToggle, onAction, agents }) {
                 Retry
               </button>
             )}
+            {isTerminal && (
+              <button class="btn-small" style="color:var(--text-muted)"
+                onClick={(e) => { e.stopPropagation(); onAction(task.id, 'delete'); }}>
+                Delete
+              </button>
+            )}
           </div>
+
+          {/* Comments section (M3.4) */}
+          <CommentsSection taskId={task.id} />
         </div>
       )}
     </div>
@@ -180,7 +288,7 @@ function TaskCard({ task, expanded, onToggle, onAction, agents }) {
 
 const DONE_LIMIT = 10;
 
-function KanbanColumn({ col, tasks, expandedId, onToggle, onAction, agents }) {
+function KanbanColumn({ col, tasks, expandedId, onToggle, onAction, agents, allTasks }) {
   let colTasks = tasks.filter(t => {
     if (col.key === 'completed') return t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled';
     return t.status === col.key;
@@ -204,7 +312,7 @@ function KanbanColumn({ col, tasks, expandedId, onToggle, onAction, agents }) {
         )}
         {displayTasks.map(task => (
           <TaskCard key={task.id} task={task} expanded={expandedId === task.id}
-            onToggle={onToggle} onAction={onAction} agents={agents} />
+            onToggle={onToggle} onAction={onAction} agents={agents} allTasks={allTasks} />
         ))}
         {isDone && colTasks.length > DONE_LIMIT && !showAll && (
           <button class="btn-small" style="width:100%;text-align:center;margin-top:4px"
@@ -217,12 +325,12 @@ function KanbanColumn({ col, tasks, expandedId, onToggle, onAction, agents }) {
   );
 }
 
-function KanbanView({ tasks, expandedId, onToggle, onAction, agents }) {
+function KanbanView({ tasks, expandedId, onToggle, onAction, agents, allTasks }) {
   return (
     <div class="kanban-board">
       {KANBAN_COLUMNS.map(col => (
         <KanbanColumn key={col.key} col={col} tasks={tasks} expandedId={expandedId}
-          onToggle={onToggle} onAction={onAction} agents={agents} />
+          onToggle={onToggle} onAction={onAction} agents={agents} allTasks={allTasks} />
       ))}
     </div>
   );
@@ -230,7 +338,7 @@ function KanbanView({ tasks, expandedId, onToggle, onAction, agents }) {
 
 // --- Agent Lane View ---
 
-function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents }) {
+function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents, allTasks }) {
   // Build member list: lead first, then members.
   const members = [];
   if (team) {
@@ -291,7 +399,7 @@ function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents }) 
               <div style="margin-bottom:6px">
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Current</div>
                 <TaskCard task={current} expanded={expandedId === current.id}
-                  onToggle={onToggle} onAction={onAction} agents={agents} />
+                  onToggle={onToggle} onAction={onAction} agents={agents} allTasks={allTasks} />
               </div>
             )}
 
@@ -301,7 +409,7 @@ function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents }) 
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">In Review ({review.length})</div>
                 {review.map(t => (
                   <TaskCard key={t.id} task={t} expanded={expandedId === t.id}
-                    onToggle={onToggle} onAction={onAction} agents={agents} />
+                    onToggle={onToggle} onAction={onAction} agents={agents} allTasks={allTasks} />
                 ))}
               </div>
             )}
@@ -312,7 +420,7 @@ function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents }) 
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Queued ({queued.length})</div>
                 {queued.map(t => (
                   <TaskCard key={t.id} task={t} expanded={expandedId === t.id}
-                    onToggle={onToggle} onAction={onAction} agents={agents} />
+                    onToggle={onToggle} onAction={onAction} agents={agents} allTasks={allTasks} />
                 ))}
               </div>
             )}
@@ -323,7 +431,7 @@ function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents }) 
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Failed ({failed.length})</div>
                 {failed.map(t => (
                   <TaskCard key={t.id} task={t} expanded={expandedId === t.id}
-                    onToggle={onToggle} onAction={onAction} agents={agents} />
+                    onToggle={onToggle} onAction={onAction} agents={agents} allTasks={allTasks} />
                 ))}
               </div>
             )}
@@ -334,7 +442,7 @@ function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents }) 
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Done ({done.length})</div>
                 {done.slice(0, 3).map(t => (
                   <TaskCard key={t.id} task={t} expanded={expandedId === t.id}
-                    onToggle={onToggle} onAction={onAction} agents={agents} />
+                    onToggle={onToggle} onAction={onAction} agents={agents} allTasks={allTasks} />
                 ))}
                 {done.length > 3 && (
                   <div style="font-size:12px;color:var(--text-muted);padding:4px 12px">+{done.length - 3} more</div>
@@ -352,6 +460,119 @@ function AgentLaneView({ tasks, team, expandedId, onToggle, onAction, agents }) 
   );
 }
 
+// --- Create Task Dialog ---
+
+function CreateTaskDialog({ teamId, team, agents, tasks, onCreated, onClose }) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [priority, setPriority] = useState(1);
+  const [assignTo, setAssignTo] = useState('');
+  const [parentId, setParentId] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  // Build member list from team config.
+  const memberIds = [];
+  if (team) {
+    if (team.lead) memberIds.push(team.lead);
+    try {
+      const cfg = JSON.parse(team.config || '{}');
+      (cfg.members || []).forEach(id => {
+        if (!memberIds.includes(id)) memberIds.push(id);
+      });
+    } catch {}
+  }
+
+  const submit = async () => {
+    if (!title.trim()) { setError('Title is required'); return; }
+    setSubmitting(true);
+    setError('');
+    try {
+      const r = await fetch(`/api/teams/tasks/${teamId}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          action: 'create',
+          title: title.trim(),
+          description,
+          priority,
+          assign_to: assignTo || undefined,
+          parent_id: parentId || undefined,
+        }),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        setError(data.error || 'Failed to create task');
+        setSubmitting(false);
+        return;
+      }
+      const task = await r.json();
+      onCreated(task);
+      onClose();
+    } catch {
+      setError('Network error');
+    }
+    setSubmitting(false);
+  };
+
+  return (
+    <div class="modal-overlay" onClick={onClose} role="dialog" aria-modal="true">
+      <div class="modal-content" onClick={e => e.stopPropagation()} style="max-width:480px">
+        <h2 style="font-size:16px;margin-bottom:12px">New Task</h2>
+        {error && <div style="color:var(--error);font-size:13px;margin-bottom:8px">{error}</div>}
+        <div class="form-group" style="margin-bottom:10px">
+          <label style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:block">Title *</label>
+          <input type="text" style="width:100%" value={title} maxLength={500}
+            onInput={e => setTitle(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+            placeholder="Task title" />
+        </div>
+        <div class="form-group" style="margin-bottom:10px">
+          <label style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:block">Description</label>
+          <textarea rows="3" style="width:100%" value={description}
+            onInput={e => setDescription(e.target.value)} placeholder="Optional description" />
+        </div>
+        <div style="display:flex;gap:12px;margin-bottom:10px">
+          <div class="form-group" style="flex:1">
+            <label style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:block">Priority</label>
+            <select style="width:100%" value={priority} onChange={e => setPriority(Number(e.target.value))}>
+              <option value={0}>Low</option>
+              <option value={1}>Normal</option>
+              <option value={2}>High</option>
+              <option value={3}>Urgent</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1">
+            <label style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:block">Assign to</label>
+            <select style="width:100%" value={assignTo} onChange={e => setAssignTo(e.target.value)}>
+              <option value="">Unassigned</option>
+              {memberIds.map(id => (
+                <option key={id} value={id}>{agents[id] || id}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:10px">
+          <label style="font-size:13px;color:var(--text-muted);margin-bottom:4px;display:block">Parent task</label>
+          <select style="width:100%" value={parentId} onChange={e => setParentId(e.target.value)}>
+            <option value="">None</option>
+            {(tasks || []).filter(t => !DONE_STATUSES.has(t.status)).map(t => (
+              <option key={t.id} value={t.id}>{t.identifier ? `${t.identifier}: ` : ''}{t.title}</option>
+            ))}
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn-primary" onClick={submit} disabled={submitting}>
+            {submitting ? 'Creating...' : 'Create Task'}
+          </button>
+          <button class="btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- Main Taskboard ---
 
 export function Taskboard({ id: teamId }) {
@@ -365,6 +586,8 @@ export function Taskboard({ id: teamId }) {
   const [actionLoading, setActionLoading] = useState(null);
   const [rejectTaskId, setRejectTaskId] = useState(null);
   const [rejectFeedback, setRejectFeedback] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [showCreate, setShowCreate] = useState(false);
 
   // Auto-expand task from query param (?task=TSK-N).
   useEffect(() => {
@@ -411,10 +634,20 @@ export function Taskboard({ id: teamId }) {
 
   useEffect(() => { loadBoard(); }, [loadBoard]);
 
-  // SSE subscription with reconnection resync (4.8).
+  // SSE subscription with reconnection resync.
   useEffect(() => {
     const unsub = subscribeEvents((event) => {
       if (typeof event.type === 'string' && event.type.startsWith('team.task.')) {
+        // Handle delete events (M3.6).
+        if (event.type === 'team.task.deleted') {
+          setTasks(prev => prev.filter(t => t.id !== event.task_id));
+          return;
+        }
+        if (event.type === 'team.task.cleared') {
+          if (event.team_id === teamId) loadBoard();
+          return;
+        }
+
         const { task_id, seq, task } = event;
         if (!task_id || !task) return;
         // Check if this event is for our team.
@@ -435,14 +668,9 @@ export function Taskboard({ id: teamId }) {
           return [task, ...prev];
         });
       }
-
-      // SSE reconnection: EventSource auto-reconnects; on reconnect we refetch.
-      // The subscribeEvents wrapper handles this via onerror → auto-reconnect.
-      // We detect reconnection by checking for a special "reconnected" event type,
-      // or we just refetch periodically as fallback.
     });
 
-    // Fallback: refetch every 30s to catch missed events (4.8).
+    // Fallback: refetch every 30s to catch missed events.
     const interval = setInterval(loadBoard, 30000);
 
     return () => { unsub(); clearInterval(interval); };
@@ -457,6 +685,27 @@ export function Taskboard({ id: teamId }) {
     if (action === 'reject') {
       setRejectTaskId(taskId);
       setRejectFeedback('');
+      return;
+    }
+
+    // Delete with confirmation.
+    if (action === 'delete') {
+      if (!confirm('Delete this task?')) return;
+      setActionLoading(taskId);
+      try {
+        const r = await fetch(`/api/teams/tasks/${teamId}/action`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ task_id: taskId, action: 'delete' }),
+        });
+        if (r.ok) {
+          setTasks(prev => prev.filter(t => t.id !== taskId));
+        } else {
+          loadBoard();
+        }
+      } catch { loadBoard(); }
+      setActionLoading(null);
       return;
     }
 
@@ -483,6 +732,21 @@ export function Taskboard({ id: teamId }) {
     setActionLoading(null);
   }, [teamId, loadBoard]);
 
+  // Clear Done (bulk delete terminal tasks).
+  const handleClearDone = useCallback(async () => {
+    if (!confirm('Delete all completed, cancelled, and failed tasks?')) return;
+    try {
+      await fetch(`/api/teams/tasks/${teamId}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ action: 'delete-bulk' }),
+      });
+      // Optimistic: remove all terminal tasks.
+      setTasks(prev => prev.filter(t => !DONE_STATUSES.has(t.status)));
+    } catch { loadBoard(); }
+  }, [teamId, loadBoard]);
+
   const submitReject = useCallback(async () => {
     if (!rejectTaskId) return;
     setActionLoading(rejectTaskId);
@@ -502,7 +766,12 @@ export function Taskboard({ id: teamId }) {
     setRejectFeedback('');
   }, [rejectTaskId, rejectFeedback, teamId, loadBoard]);
 
-  // Empty states (4.7).
+  // Filter tasks for display.
+  const activeTasks = tasks.filter(t => ACTIVE_STATUSES.has(t.status));
+  const doneTasks = tasks.filter(t => DONE_STATUSES.has(t.status));
+  const filteredTasks = filter === 'active' ? activeTasks : filter === 'done' ? doneTasks : tasks;
+
+  // Empty states.
   if (loading) {
     return (
       <div>
@@ -566,6 +835,37 @@ export function Taskboard({ id: teamId }) {
         </div>
       </div>
 
+      {/* Filter toolbar (M3.1) + New Task + Clear Done (M3.2) */}
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:16px;flex-wrap:wrap">
+        <button class={filter === 'all' ? 'btn-primary' : 'btn-secondary'}
+          style="padding:4px 12px;font-size:12px"
+          onClick={() => setFilter('all')}>
+          All ({tasks.length})
+        </button>
+        <button class={filter === 'active' ? 'btn-primary' : 'btn-secondary'}
+          style="padding:4px 12px;font-size:12px"
+          onClick={() => setFilter('active')}>
+          Active ({activeTasks.length})
+        </button>
+        <button class={filter === 'done' ? 'btn-primary' : 'btn-secondary'}
+          style="padding:4px 12px;font-size:12px"
+          onClick={() => setFilter('done')}>
+          Done ({doneTasks.length})
+        </button>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="btn-primary" style="padding:4px 12px;font-size:12px"
+            onClick={() => setShowCreate(true)}>
+            + New Task
+          </button>
+          {doneTasks.length > 0 && (
+            <button class="btn-small" style="color:var(--error);border-color:var(--error);font-size:12px"
+              onClick={handleClearDone}>
+              Clear Done
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Empty state: no tasks */}
       {tasks.length === 0 && (
         <div class="card" style="text-align:center;padding:48px">
@@ -586,15 +886,29 @@ export function Taskboard({ id: teamId }) {
         </div>
       )}
 
-      {/* Board views */}
-      {tasks.length > 0 && view === 'kanban' && (
-        <KanbanView tasks={tasks} expandedId={expandedId}
-          onToggle={toggleExpanded} onAction={handleAction} agents={agents} />
+      {/* Board views — pass filtered tasks for display, all tasks for subtree lookups */}
+      {filteredTasks.length > 0 && view === 'kanban' && (
+        <KanbanView tasks={filteredTasks} expandedId={expandedId}
+          onToggle={toggleExpanded} onAction={handleAction} agents={agents} allTasks={tasks} />
       )}
 
-      {tasks.length > 0 && view === 'agents' && (
-        <AgentLaneView tasks={tasks} team={team} expandedId={expandedId}
-          onToggle={toggleExpanded} onAction={handleAction} agents={agents} />
+      {filteredTasks.length > 0 && view === 'agents' && (
+        <AgentLaneView tasks={filteredTasks} team={team} expandedId={expandedId}
+          onToggle={toggleExpanded} onAction={handleAction} agents={agents} allTasks={tasks} />
+      )}
+
+      {/* No results for current filter */}
+      {tasks.length > 0 && filteredTasks.length === 0 && (
+        <div class="card" style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">
+          No {filter} tasks
+        </div>
+      )}
+
+      {/* Create task dialog (M3.3) */}
+      {showCreate && (
+        <CreateTaskDialog teamId={teamId} team={team} agents={agents} tasks={tasks}
+          onCreated={(task) => { if (task?.id) setTasks(prev => [task, ...prev]); }}
+          onClose={() => setShowCreate(false)} />
       )}
 
       {/* Reject feedback modal */}

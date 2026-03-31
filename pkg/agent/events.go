@@ -29,6 +29,9 @@ const (
 	EventTeamTaskBlocked   EventType = "team.task.blocked"
 	EventTeamTaskUnblocked EventType = "team.task.unblocked"
 	EventTeamTaskReview    EventType = "team.task.review"
+
+	// Subagent events.
+	EventSubagentCompleted EventType = "subagent.completed"
 )
 
 // Event represents an observable event from the agent loop.
@@ -54,6 +57,7 @@ type ConsentRequest struct {
 	Source      string `json:"source"`      // "builtin", "mcp:weather", "skill:code"
 	RiskLevel   string `json:"risk_level"`  // Derived: "sensitive" for always-consent, "moderate" otherwise. For adapter compat.
 	Explanation string `json:"explanation"`
+	ToolInput   string `json:"tool_input,omitempty"` // Tool call input (JSON) for user review.
 	Nonce       string `json:"nonce"` // Unique nonce for this consent request.
 }
 

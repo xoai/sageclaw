@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -119,6 +120,48 @@ func (s *Store) UpdateSessionTitle(ctx context.Context, sessionID, title string)
 		`UPDATE sessions SET title = ? WHERE id = ? AND (title IS NULL OR title = '')`,
 		title, sessionID)
 	return err
+}
+
+// UpdateSessionMetadata merges key-value pairs into the session's metadata JSON.
+// Uses BEGIN IMMEDIATE to prevent read-modify-write races.
+func (s *Store) UpdateSessionMetadata(ctx context.Context, sessionID string, merge map[string]string) error {
+	if len(merge) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx for session metadata: %w", err)
+	}
+	defer tx.Rollback()
+
+	// SQLite upgrades to a write lock on the first write, but we do the
+	// read inside the same transaction so no other writer can interleave.
+	var metaJSON string
+	err = tx.QueryRowContext(ctx,
+		`SELECT COALESCE(metadata, '{}') FROM sessions WHERE id = ?`, sessionID,
+	).Scan(&metaJSON)
+	if err != nil {
+		return fmt.Errorf("reading session metadata: %w", err)
+	}
+
+	existing := make(map[string]string)
+	if err := json.Unmarshal([]byte(metaJSON), &existing); err != nil {
+		existing = make(map[string]string)
+	}
+
+	for k, v := range merge {
+		existing[k] = v
+	}
+
+	updated, _ := json.Marshal(existing)
+	_, err = tx.ExecContext(ctx,
+		`UPDATE sessions SET metadata = ?, updated_at = datetime('now') WHERE id = ?`,
+		string(updated), sessionID)
+	if err != nil {
+		return fmt.Errorf("updating session metadata: %w", err)
+	}
+	return tx.Commit()
 }
 
 // UpdateSessionTokens updates token usage after an agent loop iteration.

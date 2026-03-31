@@ -177,6 +177,135 @@ func TestDispatch_CycleDetection(t *testing.T) {
 	}
 }
 
+func TestDetectCycles_NoCycle(t *testing.T) {
+	exec, s := setupTestExecutor(t)
+	ctx := context.Background()
+	teamID := createTestTeamInDB(t, s, "lead-1", "worker-a")
+
+	idA, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "A", CreatedBy: "lead-1",
+	})
+	s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "B", CreatedBy: "lead-1", BlockedBy: idA,
+	})
+
+	cycles := exec.detectCycles(ctx, teamID)
+	if len(cycles) != 0 {
+		t.Fatalf("expected no cycles, got %v", cycles)
+	}
+}
+
+func TestDetectCycles_SimpleCycle(t *testing.T) {
+	exec, s := setupTestExecutor(t)
+	ctx := context.Background()
+	teamID := createTestTeamInDB(t, s, "lead-1", "worker-a")
+
+	// Create A→B→A cycle by directly inserting with cross-references.
+	idA, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "A", CreatedBy: "lead-1",
+	})
+	idB, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "B", CreatedBy: "lead-1", BlockedBy: idA,
+	})
+	// Now make A blocked by B (creating cycle).
+	s.UpdateTask(ctx, idA, map[string]any{"blocked_by": idB, "status": "blocked"})
+
+	cycles := exec.detectCycles(ctx, teamID)
+	if len(cycles) != 2 {
+		t.Fatalf("expected 2 tasks in cycle, got %d: %v", len(cycles), cycles)
+	}
+}
+
+func TestDetectCycles_TriangleCycle(t *testing.T) {
+	exec, s := setupTestExecutor(t)
+	ctx := context.Background()
+	teamID := createTestTeamInDB(t, s, "lead-1", "worker-a")
+
+	// A→B→C→A cycle.
+	idA, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "A", CreatedBy: "lead-1",
+	})
+	idB, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "B", CreatedBy: "lead-1", BlockedBy: idA,
+	})
+	idC, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "C", CreatedBy: "lead-1", BlockedBy: idB,
+	})
+	// Close the cycle: A blocked by C.
+	s.UpdateTask(ctx, idA, map[string]any{"blocked_by": idC, "status": "blocked"})
+
+	cycles := exec.detectCycles(ctx, teamID)
+	if len(cycles) != 3 {
+		t.Fatalf("expected 3 tasks in cycle, got %d: %v", len(cycles), cycles)
+	}
+}
+
+func TestDetectCycles_IndependentChainsNotAffected(t *testing.T) {
+	exec, s := setupTestExecutor(t)
+	ctx := context.Background()
+	teamID := createTestTeamInDB(t, s, "lead-1", "worker-a")
+
+	// Independent chain: D→E (no cycle).
+	idD, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "D", CreatedBy: "lead-1",
+	})
+	s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "E", CreatedBy: "lead-1", BlockedBy: idD,
+	})
+
+	// Separate cycle: X→Y→X.
+	idX, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "X", CreatedBy: "lead-1",
+	})
+	idY, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "Y", CreatedBy: "lead-1", BlockedBy: idX,
+	})
+	s.UpdateTask(ctx, idX, map[string]any{"blocked_by": idY, "status": "blocked"})
+
+	cycles := exec.detectCycles(ctx, teamID)
+	// Only X and Y should be in cycles, not D and E.
+	if len(cycles) != 2 {
+		t.Fatalf("expected 2 cycle members (X,Y), got %d: %v", len(cycles), cycles)
+	}
+	cycleSet := make(map[string]bool)
+	for _, id := range cycles {
+		cycleSet[id] = true
+	}
+	if !cycleSet[idX] || !cycleSet[idY] {
+		t.Fatalf("expected X and Y in cycles, got %v", cycles)
+	}
+}
+
+func TestFailCycleTasks(t *testing.T) {
+	exec, s := setupTestExecutor(t)
+	ctx := context.Background()
+	teamID := createTestTeamInDB(t, s, "lead-1", "worker-a")
+
+	// Create A→B→A cycle.
+	idA, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "A", CreatedBy: "lead-1",
+	})
+	idB, _ := s.CreateTask(ctx, storeTypes.TeamTask{
+		TeamID: teamID, Title: "B", CreatedBy: "lead-1", BlockedBy: idA,
+	})
+	s.UpdateTask(ctx, idA, map[string]any{"blocked_by": idB, "status": "blocked"})
+
+	exec.FailCycleTasks(ctx, teamID)
+
+	// Both should be failed.
+	taskA, _ := s.GetTask(ctx, idA)
+	taskB, _ := s.GetTask(ctx, idB)
+	if taskA.Status != "failed" {
+		t.Fatalf("expected A failed, got %q", taskA.Status)
+	}
+	if taskB.Status != "failed" {
+		t.Fatalf("expected B failed, got %q", taskB.Status)
+	}
+	if taskA.ErrorMessage != "circular dependency detected" {
+		t.Fatalf("expected cycle error message, got %q", taskA.ErrorMessage)
+	}
+}
+
 func TestInbox_PushAndConsume(t *testing.T) {
 	inbox := &TeamInbox{}
 

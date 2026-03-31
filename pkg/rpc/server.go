@@ -75,6 +75,7 @@ type Server struct {
 	loginLimiter   *auth.LoginLimiter
 	pendingTOTP    map[string]pendingTOTPEntry // nonce → entry
 	loopPool       *agent.LoopPool
+	teamReloadFunc func() // Called after team create/update/delete to hot-reload team config.
 }
 
 // wsConn is a minimal WebSocket connection using the standard upgrade.
@@ -259,6 +260,12 @@ func WithLoopPool(lp *agent.LoopPool) ServerOption {
 	return func(s *Server) { s.loopPool = lp }
 }
 
+// WithTeamReload sets a callback invoked after team create/update/delete.
+// The callback should reload team configs into the agent loop pool.
+func WithTeamReload(fn func()) ServerOption {
+	return func(s *Server) { s.teamReloadFunc = fn }
+}
+
 // NewServer creates a new RPC server.
 func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, config Config, opts ...ServerOption) *Server {
 	if config.ListenAddr == "" {
@@ -334,6 +341,8 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("POST /api/teams/tasks/", srv.authGuard(srv.handleTeamsTaskAction))
 	mux.HandleFunc("GET /api/teams/resolve-task", srv.authGuard(srv.handleTaskResolve))
 	mux.HandleFunc("GET /api/teams/attention", srv.authGuard(srv.handleTeamsAttentionCount))
+	mux.HandleFunc("GET /api/teams/task-comments/", srv.authGuard(srv.handleTeamsTaskComments))
+	mux.HandleFunc("POST /api/teams/task-comments/", srv.authGuard(srv.handleTeamsTaskComments))
 
 	// Skills (authenticated).
 	mux.HandleFunc("GET /api/skills", srv.authGuard(srv.handleSkillsList))
@@ -935,12 +944,20 @@ func (s *Server) memoryList(ctx context.Context, params json.RawMessage) (any, e
 func (s *Server) chatSend(ctx context.Context, params json.RawMessage) (any, error) {
 	var p struct {
 		Channel string `json:"channel"`
+		ChatID  string `json:"chat_id"`
 		Text    string `json:"text"`
 		AgentID string `json:"agent_id"`
 	}
 	json.Unmarshal(params, &p)
 	if p.Channel == "" {
 		p.Channel = "web"
+	}
+	if p.ChatID == "" {
+		p.ChatID = "web-client" // Backward compat.
+	}
+	// Validate chat_id: alphanumeric + dashes, max 64 chars.
+	if len(p.ChatID) > 64 {
+		return nil, fmt.Errorf("chat_id too long (max 64 chars)")
 	}
 
 	// Pre-check: verify the agent serves this channel before publishing.
@@ -964,7 +981,7 @@ func (s *Server) chatSend(ctx context.Context, params json.RawMessage) (any, err
 
 	envelope := bus.Envelope{
 		Channel: p.Channel,
-		ChatID:  "web-client",
+		ChatID:  p.ChatID,
 		Messages: []canonical.Message{
 			{Role: "user", Content: []canonical.Content{{Type: "text", Text: p.Text}}},
 		},

@@ -130,6 +130,18 @@ func (p *LoopPool) NewTaskLoop(agentID string) *Loop {
 	return NewLoop(*cfg, p.provider, p.toolRegistry, p.preContext, p.postTool, p.onEvent, p.opts...)
 }
 
+// NewTaskLoopWithDeny creates a fresh Loop with additional tools denied.
+// Used by SubagentManager to prevent recursive spawning.
+func (p *LoopPool) NewTaskLoopWithDeny(agentID string, extraDeny []string) *Loop {
+	cfg := p.GetConfig(agentID)
+	if cfg == nil {
+		return nil
+	}
+	cfgCopy := *cfg
+	cfgCopy.ToolDeny = append(append([]string{}, cfgCopy.ToolDeny...), extraDeny...)
+	return NewLoop(cfgCopy, p.provider, p.toolRegistry, p.preContext, p.postTool, p.onEvent, p.opts...)
+}
+
 // InjectAll broadcasts a message to all active loops' inject channels.
 // Used for consent responses where the target loop is unknown.
 func (p *LoopPool) InjectAll(msg canonical.Message) {
