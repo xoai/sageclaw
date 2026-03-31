@@ -8,11 +8,12 @@ import (
 // CacheStats tracks prompt caching hit rates and cost savings.
 type CacheStats struct {
 	TotalRequests   atomic.Int64 `json:"total_requests"`
-	CacheHits       atomic.Int64 `json:"cache_hits"`      // Requests where cache_read > 0
-	TotalInput      atomic.Int64 `json:"total_input"`      // Total input tokens
-	TotalOutput     atomic.Int64 `json:"total_output"`     // Total output tokens
-	CacheCreation   atomic.Int64 `json:"cache_creation"`   // Tokens written to cache
-	CacheRead       atomic.Int64 `json:"cache_read"`       // Tokens read from cache
+	CacheHits       atomic.Int64 `json:"cache_hits"`       // Requests where cache_read > 0
+	TotalInput      atomic.Int64 `json:"total_input"`       // Total input tokens
+	TotalOutput     atomic.Int64 `json:"total_output"`      // Total output tokens
+	TotalThinking   atomic.Int64 `json:"total_thinking"`    // Total thinking/reasoning tokens
+	CacheCreation   atomic.Int64 `json:"cache_creation"`    // Tokens written to cache
+	CacheRead       atomic.Int64 `json:"cache_read"`        // Tokens read from cache
 	mu              sync.RWMutex
 }
 
@@ -20,10 +21,11 @@ type CacheStats struct {
 var GlobalCacheStats = &CacheStats{}
 
 // Record adds a request's usage to the stats.
-func (cs *CacheStats) Record(inputTokens, outputTokens, cacheCreation, cacheRead int) {
+func (cs *CacheStats) Record(inputTokens, outputTokens, cacheCreation, cacheRead, thinkingTokens int) {
 	cs.TotalRequests.Add(1)
 	cs.TotalInput.Add(int64(inputTokens))
 	cs.TotalOutput.Add(int64(outputTokens))
+	cs.TotalThinking.Add(int64(thinkingTokens))
 	cs.CacheCreation.Add(int64(cacheCreation))
 	cs.CacheRead.Add(int64(cacheRead))
 	if cacheRead > 0 {
@@ -38,6 +40,7 @@ func (cs *CacheStats) Snapshot() CacheStatsSnapshot {
 		CacheHits:     cs.CacheHits.Load(),
 		TotalInput:    cs.TotalInput.Load(),
 		TotalOutput:   cs.TotalOutput.Load(),
+		TotalThinking: cs.TotalThinking.Load(),
 		CacheCreation: cs.CacheCreation.Load(),
 		CacheRead:     cs.CacheRead.Load(),
 	}
@@ -50,6 +53,7 @@ type CacheStatsSnapshot struct {
 	HitRate       float64 `json:"hit_rate"`
 	TotalInput    int64   `json:"total_input"`
 	TotalOutput   int64   `json:"total_output"`
+	TotalThinking int64   `json:"total_thinking"`
 	CacheCreation int64   `json:"cache_creation"`
 	CacheRead     int64   `json:"cache_read"`
 	CostSavings   float64 `json:"cost_savings_pct"`  // Estimated % savings from caching

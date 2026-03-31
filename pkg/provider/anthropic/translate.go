@@ -144,17 +144,27 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 		ar.Tools = append(ar.Tools, at)
 	}
 
-	// Messages — with cache breakpoints on stable turns.
-	// Cache the first major turn boundary to avoid re-tokenizing conversation history.
+	// Messages — with cache breakpoints on the latest stable turns.
 	// Anthropic allows up to 4 cache breakpoints per request.
-	// We use: 1 on system, 1 on last tool, 1-2 on conversation turns.
+	// We use: 1 on system, 1 on last tool, up to 2 on conversation turns.
+	// Strategy: walk messages in reverse and place breakpoints on the last
+	// user message and the last assistant message before it. These are the
+	// most recent stable conversation boundaries, maximizing cache hits on
+	// the next request (which appends new messages after these).
 	turnCacheApplied := 0
 	maxTurnCaches := 2
-	// Place cache breakpoints at ~25% and ~50% of conversation history.
 	cachePoints := map[int]bool{}
-	if enableCache && len(req.Messages) >= 6 {
-		cachePoints[len(req.Messages)/4] = true
-		cachePoints[len(req.Messages)/2] = true
+	if enableCache && len(req.Messages) >= 4 {
+		foundUser := false
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if !foundUser && req.Messages[i].Role == "user" {
+				cachePoints[i] = true
+				foundUser = true
+			} else if foundUser && req.Messages[i].Role == "assistant" {
+				cachePoints[i] = true
+				break
+			}
+		}
 	}
 
 	for msgIdx, msg := range req.Messages {
@@ -279,10 +289,10 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 }
 
 // makeContent converts a block slice to the appropriate content format.
-// Single text block → string shorthand; otherwise → array.
+// Single text block without cache_control → string shorthand; otherwise → array.
 func makeContent(blocks []any) apiContent {
 	if len(blocks) == 1 {
-		if tb, ok := blocks[0].(apiTextBlock); ok {
+		if tb, ok := blocks[0].(apiTextBlock); ok && tb.CacheControl == nil {
 			return tb.Text
 		}
 	}
@@ -474,16 +484,26 @@ func FromAPIResponse(data []byte) (*canonical.Response, error) {
 		}
 	}
 
+	// Estimate thinking tokens from thinking block text.
+	// Anthropic includes thinking in output_tokens but doesn't report separately.
+	thinkingTokens := 0
+	for _, b := range blocks {
+		if b.Type == "thinking" && b.Thinking != "" {
+			thinkingTokens += len([]rune(b.Thinking)) / 4
+		}
+	}
+
 	return &canonical.Response{
 		ID: ar.ID,
 		Messages: []canonical.Message{
 			{Role: ar.Role, Content: content},
 		},
 		Usage: canonical.Usage{
-			InputTokens:   ar.Usage.InputTokens,
-			OutputTokens:  ar.Usage.OutputTokens,
-			CacheCreation: ar.Usage.CacheCreationInputTokens,
-			CacheRead:     ar.Usage.CacheReadInputTokens,
+			InputTokens:    ar.Usage.InputTokens,
+			OutputTokens:   ar.Usage.OutputTokens,
+			CacheCreation:  ar.Usage.CacheCreationInputTokens,
+			CacheRead:      ar.Usage.CacheReadInputTokens,
+			ThinkingTokens: thinkingTokens,
 		},
 		StopReason: ar.StopReason,
 	}, nil

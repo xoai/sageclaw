@@ -46,6 +46,7 @@ type Router struct {
 	providerTPM map[string]int       // provider name → tokens per minute (0 = unlimited)
 	fallback    Tier
 	bridge      *ContextBridge
+	Cooldowns   *CooldownTracker     // Global model-scoped cooldown tracker.
 }
 
 // NewRouter creates a model router with the given routes and fallback tier.
@@ -60,6 +61,7 @@ func NewRouter(routes map[Tier]Route, fallback Tier) (*Router, error) {
 		providerTPM: make(map[string]int),
 		fallback:    fallback,
 		bridge:      NewContextBridge(),
+		Cooldowns:   NewCooldownTracker(),
 	}, nil
 }
 
@@ -74,6 +76,7 @@ func NewEmptyRouter() *Router {
 		providerTPM: make(map[string]int),
 		fallback:    TierStrong,
 		bridge:      NewContextBridge(),
+		Cooldowns:   NewCooldownTracker(),
 	}
 }
 
@@ -276,8 +279,58 @@ func (r *Router) ResolveCombo(name string) (Provider, string, error) {
 	return nil, "", fmt.Errorf("combo %q: no available provider for any model in chain", name)
 }
 
-// ResolveComboExcluding resolves a combo skipping a specific provider.
-// Used for fallback within a combo chain when the primary provider returns 429.
+// ResolveComboWithCooldown resolves a combo, skipping models that are in cooldown.
+// This replaces the provider-level exclusion with model-level cooldown checks.
+func (r *Router) ResolveComboWithCooldown(name string) (Provider, string, error) {
+	r.mu.RLock()
+	combo, ok := r.combos[name]
+	providers := r.providers
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, "", fmt.Errorf("combo %q not found", name)
+	}
+
+	for _, m := range combo.Models {
+		if !r.Cooldowns.IsAvailable(m.Provider, m.ModelID) {
+			continue
+		}
+		p, pOk := providers[m.Provider]
+		if !pOk {
+			continue
+		}
+		return p, m.ModelID, nil
+	}
+
+	return nil, "", fmt.Errorf("combo %q: all models in cooldown or unavailable", name)
+}
+
+// ComboTail returns the last model in a combo chain.
+// Used for simple message routing (cheapest/lowest-priority model).
+func (r *Router) ComboTail(name string) (Provider, string, error) {
+	r.mu.RLock()
+	combo, ok := r.combos[name]
+	providers := r.providers
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, "", fmt.Errorf("combo %q not found", name)
+	}
+
+	// Walk in reverse to find last available model.
+	for i := len(combo.Models) - 1; i >= 0; i-- {
+		m := combo.Models[i]
+		p, pOk := providers[m.Provider]
+		if pOk {
+			return p, m.ModelID, nil
+		}
+	}
+
+	return nil, "", fmt.Errorf("combo %q: no available provider", name)
+}
+
+// Deprecated: ResolveComboExcluding is replaced by ResolveComboWithCooldown
+// which uses model-scoped cooldowns instead of provider-level exclusion.
 func (r *Router) ResolveComboExcluding(name, excludeProvider string) (Provider, string, error) {
 	r.mu.RLock()
 	combo, ok := r.combos[name]

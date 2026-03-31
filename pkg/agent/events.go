@@ -17,6 +17,7 @@ const (
 	EventVoiceStarted  EventType = "voice.started"
 	EventVoiceAudio    EventType = "voice.audio"    // Audio chunk received from model.
 	EventVoiceText     EventType = "voice.text"     // Transcript received.
+	EventMemoryFlush   EventType = "memory.flush"   // Pre-compaction memory save.
 
 	// Team orchestration events.
 	EventTeamTaskCreated   EventType = "team.task.created"

@@ -112,13 +112,15 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("gemini: %w", err)
+		return nil, &provider.ProviderError{
+			Reason: provider.ReasonTimeout, Provider: "gemini", Model: model, Err: err,
+		}
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("gemini API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return nil, provider.NewHTTPError(resp.StatusCode, string(respBody), "gemini", model)
 	}
 
 	return fromGeminiResponse(respBody)
@@ -138,13 +140,15 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("gemini: %w", err)
+		return nil, &provider.ProviderError{
+			Reason: provider.ReasonTimeout, Provider: "gemini", Model: model, Err: err,
+		}
 	}
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("gemini API error (HTTP %d): %s", resp.StatusCode, string(body))
+		return nil, provider.NewHTTPError(resp.StatusCode, string(body), "gemini", model)
 	}
 
 	events := make(chan provider.StreamEvent, 32)

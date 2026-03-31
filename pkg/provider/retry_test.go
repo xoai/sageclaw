@@ -2,10 +2,12 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDoWithRetry_Success(t *testing.T) {
@@ -68,13 +70,20 @@ func TestDoWithRetry_NoRetryOn401(t *testing.T) {
 	defer srv.Close()
 
 	req, _ := http.NewRequestWithContext(context.Background(), "POST", srv.URL, nil)
-	resp, err := DoWithRetry(srv.Client(), req, DefaultRetryConfig())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := DoWithRetry(srv.Client(), req, DefaultRetryConfig())
+	if err == nil {
+		t.Fatal("expected error on 401")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Errorf("expected 401, got %d", resp.StatusCode)
+	// Should return ProviderError with auth reason, no retries.
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ProviderError, got %T: %v", err, err)
+	}
+	if pe.Reason != ReasonAuth {
+		t.Errorf("expected reason=auth, got %q", pe.Reason)
+	}
+	if pe.Status != 401 {
+		t.Errorf("expected status=401, got %d", pe.Status)
 	}
 	if atomic.LoadInt32(&attempts) != 1 {
 		t.Errorf("expected 1 attempt (no retry on 401), got %d", atomic.LoadInt32(&attempts))
@@ -118,6 +127,80 @@ func TestDoWithRetry_ExhaustedRetries(t *testing.T) {
 	_, err := DoWithRetry(srv.Client(), req, cfg)
 	if err == nil {
 		t.Fatal("expected error after exhausted retries")
+	}
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ProviderError, got %T", err)
+	}
+	if pe.Reason != ReasonOverloaded {
+		t.Errorf("expected reason=overloaded for 503, got %q", pe.Reason)
+	}
+	if pe.Status != 503 {
+		t.Errorf("expected status=503, got %d", pe.Status)
+	}
+}
+
+func TestDoWithRetry_429ReturnsProviderError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(429)
+	}))
+	defer srv.Close()
+
+	cfg := RetryConfig{MaxAttempts: 2, BaseBackoff: 0, RateBackoff: 0}
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", srv.URL, nil)
+	_, err := DoWithRetry(srv.Client(), req, cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ProviderError, got %T", err)
+	}
+	if pe.Reason != ReasonRateLimit {
+		t.Errorf("expected reason=rate_limit, got %q", pe.Reason)
+	}
+	if pe.RetryAfter != 30*time.Second {
+		t.Errorf("expected RetryAfter=30s, got %v", pe.RetryAfter)
+	}
+}
+
+func TestDoWithRetry_NetworkError(t *testing.T) {
+	// Connect to a port that's not listening.
+	cfg := RetryConfig{MaxAttempts: 2, BaseBackoff: 0}
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", "http://127.0.0.1:1", nil)
+	_, err := DoWithRetry(client, req, cfg)
+	if err == nil {
+		t.Fatal("expected error on network failure")
+	}
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ProviderError, got %T: %v", err, err)
+	}
+	if pe.Reason != ReasonTimeout {
+		t.Errorf("expected reason=timeout for network error, got %q", pe.Reason)
+	}
+	if pe.Status != 0 {
+		t.Errorf("expected status=0 for network error, got %d", pe.Status)
+	}
+}
+
+func TestDoWithRetry_402ReturnsBilling(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(402)
+		w.Write([]byte("payment required"))
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", srv.URL, nil)
+	_, err := DoWithRetry(srv.Client(), req, DefaultRetryConfig())
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ProviderError, got %T", err)
+	}
+	if pe.Reason != ReasonBilling {
+		t.Errorf("expected reason=billing, got %q", pe.Reason)
 	}
 }
 

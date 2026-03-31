@@ -107,7 +107,7 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 
 	resp, err := provider.DoWithRetry(c.client, httpReq, provider.DefaultRetryConfig())
 	if err != nil {
-		return nil, err
+		return nil, provider.EnrichError(err, c.cfg.Name, req.Model)
 	}
 	defer resp.Body.Close()
 
@@ -117,7 +117,7 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s API error (HTTP %d): %s", c.cfg.Name, resp.StatusCode, string(respBody))
+		return nil, provider.NewHTTPError(resp.StatusCode, string(respBody), c.cfg.Name, req.Model)
 	}
 
 	if c.cfg.ResponseHook != nil {
@@ -150,13 +150,15 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", c.cfg.Name, err)
+		return nil, &provider.ProviderError{
+			Reason: provider.ReasonTimeout, Provider: c.cfg.Name, Model: req.Model, Err: err,
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("%s API error (HTTP %d): %s", c.cfg.Name, resp.StatusCode, string(errBody))
+		return nil, provider.NewHTTPError(resp.StatusCode, string(errBody), c.cfg.Name, req.Model)
 	}
 
 	events := make(chan provider.StreamEvent, 32)

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -85,8 +86,6 @@ type Loop struct {
 	rateMu       sync.Mutex
 	rateTokens   []rateEntry // sliding window of recent token usage
 
-	// Auto-demotion: when a 429 rate limit is hit, demote to fast tier.
-	demoted bool // Protected by mu.
 }
 
 type ownerInfo struct {
@@ -142,19 +141,6 @@ func WithCompactionManager(cm *CompactionManager) LoopOption {
 	return func(l *Loop) { l.compactionMgr = cm }
 }
 
-// isDemoted returns whether the loop is operating in demoted (fast) tier.
-func (l *Loop) isDemoted() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.demoted
-}
-
-// setDemoted sets the demotion state.
-func (l *Loop) setDemoted(v bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.demoted = v
-}
 
 // NewLoop creates a new agent loop.
 func NewLoop(
@@ -241,9 +227,6 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 	ctx, cancel := context.WithTimeout(ctx, l.config.Timeout)
 	defer cancel()
 
-	// Reset demotion state from any previous run.
-	l.setDemoted(false)
-
 	l.onEvent(Event{Type: EventRunStarted, SessionID: sessionID, AgentID: l.config.AgentID})
 
 	var pendingMsgs []canonical.Message
@@ -321,6 +304,24 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 			return RunResult{Messages: pendingMsgs, Usage: totalUsage, SystemPromptSize: systemPromptSize,
 				Error: fmt.Errorf("no provider available — check that at least one AI provider is configured")}
 		}
+
+		// Simple message routing: trivial messages use cheaper model.
+		if l.router != nil && isSimpleMessage(history, iteration) {
+			model := l.config.Model
+			if provider.IsCombo(model) {
+				if tailP, tailModel, err := l.router.ComboTail(provider.ComboName(model)); err == nil {
+					log.Printf("[%s] simple message → %s/%s (combo tail)", sessionID, tailP.Name(), tailModel)
+					activeProvider, activeModel = tailP, tailModel
+				}
+			} else if l.router.HasTier(provider.TierFast) {
+				fastP, fastModel := l.router.Resolve(provider.TierFast)
+				if fastP != nil {
+					log.Printf("[%s] simple message → %s/%s (fast tier)", sessionID, fastP.Name(), fastModel)
+					activeProvider, activeModel = fastP, fastModel
+				}
+			}
+		}
+
 		req.Model = activeModel
 		log.Printf("[%s] iter=%d provider=%s model=%s", sessionID, iteration, activeProvider.Name(), activeModel)
 
@@ -337,6 +338,8 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		// Layer 2: Compact if still over budget after pruning.
 		if l.compactionMgr != nil {
 			if compacted := l.compactionMgr.TryCompactWithBudget(ctx, sessionID, history, budget); compacted != nil {
+				// Memory flush: save findings before truncating history.
+				l.flushMemoryBeforeCompaction(ctx, sessionID, history, iteration)
 				history = compacted
 			}
 		}
@@ -346,9 +349,11 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		totalUsage.OutputTokens += resp.Usage.OutputTokens
 		totalUsage.CacheCreation += resp.Usage.CacheCreation
 		totalUsage.CacheRead += resp.Usage.CacheRead
+		totalUsage.ThinkingTokens += resp.Usage.ThinkingTokens
 		provider.GlobalCacheStats.Record(
 			resp.Usage.InputTokens, resp.Usage.OutputTokens,
 			resp.Usage.CacheCreation, resp.Usage.CacheRead,
+			resp.Usage.ThinkingTokens,
 		)
 
 		// Process the response.
@@ -608,17 +613,6 @@ func (l *Loop) paceRequest(ctx context.Context, providerName string, estimatedTo
 	l.rateMu.Unlock()
 }
 
-// isRateLimitError checks if an error is a rate limit (429) response.
-func isRateLimitError(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "429") ||
-		strings.Contains(s, "rate_limit") ||
-		strings.Contains(s, "RESOURCE_EXHAUSTED") ||
-		strings.Contains(s, "rate limit")
-}
 
 // tryLLMCall makes the actual LLM call: streaming attempt → fallback to Chat → consume stream.
 func (l *Loop) tryLLMCall(ctx context.Context, p provider.Provider, req *canonical.Request, sessionID string, iteration int) (*canonical.Response, error) {
@@ -646,57 +640,187 @@ func (l *Loop) tryLLMCall(ctx context.Context, p provider.Provider, req *canonic
 	}, nil
 }
 
-// callLLM wraps tryLLMCall with per-provider pacing and auto-demotion on 429.
+// callLLM wraps tryLLMCall with per-provider pacing and cooldown-aware fallback.
+// On ProviderError, classifies the failure and routes to combo/fast tier.
 func (l *Loop) callLLM(ctx context.Context, p provider.Provider, req *canonical.Request, sessionID string, iteration int) (*canonical.Response, error) {
 	estimatedTokens := req.SystemPromptSize + estimateHistoryTokens(req.Messages) + len(req.Tools)*150
 	l.paceRequest(ctx, p.Name(), estimatedTokens, sessionID)
 
 	resp, err := l.tryLLMCall(ctx, p, req, sessionID, iteration)
-	if err != nil && isRateLimitError(err) && l.router != nil && !l.isDemoted() {
-		// If using a combo, try the next model in the chain first.
-		model := l.config.Model
-		if provider.IsCombo(model) {
-			nextP, nextModel, comboErr := l.router.ResolveComboExcluding(provider.ComboName(model), p.Name())
-			if comboErr == nil {
-				log.Printf("[%s] 429 on %s — trying next combo model (%s/%s)",
-					sessionID, p.Name(), nextP.Name(), nextModel)
-				req.Model = nextModel
-				l.paceRequest(ctx, nextP.Name(), estimatedTokens, sessionID)
-				return l.tryLLMCall(ctx, nextP, req, sessionID, iteration)
-			}
-			log.Printf("[%s] 429 on %s — combo chain exhausted, demoting to fast tier", sessionID, p.Name())
-		}
-
-		// Fall back to fast tier.
-		fastP, fastModel := l.router.Resolve(provider.TierFast)
-		if fastP != nil && fastP.Name() != p.Name() {
-			log.Printf("[%s] 429 rate limit on %s — demoting to fast tier (%s/%s)",
-				sessionID, p.Name(), fastP.Name(), fastModel)
-			l.setDemoted(true)
-			req.Model = fastModel
-			l.paceRequest(ctx, fastP.Name(), estimatedTokens, sessionID)
-			return l.tryLLMCall(ctx, fastP, req, sessionID, iteration)
-		}
-		log.Printf("[%s] 429 on %s — no alternative tier available for demotion", sessionID, p.Name())
+	if err == nil {
+		return resp, nil
 	}
-	return resp, err
+
+	// Extract ProviderError for classified handling.
+	var pe *provider.ProviderError
+	if !errors.As(err, &pe) || l.router == nil {
+		return nil, err // Unclassified error or no router — fail.
+	}
+
+	// Non-failover errors: fail immediately.
+	if !provider.IsFailoverEligible(pe.Reason) {
+		return nil, err
+	}
+
+	// Mark the failed model in cooldown.
+	l.router.Cooldowns.Mark(pe.Provider, pe.Model, pe.Reason, pe.RetryAfter)
+	log.Printf("[%s] %s on %s/%s — marked cooldown (%s)",
+		sessionID, pe.Reason, pe.Provider, pe.Model, pe.Reason)
+
+	// Try next combo model (if using a combo).
+	model := l.config.Model
+	if provider.IsCombo(model) {
+		nextP, nextModel, comboErr := l.router.ResolveComboWithCooldown(provider.ComboName(model))
+		if comboErr == nil {
+			log.Printf("[%s] falling back to combo model %s/%s", sessionID, nextP.Name(), nextModel)
+			req.Model = nextModel
+			l.paceRequest(ctx, nextP.Name(), estimatedTokens, sessionID)
+			return l.tryLLMCall(ctx, nextP, req, sessionID, iteration)
+		}
+		log.Printf("[%s] combo chain exhausted, trying fast tier", sessionID)
+	}
+
+	// Fall back to fast tier.
+	fastP, fastModel := l.router.Resolve(provider.TierFast)
+	if fastP != nil && fastP.Name() != p.Name() && l.router.Cooldowns.IsAvailable(fastP.Name(), fastModel) {
+		log.Printf("[%s] falling back to fast tier (%s/%s)", sessionID, fastP.Name(), fastModel)
+		req.Model = fastModel
+		l.paceRequest(ctx, fastP.Name(), estimatedTokens, sessionID)
+		return l.tryLLMCall(ctx, fastP, req, sessionID, iteration)
+	}
+
+	// All models in cooldown — wait-and-retry.
+	shortest := l.router.Cooldowns.ShortestCooldown()
+	if shortest > 0 && shortest <= 60*time.Second {
+		log.Printf("[%s] all models in cooldown — waiting %v for shortest expiry", sessionID, shortest)
+		select {
+		case <-time.After(shortest):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		// Retry with original provider resolution.
+		retryP, retryModel := l.resolveProvider()
+		if retryP != nil {
+			req.Model = retryModel
+			return l.tryLLMCall(ctx, retryP, req, sessionID, iteration)
+		}
+	}
+
+	return nil, fmt.Errorf("all models rate-limited, shortest cooldown %v: %w", shortest, err)
+}
+
+// flushMemoryBeforeCompaction makes a best-effort LLM call to save important
+// findings to memory before context is truncated. Uses the fast tier provider
+// to avoid hitting the same rate limit. 30-second timeout. If it fails or no
+// fast tier is available, compaction proceeds anyway.
+func (l *Loop) flushMemoryBeforeCompaction(ctx context.Context, sessionID string, history []canonical.Message, iteration int) {
+	if l.router == nil || !l.router.HasTier(provider.TierFast) {
+		log.Printf("[%s] memory flush: skipped (no fast tier)", sessionID)
+		return
+	}
+
+	fastP, fastModel := l.router.Resolve(provider.TierFast)
+	if fastP == nil {
+		return
+	}
+
+	l.onEvent(Event{Type: EventMemoryFlush, SessionID: sessionID, AgentID: l.config.AgentID, Iteration: iteration, Text: "starting"})
+
+	flushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Build a minimal request with the conversation context + flush instruction.
+	flushReq := &canonical.Request{
+		Model:     fastModel,
+		System:    "You are a memory assistant. Save key findings from this conversation to memory before context compaction. Focus on: decisions made, important facts learned, code changes discussed. Be concise.",
+		Messages:  history,
+		MaxTokens: 1024,
+	}
+
+	// Filter tools to memory-related ones only.
+	if l.toolRegistry != nil {
+		allTools := l.toolRegistry.ListForAgent(l.config.ToolProfile, l.config.ToolDeny, nil)
+		for _, t := range allTools {
+			if strings.Contains(t.Name, "memory") {
+				flushReq.Tools = append(flushReq.Tools, t)
+			}
+		}
+	}
+
+	// Direct Chat() call — bypasses pacing/retry/cooldown (best-effort).
+	resp, err := fastP.Chat(flushCtx, flushReq)
+	if err != nil {
+		log.Printf("[%s] memory flush: failed (%v), proceeding with compaction", sessionID, err)
+		l.onEvent(Event{Type: EventMemoryFlush, SessionID: sessionID, AgentID: l.config.AgentID, Iteration: iteration, Text: "failed"})
+		return
+	}
+
+	log.Printf("[%s] memory flush: completed (tokens: in=%d out=%d)", sessionID, resp.Usage.InputTokens, resp.Usage.OutputTokens)
+	l.onEvent(Event{Type: EventMemoryFlush, SessionID: sessionID, AgentID: l.config.AgentID, Iteration: iteration, Text: "completed"})
+}
+
+// isSimpleMessage returns true if the latest user message is trivially simple
+// and can be routed to a cheaper model. Conditions (ALL must be true):
+// - iteration > 0 (first iteration always uses configured model)
+// - last user message estimated < 20 tokens
+// - no tool_result in last user message
+// - previous assistant message does NOT end with "?" (user is answering a question)
+func isSimpleMessage(history []canonical.Message, iteration int) bool {
+	if iteration == 0 || len(history) < 2 {
+		return false
+	}
+
+	// Find last user message.
+	var lastUser *canonical.Message
+	var prevAssistant *canonical.Message
+	for i := len(history) - 1; i >= 0; i-- {
+		if lastUser == nil && history[i].Role == "user" {
+			lastUser = &history[i]
+		} else if lastUser != nil && history[i].Role == "assistant" {
+			prevAssistant = &history[i]
+			break
+		}
+	}
+
+	if lastUser == nil {
+		return false
+	}
+
+	// Check for tool_result in last user message.
+	totalChars := 0
+	for _, c := range lastUser.Content {
+		if c.ToolResult != nil {
+			return false
+		}
+		totalChars += len(c.Text)
+	}
+
+	// Estimate tokens (chars / 4). Threshold: 20 tokens = ~80 chars.
+	if totalChars/4 >= 20 {
+		return false
+	}
+
+	// Check if previous assistant message asked a question.
+	if prevAssistant != nil {
+		for _, c := range prevAssistant.Content {
+			if c.Type == "text" && len(c.Text) > 0 && c.Text[len(c.Text)-1] == '?' {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // resolveProvider returns the provider and model to use, consulting the router if available.
+// Uses cooldown-aware resolution to skip rate-limited models.
 func (l *Loop) resolveProvider() (provider.Provider, string) {
-	// If demoted by a 429, use fast tier for remaining iterations.
-	if l.isDemoted() && l.router != nil {
-		fastP, fastModel := l.router.Resolve(provider.TierFast)
-		if fastP != nil {
-			return fastP, fastModel
-		}
-		// Fast tier unavailable — fall through to normal resolution.
-	}
 	if l.router != nil {
 		model := l.config.Model
-		// Combo resolution: "combo:my-chain" → resolve from combo's fallback chain.
+		// Combo resolution: "combo:my-chain" → resolve from combo's fallback chain,
+		// skipping models in cooldown.
 		if provider.IsCombo(model) {
-			p, m, err := l.router.ResolveCombo(provider.ComboName(model))
+			p, m, err := l.router.ResolveComboWithCooldown(provider.ComboName(model))
 			if err == nil {
 				return p, m
 			}

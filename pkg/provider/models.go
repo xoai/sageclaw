@@ -2,15 +2,25 @@ package provider
 
 // ModelInfo describes a model available from a provider.
 type ModelInfo struct {
-	ID           string  `json:"id"`            // e.g. "anthropic/claude-sonnet-4-20250514"
-	Provider     string  `json:"provider"`      // e.g. "anthropic"
-	ModelID      string  `json:"model_id"`      // e.g. "claude-sonnet-4-20250514" (raw API model ID)
-	Name         string  `json:"name"`          // e.g. "Claude Sonnet 4"
-	Tier         string  `json:"tier"`          // "strong", "fast", "vision", "reasoning"
-	InputCost    float64 `json:"input_cost"`    // $ per 1M input tokens
-	OutputCost   float64 `json:"output_cost"`   // $ per 1M output tokens
-	CacheCost    float64 `json:"cache_cost"`    // $ per 1M cached input tokens (0 if no caching)
-	ContextWindow int    `json:"context_window"` // Max context in tokens
+	ID            string  `json:"id"`             // e.g. "anthropic/claude-sonnet-4-20250514"
+	Provider      string  `json:"provider"`       // e.g. "anthropic"
+	ModelID       string  `json:"model_id"`       // e.g. "claude-sonnet-4-20250514" (raw API model ID)
+	Name          string  `json:"name"`           // e.g. "Claude Sonnet 4"
+	Tier          string  `json:"tier"`           // "strong", "fast", "vision", "reasoning"
+	InputCost     float64 `json:"input_cost"`     // $ per 1M input tokens
+	OutputCost    float64 `json:"output_cost"`    // $ per 1M output tokens
+	CacheCost     float64 `json:"cache_cost"`     // $ per 1M cached input tokens (0 if no caching)
+	ThinkingCost  float64 `json:"thinking_cost"`  // $ per 1M thinking/reasoning tokens (0 = use OutputCost)
+	ContextWindow int     `json:"context_window"` // Max context in tokens
+}
+
+// EffectiveThinkingCost returns the cost per 1M thinking tokens.
+// Falls back to OutputCost if ThinkingCost is not explicitly set.
+func (m *ModelInfo) EffectiveThinkingCost() float64 {
+	if m.ThinkingCost > 0 {
+		return m.ThinkingCost
+	}
+	return m.OutputCost
 }
 
 // KnownModels is the registry of well-known models across all providers.

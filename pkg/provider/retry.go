@@ -32,7 +32,12 @@ func DefaultRetryConfig() RetryConfig {
 // DoWithRetry executes an HTTP request with automatic retries on transient errors.
 // Retries on: 429 (rate limit), 500, 502, 503, 504.
 // Parses Retry-After header for 429 responses.
-// The caller is responsible for closing the returned response body.
+//
+// On failure, the returned error is a *ProviderError (extractable via errors.As)
+// with a classified FailoverReason. Non-retryable errors (401, 402, 403, 413)
+// are returned immediately without retrying.
+//
+// The caller is responsible for closing the returned response body on success.
 func DoWithRetry(client *http.Client, req *http.Request, cfg RetryConfig) (*http.Response, error) {
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 4
@@ -49,6 +54,9 @@ func DoWithRetry(client *http.Client, req *http.Request, cfg RetryConfig) (*http
 	}
 
 	var lastErr error
+	var lastStatus int
+	var lastRetryAfter time.Duration
+
 	for attempt := 0; attempt < cfg.MaxAttempts; attempt++ {
 		// Reset body reader for each attempt.
 		if bodyBytes != nil {
@@ -66,20 +74,69 @@ func DoWithRetry(client *http.Client, req *http.Request, cfg RetryConfig) (*http
 
 		resp, err := client.Do(req)
 		if err != nil {
+			// Network error (DNS, connection refused, TLS, timeout).
 			lastErr = err
+			lastStatus = 0
 			continue
 		}
 
+		// Success or non-retryable error.
 		if !isRetryable(resp.StatusCode) {
+			// Non-retryable HTTP errors → return ProviderError immediately.
+			if resp.StatusCode >= 400 {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				return nil, &ProviderError{
+					Reason: ClassifyHTTPError(resp.StatusCode, string(body)),
+					Status: resp.StatusCode,
+					Err:    fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateBody(body)),
+				}
+			}
 			return resp, nil
 		}
 
-		// Build error with Retry-After info for backoff calculation.
+		// Retryable error — capture status and Retry-After for backoff.
+		lastStatus = resp.StatusCode
+		lastRetryAfter = parseRetryAfter(resp)
 		lastErr = retryError(resp)
 		resp.Body.Close()
 	}
 
-	return nil, fmt.Errorf("all %d retries exhausted: %w", cfg.MaxAttempts, lastErr)
+	// All retries exhausted — return classified ProviderError.
+	if lastStatus > 0 {
+		return nil, &ProviderError{
+			Reason:     ClassifyHTTPError(lastStatus, ""),
+			Status:     lastStatus,
+			RetryAfter: lastRetryAfter,
+			Err:        fmt.Errorf("all %d retries exhausted: %w", cfg.MaxAttempts, lastErr),
+		}
+	}
+	// Network error — no HTTP status.
+	return nil, &ProviderError{
+		Reason: ReasonTimeout,
+		Status: 0,
+		Err:    fmt.Errorf("all %d retries exhausted (network): %w", cfg.MaxAttempts, lastErr),
+	}
+}
+
+// parseRetryAfter extracts the Retry-After duration from a response header.
+func parseRetryAfter(resp *http.Response) time.Duration {
+	ra := resp.Header.Get("Retry-After")
+	if ra == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(ra); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	return 0
+}
+
+// truncateBody returns the first 200 bytes of a response body for error messages.
+func truncateBody(body []byte) string {
+	if len(body) > 200 {
+		return string(body[:200]) + "..."
+	}
+	return string(body)
 }
 
 // IsFallbackEligible returns true if the HTTP status code indicates the

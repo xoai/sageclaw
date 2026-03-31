@@ -110,7 +110,7 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 
 	resp, err := c.doWithRetry(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, provider.EnrichError(err, "openai", req.Model)
 	}
 	defer resp.Body.Close()
 
@@ -120,7 +120,7 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return nil, provider.NewHTTPError(resp.StatusCode, string(respBody), "openai", req.Model)
 	}
 
 	return FromOpenAIResponse(respBody)
@@ -140,13 +140,15 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("sending request: %w", err)
+		return nil, &provider.ProviderError{
+			Reason: provider.ReasonTimeout, Provider: "openai", Model: req.Model, Err: err,
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+		return nil, provider.NewHTTPError(resp.StatusCode, string(body), "openai", req.Model)
 	}
 
 	events := make(chan provider.StreamEvent, 32)

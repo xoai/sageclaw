@@ -535,3 +535,107 @@ data: {"type":"message_stop"}
 		t.Error("expected text_delta event")
 	}
 }
+
+func TestToAPIRequest_CacheBreakpoints_LatestTurn(t *testing.T) {
+	// Build a conversation with 6 messages (user/assistant alternating).
+	msgs := []canonical.Message{
+		{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Hello"}}},
+		{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: "Hi there"}}},
+		{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Question 1"}}},
+		{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: "Answer 1"}}},
+		{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Question 2"}}},
+		{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: "Answer 2"}}},
+	}
+
+	req := &canonical.Request{
+		Model: "claude-sonnet-4-20250514", MaxTokens: 4096,
+		System:   "You are helpful.",
+		Messages: msgs,
+		Tools: []canonical.ToolDef{{
+			Name: "read", Description: "Read",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+	}
+
+	data, err := ToAPIRequest(req, true) // cache enabled
+	if err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	apiMsgs := raw["messages"].([]any)
+
+	// Breakpoints should be on the LAST user message (index 4 in conversation,
+	// which maps to message index 4 in apiMsgs) and the LAST assistant before
+	// that (index 3). NOT on 25%/50% positions.
+	//
+	// Find which messages have cache_control.
+	var cachedIndices []int
+	for i, m := range apiMsgs {
+		msg := m.(map[string]any)
+		content, ok := msg["content"].([]any)
+		if !ok {
+			continue // content might be a string for simple messages
+		}
+		for _, block := range content {
+			b, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := b["cache_control"]; ok {
+				cachedIndices = append(cachedIndices, i)
+			}
+		}
+	}
+
+	// Should have exactly 2 cached message positions.
+	if len(cachedIndices) != 2 {
+		t.Fatalf("expected 2 cache breakpoints on messages, got %d at indices %v", len(cachedIndices), cachedIndices)
+	}
+
+	// The cached positions should be at the end (latest turns), not at 25%/50%.
+	// With 6 messages, 25% = index 1, 50% = index 3.
+	// Latest-turn: last user = index 4, last assistant before = index 3.
+	lastIdx := cachedIndices[len(cachedIndices)-1]
+	if lastIdx < 3 {
+		t.Errorf("expected cache breakpoints near end of conversation, got indices %v", cachedIndices)
+	}
+}
+
+func TestToAPIRequest_CacheBreakpoints_TooFewMessages(t *testing.T) {
+	// With < 4 messages, no turn breakpoints should be set.
+	msgs := []canonical.Message{
+		{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Hello"}}},
+		{Role: "assistant", Content: []canonical.Content{{Type: "text", Text: "Hi"}}},
+	}
+
+	req := &canonical.Request{
+		Model: "claude-sonnet-4", MaxTokens: 4096,
+		System:   "Test",
+		Messages: msgs,
+	}
+
+	data, _ := ToAPIRequest(req, true)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	apiMsgs := raw["messages"].([]any)
+	for _, m := range apiMsgs {
+		msg := m.(map[string]any)
+		content, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, block := range content {
+			b, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := b["cache_control"]; ok {
+				t.Error("expected no cache breakpoints on messages with < 4 messages")
+			}
+		}
+	}
+}

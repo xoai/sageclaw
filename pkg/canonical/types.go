@@ -117,8 +117,9 @@ func MessagesHaveAudio(msgs []Message) bool {
 
 // Usage tracks token consumption.
 type Usage struct {
-	InputTokens   int `json:"input_tokens"`
-	OutputTokens  int `json:"output_tokens"`
-	CacheCreation int `json:"cache_creation_input_tokens,omitempty"`
-	CacheRead     int `json:"cache_read_input_tokens,omitempty"`
+	InputTokens    int `json:"input_tokens"`
+	OutputTokens   int `json:"output_tokens"`
+	CacheCreation  int `json:"cache_creation_input_tokens,omitempty"`
+	CacheRead      int `json:"cache_read_input_tokens,omitempty"`
+	ThinkingTokens int `json:"thinking_tokens,omitempty"` // Tokens used for extended thinking/reasoning.
 }

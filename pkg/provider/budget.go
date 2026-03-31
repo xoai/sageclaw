@@ -11,10 +11,11 @@ import (
 
 // BudgetEngine tracks per-request costs and enforces spending limits.
 type BudgetEngine struct {
-	db     *sql.DB
-	mu     sync.RWMutex
-	config BudgetConfig
-	alerts []BudgetAlert
+	db           *sql.DB
+	mu           sync.RWMutex
+	config       BudgetConfig
+	alerts       []BudgetAlert
+	pricingCache *PricingCache // Optional: live pricing from OpenRouter.
 }
 
 // BudgetAlert represents a triggered budget alert.
@@ -49,16 +50,17 @@ type SpendingSummary struct {
 
 // CostEntry represents a single request's cost.
 type CostEntry struct {
-	SessionID     string  `json:"session_id"`
-	AgentID       string  `json:"agent_id"`
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	InputTokens   int     `json:"input_tokens"`
-	OutputTokens  int     `json:"output_tokens"`
-	CacheCreation int     `json:"cache_creation"`
-	CacheRead     int     `json:"cache_read"`
-	CostUSD       float64 `json:"cost_usd"`
-	SavedUSD      float64 `json:"saved_usd"`
+	SessionID      string  `json:"session_id"`
+	AgentID        string  `json:"agent_id"`
+	Provider       string  `json:"provider"`
+	Model          string  `json:"model"`
+	InputTokens    int     `json:"input_tokens"`
+	OutputTokens   int     `json:"output_tokens"`
+	CacheCreation  int     `json:"cache_creation"`
+	CacheRead      int     `json:"cache_read"`
+	ThinkingTokens int     `json:"thinking_tokens"`
+	CostUSD        float64 `json:"cost_usd"`
+	SavedUSD       float64 `json:"saved_usd"`
 }
 
 // DailyCost is cost per day for charts.
@@ -70,8 +72,12 @@ type DailyCost struct {
 }
 
 // NewBudgetEngine creates a budget engine backed by the given DB.
-func NewBudgetEngine(db *sql.DB) *BudgetEngine {
+// pricingCache is optional — pass nil to use only KnownModels for pricing.
+func NewBudgetEngine(db *sql.DB, pricingCache ...*PricingCache) *BudgetEngine {
 	be := &BudgetEngine{db: db}
+	if len(pricingCache) > 0 {
+		be.pricingCache = pricingCache[0]
+	}
 	be.loadConfig()
 	return be
 }
@@ -92,16 +98,16 @@ func (be *BudgetEngine) loadConfig() {
 func (be *BudgetEngine) RecordCost(ctx context.Context, entry CostEntry) error {
 	// Calculate cost from model pricing if not provided.
 	if entry.CostUSD == 0 {
-		entry.CostUSD, entry.SavedUSD = calculateCost(entry)
+		entry.CostUSD, entry.SavedUSD = be.calculateCost(entry)
 	}
 
 	// Insert cost log.
 	_, err := be.db.ExecContext(ctx,
-		`INSERT INTO cost_log (session_id, agent_id, provider, model, input_tokens, output_tokens, cache_creation, cache_read, cost_usd, saved_usd)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO cost_log (session_id, agent_id, provider, model, input_tokens, output_tokens, cache_creation, cache_read, thinking_tokens, cost_usd, saved_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.SessionID, entry.AgentID, entry.Provider, entry.Model,
 		entry.InputTokens, entry.OutputTokens, entry.CacheCreation, entry.CacheRead,
-		entry.CostUSD, entry.SavedUSD)
+		entry.ThinkingTokens, entry.CostUSD, entry.SavedUSD)
 	if err != nil {
 		return fmt.Errorf("recording cost: %w", err)
 	}
@@ -110,33 +116,65 @@ func (be *BudgetEngine) RecordCost(ctx context.Context, entry CostEntry) error {
 	return be.checkLimits(ctx)
 }
 
-func calculateCost(entry CostEntry) (cost, saved float64) {
-	model := FindModel(entry.Model)
-	if model == nil {
-		// Fallback: estimate using Sonnet pricing.
-		cost = float64(entry.InputTokens)/1_000_000*3.0 + float64(entry.OutputTokens)/1_000_000*15.0
-		saved = float64(entry.CacheRead) / 1_000_000 * 2.7
-		return
-	}
+func (be *BudgetEngine) calculateCost(entry CostEntry) (cost, saved float64) {
+	// Try live pricing first, then KnownModels, then Sonnet fallback.
+	pricing := be.resolvePricing(entry.Model)
 
 	// Regular input cost.
 	regularInput := entry.InputTokens - entry.CacheRead
 	if regularInput < 0 {
 		regularInput = 0
 	}
-	cost = float64(regularInput)/1_000_000*model.InputCost +
-		float64(entry.OutputTokens)/1_000_000*model.OutputCost +
-		float64(entry.CacheCreation)/1_000_000*model.InputCost*1.25 + // Cache creation costs 25% more
-		float64(entry.CacheRead)/1_000_000*model.CacheCost
+
+	// Separate thinking tokens from regular output.
+	regularOutput := entry.OutputTokens - entry.ThinkingTokens
+	if regularOutput < 0 {
+		regularOutput = 0
+	}
+	thinkingCost := float64(entry.ThinkingTokens) / 1_000_000 * pricing.EffectiveThinkingCost()
+
+	cost = float64(regularInput)/1_000_000*pricing.InputCost +
+		float64(regularOutput)/1_000_000*pricing.OutputCost +
+		thinkingCost +
+		float64(entry.CacheCreation)/1_000_000*pricing.InputCost*1.25 + // Cache creation costs 25% more
+		float64(entry.CacheRead)/1_000_000*pricing.CacheCost
 
 	// What it would have cost without caching.
-	fullCost := float64(entry.InputTokens)/1_000_000*model.InputCost +
-		float64(entry.OutputTokens)/1_000_000*model.OutputCost
+	fullCost := float64(entry.InputTokens)/1_000_000*pricing.InputCost +
+		float64(regularOutput)/1_000_000*pricing.OutputCost +
+		thinkingCost
 	saved = fullCost - cost
 	if saved < 0 {
 		saved = 0
 	}
 	return
+}
+
+// resolvePricing finds pricing for a model: PricingCache → KnownModels → Sonnet fallback.
+func (be *BudgetEngine) resolvePricing(modelID string) *ModelPricing {
+	// Try live pricing from OpenRouter.
+	if be.pricingCache != nil {
+		if p := be.pricingCache.FindModelPricing(modelID); p != nil {
+			return p
+		}
+	}
+
+	// Try KnownModels.
+	if m := FindModel(modelID); m != nil {
+		return &ModelPricing{
+			InputCost:    m.InputCost,
+			OutputCost:   m.OutputCost,
+			CacheCost:    m.CacheCost,
+			ThinkingCost: m.ThinkingCost,
+		}
+	}
+
+	// Sonnet fallback.
+	return &ModelPricing{
+		InputCost:  3.0,
+		OutputCost: 15.0,
+		CacheCost:  0.3,
+	}
 }
 
 func (be *BudgetEngine) checkLimits(ctx context.Context) error {

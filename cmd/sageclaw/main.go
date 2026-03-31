@@ -974,8 +974,12 @@ Key behaviors:
 		log.Println("security: channel pairing disabled")
 	}
 
+	// Live pricing from OpenRouter (background refresh, 24h TTL).
+	pricingCache := provider.NewPricingCache()
+	pricingCache.StartPricingRefresh(context.Background())
+
 	// Budget engine (must be before pipeline for cost recording).
-	budgetEngine := provider.NewBudgetEngine(appStore.DB())
+	budgetEngine := provider.NewBudgetEngine(appStore.DB(), pricingCache)
 
 	// --- Bus + Pipeline ---
 	msgBus := localbus.New()

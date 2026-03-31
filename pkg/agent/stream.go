@@ -108,6 +108,7 @@ func consumeStream(
 				usage.OutputTokens += ev.Usage.OutputTokens
 				usage.CacheCreation += ev.Usage.CacheCreation
 				usage.CacheRead += ev.Usage.CacheRead
+				usage.ThinkingTokens += ev.Usage.ThinkingTokens
 			}
 			// Anthropic sends stop_reason on usage events (message_delta).
 			if ev.StopReason != "" {
@@ -150,6 +151,11 @@ func consumeStream(
 			Type: "text",
 			Text: textBuf.String(),
 		})
+	}
+
+	// Estimate thinking tokens from accumulated thinking text.
+	if thinkingBuf.Len() > 0 {
+		usage.ThinkingTokens = len([]rune(thinkingBuf.String())) / 4
 	}
 
 	// Add complete tool calls from providers that accumulate internally.
