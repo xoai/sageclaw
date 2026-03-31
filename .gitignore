@@ -44,3 +44,10 @@ skills-lock.json
 sage-memory/
 agents/
 skills/
+
+# Web build artifacts & dependencies
+web/dist/
+web/node_modules/
+
+# Root binary (should build to bin/)
+sageclaw
