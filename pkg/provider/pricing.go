@@ -2,13 +2,8 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -20,10 +15,11 @@ const (
 
 // ModelPricing holds per-model pricing data.
 type ModelPricing struct {
-	InputCost    float64 // $ per 1M input tokens
-	OutputCost   float64 // $ per 1M output tokens
-	CacheCost    float64 // $ per 1M cached input tokens
-	ThinkingCost float64 // $ per 1M thinking tokens (0 = use OutputCost)
+	InputCost         float64 // $ per 1M input tokens
+	OutputCost        float64 // $ per 1M output tokens
+	CacheCost         float64 // $ per 1M cached input tokens
+	ThinkingCost      float64 // $ per 1M thinking tokens (0 = use OutputCost)
+	CacheCreationCost float64 // $ per 1M cache creation tokens (0 = InputCost * 1.25)
 }
 
 // EffectiveThinkingCost returns ThinkingCost or falls back to OutputCost.
@@ -34,117 +30,90 @@ func (p *ModelPricing) EffectiveThinkingCost() float64 {
 	return p.OutputCost
 }
 
-// PricingCache holds live pricing data fetched from OpenRouter.
-// Thread-safe. Falls back to KnownModels when cache is empty or stale.
-type PricingCache struct {
-	mu      sync.RWMutex
-	models  map[string]*ModelPricing // key: model ID (e.g. "claude-sonnet-4-20250514")
-	fetched time.Time
-	ttl     time.Duration
+// EffectiveCacheCreationCost returns CacheCreationCost or falls back to InputCost * 1.25.
+func (p *ModelPricing) EffectiveCacheCreationCost() float64 {
+	if p.CacheCreationCost > 0 {
+		return p.CacheCreationCost
+	}
+	return p.InputCost * 1.25
 }
 
-// NewPricingCache creates a new empty pricing cache.
-func NewPricingCache() *PricingCache {
-	return &PricingCache{
-		models: make(map[string]*ModelPricing),
-		ttl:    pricingDefaultTTL,
-	}
+// PricingResolver resolves pricing for a model by ID.
+type PricingResolver interface {
+	ResolvePricing(modelID string) *ModelPricing
 }
 
-// FindModelPricing resolves pricing for a model.
-// Resolution order: PricingCache → KnownModels → nil.
-func (pc *PricingCache) FindModelPricing(modelID string) *ModelPricing {
-	if pc != nil {
-		pc.mu.RLock()
-		if p, ok := pc.models[modelID]; ok {
-			pc.mu.RUnlock()
-			return p
-		}
-		pc.mu.RUnlock()
-	}
-
-	// Fallback to KnownModels.
-	m := FindModel(modelID)
-	if m != nil {
-		return &ModelPricing{
-			InputCost:    m.InputCost,
-			OutputCost:   m.OutputCost,
-			CacheCost:    m.CacheCost,
-			ThinkingCost: m.ThinkingCost,
-		}
-	}
-	return nil
+// PricingStore is the DB interface the ModelRegistry depends on.
+// Defined here (in provider) to avoid provider → store import.
+// Implemented by the sqlite store and injected at wiring time.
+type PricingStore interface {
+	GetModelPricing(ctx context.Context, modelID string) (*PricingStoreResult, error)
+	// BulkUpdatePricing persists pricing from OpenRouter to discovered_models.
+	// Only updates rows where pricing_source is not "user".
+	BulkUpdatePricing(ctx context.Context, updates []PricingUpdate) error
 }
 
-// IsFresh returns true if the cache has been populated within the TTL.
-func (pc *PricingCache) IsFresh() bool {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	return !pc.fetched.IsZero() && time.Since(pc.fetched) < pc.ttl
+// PricingUpdate is a pricing-only update for a discovered model.
+type PricingUpdate struct {
+	ModelID           string  // Normalized model ID (e.g. "claude-sonnet-4-20250514")
+	Provider          string  // Provider name (e.g. "anthropic")
+	InputCost         float64 // $/1M input tokens
+	OutputCost        float64 // $/1M output tokens
+	CacheCost         float64 // $/1M cached input tokens
+	ThinkingCost      float64 // $/1M thinking tokens
+	CacheCreationCost float64 // $/1M cache creation tokens
+	ContextWindow     int     // Max input tokens (0 = don't update)
+	MaxOutputTokens   int     // Max output tokens (0 = don't update)
+	Source            string  // "openrouter", "known"
 }
 
-// Count returns the number of cached pricing entries.
-func (pc *PricingCache) Count() int {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	return len(pc.models)
+// PricingStoreResult is the result of a pricing lookup from the store layer.
+type PricingStoreResult struct {
+	InputCost         float64
+	OutputCost        float64
+	CacheCost         float64
+	ThinkingCost      float64
+	CacheCreationCost float64
+	ContextWindow     int
+	MaxOutputTokens   int
+	PricingSource     string
 }
 
-// StartPricingRefresh starts a background goroutine that fetches pricing
-// from OpenRouter on startup and every 24 hours. Fail-open: on error,
-// logs a warning and keeps stale data.
-func (pc *PricingCache) StartPricingRefresh(ctx context.Context) {
-	go func() {
-		// Initial fetch.
-		if err := pc.fetchFromOpenRouter(ctx); err != nil {
-			log.Printf("pricing: initial fetch failed: %v (using local pricing)", err)
-		} else {
-			log.Printf("pricing: loaded %d models from OpenRouter", pc.Count())
-		}
-
-		ticker := time.NewTicker(pc.ttl)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := pc.fetchFromOpenRouter(ctx); err != nil {
-					log.Printf("pricing: refresh failed: %v (keeping stale data)", err)
-				} else {
-					log.Printf("pricing: refreshed %d models from OpenRouter", pc.Count())
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
-// fetchFromOpenRouter fetches the model list from OpenRouter and parses pricing.
-func (pc *PricingCache) fetchFromOpenRouter(ctx context.Context) error {
-	fetchCtx, cancel := context.WithTimeout(ctx, pricingFetchTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(fetchCtx, "GET", openRouterModelsURL, nil)
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+// CalculateCost computes cost and cache savings for a single request.
+// Takes individual token counts (not canonical.Usage) to avoid provider → canonical import.
+// When pricing is nil, returns (0, 0) — honest tracking for unknown models.
+func CalculateCost(pricing *ModelPricing, inputTokens, outputTokens, cacheCreation, cacheRead, thinkingTokens int) (cost, saved float64) {
+	if pricing == nil {
+		return 0, 0
 	}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetching: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	// Regular input = total input minus tokens read from cache.
+	regularInput := inputTokens - cacheRead
+	if regularInput < 0 {
+		regularInput = 0
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading body: %w", err)
+	// Separate thinking tokens from regular output.
+	regularOutput := outputTokens - thinkingTokens
+	if regularOutput < 0 {
+		regularOutput = 0
 	}
 
-	return pc.parseOpenRouterResponse(body)
+	cost = float64(regularInput)/1_000_000*pricing.InputCost +
+		float64(regularOutput)/1_000_000*pricing.OutputCost +
+		float64(thinkingTokens)/1_000_000*pricing.EffectiveThinkingCost() +
+		float64(cacheCreation)/1_000_000*pricing.EffectiveCacheCreationCost() +
+		float64(cacheRead)/1_000_000*pricing.CacheCost
+
+	// Savings: what it would have cost without caching.
+	fullCost := float64(inputTokens)/1_000_000*pricing.InputCost +
+		float64(regularOutput)/1_000_000*pricing.OutputCost +
+		float64(thinkingTokens)/1_000_000*pricing.EffectiveThinkingCost()
+	saved = fullCost - cost
+	if saved < 0 {
+		saved = 0
+	}
+	return
 }
 
 // openRouterResponse is the response from /api/v1/models.
@@ -153,60 +122,21 @@ type openRouterResponse struct {
 }
 
 type openRouterModel struct {
-	ID      string               `json:"id"`      // e.g. "anthropic/claude-sonnet-4"
-	Pricing *openRouterPricing   `json:"pricing"`
+	ID            string             `json:"id"` // e.g. "anthropic/claude-sonnet-4"
+	ContextLength int                `json:"context_length"`
+	Pricing       *openRouterPricing `json:"pricing"`
+	TopProvider   *openRouterTop     `json:"top_provider"`
+}
+
+type openRouterTop struct {
+	MaxCompletionTokens int `json:"max_completion_tokens"`
 }
 
 type openRouterPricing struct {
-	Prompt     string `json:"prompt"`     // $ per token (string)
-	Completion string `json:"completion"` // $ per token (string)
-}
-
-// parseOpenRouterResponse parses OpenRouter's model list and updates the cache.
-func (pc *PricingCache) parseOpenRouterResponse(body []byte) error {
-	var resp openRouterResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return fmt.Errorf("parsing response: %w", err)
-	}
-
-	newModels := make(map[string]*ModelPricing)
-
-	for _, m := range resp.Data {
-		if m.Pricing == nil {
-			continue
-		}
-
-		inputPerToken := parseFloat(m.Pricing.Prompt)
-		outputPerToken := parseFloat(m.Pricing.Completion)
-		if inputPerToken == 0 && outputPerToken == 0 {
-			continue // Free or unparseable — skip.
-		}
-
-		// Convert $/token to $/1M tokens.
-		pricing := &ModelPricing{
-			InputCost:  inputPerToken * 1_000_000,
-			OutputCost: outputPerToken * 1_000_000,
-			CacheCost:  inputPerToken * 1_000_000 * 0.1, // Estimate: cached = 10% of input.
-		}
-
-		// Store under the normalized model ID.
-		normalizedID := normalizeModelID(m.ID)
-		if normalizedID != "" {
-			newModels[normalizedID] = pricing
-		}
-
-		// Also try to match against KnownModels for local ID mapping.
-		if matched := matchToKnownModel(m.ID); matched != "" {
-			newModels[matched] = pricing
-		}
-	}
-
-	pc.mu.Lock()
-	pc.models = newModels
-	pc.fetched = time.Now()
-	pc.mu.Unlock()
-
-	return nil
+	Prompt          string `json:"prompt"`            // $ per token (string)
+	Completion      string `json:"completion"`        // $ per token (string)
+	InputCacheRead  string `json:"input_cache_read"`  // $ per token for cached input reads
+	InputCacheWrite string `json:"input_cache_write"` // $ per token for cache creation
 }
 
 // normalizeModelID strips the provider prefix from an OpenRouter model ID

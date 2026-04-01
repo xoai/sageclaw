@@ -27,10 +27,11 @@ type ConsentGrant struct {
 // "Always allow" decisions are persisted to survive restarts.
 // Denials are tracked as cooldown timestamps (soft deny).
 type PersistentConsentStore struct {
-	mu       sync.RWMutex
-	session  map[string]map[string]bool      // sessionID -> group -> granted
-	cooldown map[string]map[string]time.Time // sessionID -> group -> deny timestamp
-	db       *sql.DB
+	mu        sync.RWMutex
+	session   map[string]map[string]bool      // sessionID -> group -> granted
+	cooldown  map[string]map[string]time.Time // sessionID -> group -> deny timestamp
+	toolDeny  map[string]map[string]bool      // sessionID -> toolName -> denied (per-tool session block)
+	db        *sql.DB
 }
 
 // NewPersistentConsentStore creates a consent store backed by SQLite.
@@ -38,6 +39,7 @@ func NewPersistentConsentStore(db *sql.DB) *PersistentConsentStore {
 	return &PersistentConsentStore{
 		session:  make(map[string]map[string]bool),
 		cooldown: make(map[string]map[string]time.Time),
+		toolDeny: make(map[string]map[string]bool),
 		db:       db,
 	}
 }
@@ -196,6 +198,26 @@ func (s *PersistentConsentStore) ClearSession(sessionID string) {
 	defer s.mu.Unlock()
 	delete(s.session, sessionID)
 	delete(s.cooldown, sessionID)
+	delete(s.toolDeny, sessionID)
+}
+
+// DenyTool blocks a specific tool for the session. Unlike group-level Deny (cooldown),
+// this is a hard block — the tool is denied for the remainder of the session.
+// Used by denial escalation: after 3 consecutive denials, the tool is session-blocked.
+func (s *PersistentConsentStore) DenyTool(sessionID, toolName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.toolDeny[sessionID] == nil {
+		s.toolDeny[sessionID] = make(map[string]bool)
+	}
+	s.toolDeny[sessionID][toolName] = true
+}
+
+// IsToolDenied returns true if a specific tool has been session-blocked via DenyTool.
+func (s *PersistentConsentStore) IsToolDenied(sessionID, toolName string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.toolDeny[sessionID][toolName]
 }
 
 // InvalidateSessionGrants clears session grants for groups not in the new profile.

@@ -272,6 +272,27 @@ func (m *mockPolicyStore) DeleteTask(context.Context, string) error { panic("not
 func (m *mockPolicyStore) DeleteTerminalTasks(context.Context, string) (int, error) {
 	panic("not implemented")
 }
+func (m *mockPolicyStore) GetDelegationRecord(context.Context, string) (*store.DelegationRecord, error) {
+	return nil, nil
+}
+func (m *mockPolicyStore) RefreshDiscoveredModels(context.Context, string, []store.DiscoveredModel) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) GetModelPricing(context.Context, string) (*store.DiscoveredModel, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) UpsertModelPricingOverride(context.Context, store.ModelPricingOverride) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) DeleteModelPricingOverride(context.Context, string) error {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) ListModelPricingOverrides(context.Context) ([]store.ModelPricingOverride, error) {
+	panic("not implemented")
+}
+func (m *mockPolicyStore) BulkUpdateModelPricing(context.Context, []store.ModelPricingBulk) error {
+	panic("not implemented")
+}
 func (m *mockPolicyStore) DB() *sql.DB { return nil }
 func (m *mockPolicyStore) Close() error { return nil }
 

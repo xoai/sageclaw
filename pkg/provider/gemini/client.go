@@ -20,16 +20,24 @@ import (
 const defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 
 type Client struct {
-	apiKey  string
-	baseURL string
-	model   string
-	client  *http.Client
+	apiKey       string
+	baseURL      string
+	model        string
+	client       *http.Client
+	cacheManager *CacheManager // Optional: context caching for system prompts.
 }
 
 type Option func(*Client)
 
-func WithBaseURL(url string) Option { return func(c *Client) { c.baseURL = url } }
-func WithModel(m string) Option    { return func(c *Client) { c.model = m } }
+func WithBaseURL(url string) Option   { return func(c *Client) { c.baseURL = url } }
+func WithModel(m string) Option      { return func(c *Client) { c.model = m } }
+func WithCaching(enabled bool) Option {
+	return func(c *Client) {
+		if enabled {
+			c.cacheManager = NewCacheManager(c.apiKey, c.baseURL)
+		}
+	}
+}
 
 func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
@@ -45,6 +53,23 @@ func NewClient(apiKey string, opts ...Option) *Client {
 }
 
 func (c *Client) Name() string { return "gemini" }
+
+// applyCaching uses the CacheManager to set cached content on the request.
+// If caching is enabled and SystemParts has cacheable content, the cache ID
+// is injected via Options["cached_content"] for toGeminiRequest to pick up.
+func (c *Client) applyCaching(ctx context.Context, req *canonical.Request, model string) {
+	if c.cacheManager == nil || len(req.SystemParts) == 0 {
+		return
+	}
+	cacheID := c.cacheManager.EnsureCache(ctx, req.SystemParts, model)
+	if cacheID == "" {
+		return
+	}
+	if req.Options == nil {
+		req.Options = make(map[string]any)
+	}
+	req.Options["cached_content"] = cacheID
+}
 
 func (c *Client) Healthy(ctx context.Context) bool {
 	url := fmt.Sprintf("%s/models?key=%s", c.baseURL, c.apiKey)
@@ -99,6 +124,7 @@ func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
 
 func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.Response, error) {
 	model := c.resolveModel(req.Model)
+	c.applyCaching(ctx, req, model)
 	body := toGeminiRequest(req)
 
 	jsonBody, _ := json.Marshal(body)
@@ -128,6 +154,7 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 
 func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan provider.StreamEvent, error) {
 	model := c.resolveModel(req.Model)
+	c.applyCaching(ctx, req, model)
 	body := toGeminiRequest(req)
 	jsonBody, _ := json.Marshal(body)
 
@@ -158,6 +185,7 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 
 		hasToolCalls := false
 		callSeq := 0 // Monotonic counter for unique tool call IDs across chunks.
+		var prevUsage geminiUsageMetadata // Track previous cumulative usage for delta conversion.
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line for large responses.
 		for scanner.Scan() {
@@ -180,16 +208,21 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 				continue
 			}
 
-			// Emit usage if present (typically in the last chunk).
+			// Emit usage delta. Gemini reports cumulative usage on every chunk,
+			// but consumeStream uses += (correct for Anthropic's deltas).
+			// Convert cumulative → delta so the shared accumulation works.
 			if chunk.UsageMetadata != nil {
+				cur := *chunk.UsageMetadata
 				events <- provider.StreamEvent{
 					Type: "usage",
 					Usage: &canonical.Usage{
-						InputTokens:  chunk.UsageMetadata.PromptTokenCount,
-						OutputTokens: chunk.UsageMetadata.CandidatesTokenCount,
-						CacheRead:    chunk.UsageMetadata.CachedContentTokenCount,
+						InputTokens:    cur.PromptTokenCount - prevUsage.PromptTokenCount,
+						OutputTokens:   cur.CandidatesTokenCount - prevUsage.CandidatesTokenCount,
+						CacheRead:      cur.CachedContentTokenCount - prevUsage.CachedContentTokenCount,
+						ThinkingTokens: cur.ThoughtsTokenCount - prevUsage.ThoughtsTokenCount,
 					},
 				}
+				prevUsage = cur
 			}
 
 			for _, candidate := range chunk.Candidates {
@@ -309,9 +342,10 @@ type geminiResponse struct {
 }
 
 type geminiUsageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
 }
 
 type geminiCandidate struct {
@@ -628,9 +662,10 @@ func fromGeminiResponse(body []byte) (*canonical.Response, error) {
 	// Populate usage from Gemini metadata.
 	if gr.UsageMetadata != nil {
 		resp.Usage = canonical.Usage{
-			InputTokens:  gr.UsageMetadata.PromptTokenCount,
-			OutputTokens: gr.UsageMetadata.CandidatesTokenCount,
-			CacheRead:    gr.UsageMetadata.CachedContentTokenCount,
+			InputTokens:    gr.UsageMetadata.PromptTokenCount,
+			OutputTokens:   gr.UsageMetadata.CandidatesTokenCount,
+			CacheRead:      gr.UsageMetadata.CachedContentTokenCount,
+			ThinkingTokens: gr.UsageMetadata.ThoughtsTokenCount,
 		}
 	}
 

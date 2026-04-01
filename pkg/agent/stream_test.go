@@ -28,7 +28,7 @@ func TestConsumeStream_CompletePath(t *testing.T) {
 	events <- provider.StreamEvent{Type: "done", StopReason: "tool_use"}
 	close(events)
 
-	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {})
+	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {}, nil)
 
 	if len(result.Message.Content) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(result.Message.Content))
@@ -84,7 +84,7 @@ func TestConsumeStream_DeltaPath(t *testing.T) {
 	events <- provider.StreamEvent{Type: "done", StopReason: "tool_use"}
 	close(events)
 
-	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {})
+	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {}, nil)
 
 	if len(result.Message.Content) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(result.Message.Content))
@@ -132,7 +132,7 @@ func TestConsumeStream_TextAndToolCall(t *testing.T) {
 		if ev.Type == EventChunk {
 			chunks = append(chunks, ev.Text)
 		}
-	})
+	}, nil)
 
 	if len(result.Message.Content) != 2 {
 		t.Fatalf("expected 2 content blocks, got %d", len(result.Message.Content))
@@ -178,7 +178,7 @@ func TestConsumeStream_MetaPreferredOverToolMeta(t *testing.T) {
 	events <- provider.StreamEvent{Type: "done"}
 	close(events)
 
-	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {})
+	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {}, nil)
 
 	if len(result.Message.Content) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(result.Message.Content))
@@ -214,7 +214,7 @@ func TestConsumeStream_ToolMetaFallback(t *testing.T) {
 	events <- provider.StreamEvent{Type: "done"}
 	close(events)
 
-	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {})
+	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {}, nil)
 	tc := result.Message.Content[0].ToolCall
 	if tc.Meta["thought_signature"] != "old_sig" {
 		t.Errorf("expected ToolMeta fallback, got %v", tc.Meta)
@@ -247,7 +247,7 @@ func TestConsumeStream_ThinkingAccumulation(t *testing.T) {
 	events <- provider.StreamEvent{Type: "done", StopReason: "end_turn"}
 	close(events)
 
-	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {})
+	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {}, nil)
 
 	if len(result.Message.Content) != 2 {
 		t.Fatalf("expected 2 content blocks (thinking + text), got %d", len(result.Message.Content))
@@ -291,7 +291,7 @@ func TestConsumeStream_StopReasonFromUsageEvent(t *testing.T) {
 	events <- provider.StreamEvent{Type: "done"} // No StopReason here.
 	close(events)
 
-	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {})
+	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {}, nil)
 
 	if result.StopReason != "tool_use" {
 		t.Errorf("expected StopReason=tool_use, got %q", result.StopReason)
@@ -312,7 +312,7 @@ func TestConsumeStream_CompleteToolCallType(t *testing.T) {
 	events <- provider.StreamEvent{Type: "done", StopReason: "tool_use"}
 	close(events)
 
-	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {})
+	result := consumeStream(context.Background(), events, "sess1", 1, func(Event) {}, nil)
 
 	if len(result.Message.Content) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(result.Message.Content))

@@ -16,19 +16,19 @@ func RegisterGraph(reg *Registry, graph memory.GraphEngine, engine ...memory.Mem
 		json.RawMessage(`{"type":"object","properties":{"source_id":{"type":"string","description":"Source memory ID"},"target_id":{"type":"string","description":"Target memory ID"},"relation":{"type":"string","description":"Relationship type (e.g. depends_on, contains, owned_by)"}},"required":["source_id","target_id","relation"]}`),
 		GroupGraph, RiskSafe, "builtin", memoryLink(graph))
 
-	reg.RegisterWithGroup("memory_graph", "Traverse relationships from a memory",
+	reg.RegisterFull("memory_graph", "Traverse relationships from a memory",
 		json.RawMessage(`{"type":"object","properties":{"start_id":{"type":"string","description":"Starting memory ID"},"direction":{"type":"string","description":"Traversal direction: outbound, inbound, or both","default":"outbound"},"depth":{"type":"integer","description":"Max traversal depth (1-5, default 2)","default":2}},"required":["start_id"]}`),
-		GroupGraph, RiskSafe, "builtin", memoryGraph(graph))
+		GroupGraph, RiskSafe, "builtin", true, memoryGraph(graph))
 
 	// Register knowledge graph search if memory engine is available.
 	if len(engine) > 0 && engine[0] != nil {
-		reg.RegisterWithGroup("knowledge_graph_search", "Search the knowledge graph for entities by name or description",
+		reg.RegisterFull("knowledge_graph_search", "Search the knowledge graph for entities by name or description",
 			json.RawMessage(`{"type":"object","properties":{`+
 				`"query":{"type":"string","description":"Search query (entity name or description)"},`+
 				`"type":{"type":"string","description":"Entity type filter (e.g. person, project, concept)"},`+
 				`"max_results":{"type":"integer","description":"Maximum results (default 5)"}`+
 				`},"required":["query"]}`),
-			GroupGraph, RiskSafe, "builtin", knowledgeGraphSearch(engine[0]))
+			GroupGraph, RiskSafe, "builtin", true, knowledgeGraphSearch(engine[0]))
 	}
 }
 

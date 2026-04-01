@@ -11,14 +11,19 @@ import (
 // --- Request translation: canonical → OpenAI ---
 
 type chatRequest struct {
-	Model               string        `json:"model"`
-	Messages            []chatMessage `json:"messages"`
-	Tools               []chatTool    `json:"tools,omitempty"`
-	MaxTokens           int           `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"` // o-series models.
-	Temperature         *float64      `json:"temperature,omitempty"`
-	ReasoningEffort     string        `json:"reasoning_effort,omitempty"` // o-series: "low", "medium", "high".
-	Stream              bool          `json:"stream,omitempty"`
+	Model               string              `json:"model"`
+	Messages            []chatMessage       `json:"messages"`
+	Tools               []chatTool          `json:"tools,omitempty"`
+	MaxTokens           int                 `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int                 `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64            `json:"temperature,omitempty"`
+	ReasoningEffort     string              `json:"reasoning_effort,omitempty"` // o-series: "low", "medium", "high".
+	Stream              bool                `json:"stream,omitempty"`
+	StreamOptions       *chatStreamOptions  `json:"stream_options,omitempty"`
+}
+
+type chatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMessage struct {
@@ -62,6 +67,22 @@ func isOSeries(model string) bool {
 	return false
 }
 
+// usesLegacyMaxTokens returns true for older OpenAI models that still require
+// the deprecated max_tokens parameter instead of max_completion_tokens.
+// New models (gpt-5+, o-series) all use max_completion_tokens.
+func usesLegacyMaxTokens(model string) bool {
+	for _, prefix := range []string{"gpt-4o", "gpt-4-", "gpt-4.", "gpt-3", "chatgpt-4o"} {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	// Exact match for "gpt-4" without suffix.
+	if model == "gpt-4" {
+		return true
+	}
+	return false
+}
+
 // ToOpenAIRequest converts a canonical request to OpenAI Chat Completions format.
 func ToOpenAIRequest(req *canonical.Request) ([]byte, error) {
 	cr := chatRequest{
@@ -69,16 +90,28 @@ func ToOpenAIRequest(req *canonical.Request) ([]byte, error) {
 		Stream: req.Stream,
 	}
 
-	// o-series models use max_completion_tokens instead of max_tokens.
+	// Request usage data in streaming responses.
+	// Some providers (Ollama) don't support stream_options — they set "no_stream_options" in Options.
+	if req.Stream && (req.Options == nil || req.Options["no_stream_options"] == nil) {
+		cr.StreamOptions = &chatStreamOptions{IncludeUsage: true}
+	}
+
 	if isOSeries(req.Model) {
+		// Reasoning models: max_completion_tokens, reasoning_effort, no temperature.
 		cr.MaxCompletionTokens = req.MaxTokens
-		// Map thinking_level to reasoning_effort.
 		if level, _ := req.Options["thinking_level"].(string); level != "" {
 			cr.ReasoningEffort = level
 		}
-		// o-series does not support temperature.
-	} else {
+	} else if usesLegacyMaxTokens(req.Model) {
+		// Legacy models (gpt-4o, gpt-4, gpt-3.5): max_tokens + temperature.
 		cr.MaxTokens = req.MaxTokens
+		if req.Temperature > 0 {
+			t := req.Temperature
+			cr.Temperature = &t
+		}
+	} else {
+		// All other models (gpt-5+, future models): max_completion_tokens + temperature.
+		cr.MaxCompletionTokens = req.MaxTokens
 		if req.Temperature > 0 {
 			t := req.Temperature
 			cr.Temperature = &t
@@ -196,9 +229,27 @@ type chatRespMsg struct {
 }
 
 type chatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens           int                     `json:"prompt_tokens"`
+	CompletionTokens       int                     `json:"completion_tokens"`
+	TotalTokens            int                     `json:"total_tokens"`
+	PromptTokensDetails    *promptTokensDetails    `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// promptTokensDetails contains the breakdown of prompt token usage.
+// OpenAI returns this for models that support prompt caching.
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+	AudioTokens  int `json:"audio_tokens"`
+}
+
+// completionTokensDetails contains the breakdown of completion token usage.
+// OpenAI returns this for o-series models with reasoning tokens.
+type completionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+	AudioTokens     int `json:"audio_tokens"`
+	AcceptedPredictionTokens int `json:"accepted_prediction_tokens"`
+	RejectedPredictionTokens int `json:"rejected_prediction_tokens"`
 }
 
 // FromOpenAIResponse converts an OpenAI response to canonical format.
@@ -237,12 +288,25 @@ func FromOpenAIResponse(data []byte) (*canonical.Response, error) {
 		Messages: []canonical.Message{
 			{Role: "assistant", Content: content},
 		},
-		Usage: canonical.Usage{
-			InputTokens:  cr.Usage.PromptTokens,
-			OutputTokens: cr.Usage.CompletionTokens,
-		},
+		Usage: openAIUsageToCanonical(cr.Usage),
 		StopReason: stopReason,
 	}, nil
+}
+
+// openAIUsageToCanonical converts OpenAI's usage (with optional detail breakdowns)
+// to canonical.Usage. Extracts cached_tokens and reasoning_tokens when available.
+func openAIUsageToCanonical(u chatUsage) canonical.Usage {
+	usage := canonical.Usage{
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
+	}
+	if u.PromptTokensDetails != nil {
+		usage.CacheRead = u.PromptTokensDetails.CachedTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		usage.ThinkingTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+	return usage
 }
 
 func mapFinishReason(reason string) string {

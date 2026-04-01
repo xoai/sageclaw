@@ -225,3 +225,39 @@ func TestHtmlToMarkdown_Hr(t *testing.T) {
 		t.Errorf("expected horizontal rule, got: %s", md)
 	}
 }
+
+func TestMarkdownToText_StripsFormatting(t *testing.T) {
+	md := "## Heading\n\n**bold** and *italic* text.\n\n[link](https://example.com)\n\n`code`\n\n```go\nfmt.Println()\n```\n\n- item 1\n- item 2\n\n1. first\n2. second\n\n![alt](image.png)"
+	text := markdownToText(md)
+
+	// Should strip markdown syntax.
+	if strings.Contains(text, "##") {
+		t.Error("heading markers should be stripped")
+	}
+	if strings.Contains(text, "**") {
+		t.Error("bold markers should be stripped")
+	}
+	if strings.Contains(text, "[link]") {
+		t.Error("link syntax should be stripped")
+	}
+	if strings.Contains(text, "```") {
+		t.Error("code fence should be stripped")
+	}
+	// Should preserve text content.
+	if !strings.Contains(text, "bold") {
+		t.Error("bold text content should be preserved")
+	}
+	if !strings.Contains(text, "link") {
+		t.Error("link text should be preserved")
+	}
+	if !strings.Contains(text, "item 1") {
+		t.Error("list item text should be preserved")
+	}
+}
+
+func TestMarkdownToText_EmptyInput(t *testing.T) {
+	text := markdownToText("")
+	if text != "" {
+		t.Errorf("expected empty output, got: %s", text)
+	}
+}

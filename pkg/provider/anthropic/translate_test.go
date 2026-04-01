@@ -639,3 +639,124 @@ func TestToAPIRequest_CacheBreakpoints_TooFewMessages(t *testing.T) {
 		}
 	}
 }
+
+func TestToAPIRequest_SystemParts_MultiBlock(t *testing.T) {
+	req := &canonical.Request{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		SystemParts: []canonical.SystemPart{
+			{Content: "Base prompt", Cacheable: true},
+			{Content: "Dynamic injections", Cacheable: false},
+			{Content: "Task context", Cacheable: false},
+		},
+		System: "Base prompt\n\nDynamic injections\n\nTask context",
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Hello"}}},
+		},
+	}
+
+	data, err := ToAPIRequest(req, true)
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	// System should be an array of blocks.
+	systemRaw, ok := raw["system"].([]any)
+	if !ok {
+		t.Fatalf("expected system to be array, got %T", raw["system"])
+	}
+	if len(systemRaw) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(systemRaw))
+	}
+
+	// Block 0: cacheable — should have cache_control.
+	block0 := systemRaw[0].(map[string]any)
+	if block0["text"] != "Base prompt" {
+		t.Errorf("block 0 text: %v", block0["text"])
+	}
+	if block0["cache_control"] == nil {
+		t.Error("expected cache_control on cacheable block 0")
+	}
+
+	// Block 1: not cacheable — no cache_control.
+	block1 := systemRaw[1].(map[string]any)
+	if block1["text"] != "Dynamic injections" {
+		t.Errorf("block 1 text: %v", block1["text"])
+	}
+	if block1["cache_control"] != nil {
+		t.Error("expected no cache_control on non-cacheable block 1")
+	}
+
+	// Block 2: not cacheable — no cache_control.
+	block2 := systemRaw[2].(map[string]any)
+	if block2["cache_control"] != nil {
+		t.Error("expected no cache_control on non-cacheable block 2")
+	}
+}
+
+func TestToAPIRequest_SystemParts_CacheDisabled(t *testing.T) {
+	req := &canonical.Request{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		SystemParts: []canonical.SystemPart{
+			{Content: "Base prompt", Cacheable: true},
+			{Content: "Injections", Cacheable: false},
+		},
+		System: "Base prompt\n\nInjections",
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Hello"}}},
+		},
+	}
+
+	data, err := ToAPIRequest(req, false) // Cache disabled.
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	systemRaw := raw["system"].([]any)
+	for i, block := range systemRaw {
+		b := block.(map[string]any)
+		if b["cache_control"] != nil {
+			t.Errorf("block %d has cache_control when caching is disabled", i)
+		}
+	}
+}
+
+func TestToAPIRequest_SystemParts_EmptyFallback(t *testing.T) {
+	// No SystemParts — should fall back to System string.
+	req := &canonical.Request{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		System:    "Fallback prompt",
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "Hello"}}},
+		},
+	}
+
+	data, err := ToAPIRequest(req, true)
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	// Should be a single-block array (legacy behavior).
+	systemRaw := raw["system"].([]any)
+	if len(systemRaw) != 1 {
+		t.Fatalf("expected 1 system block (fallback), got %d", len(systemRaw))
+	}
+	block := systemRaw[0].(map[string]any)
+	if block["text"] != "Fallback prompt" {
+		t.Errorf("wrong text: %v", block["text"])
+	}
+	if block["cache_control"] == nil {
+		t.Error("expected cache_control on fallback block with caching enabled")
+	}
+}

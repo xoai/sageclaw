@@ -12,8 +12,10 @@ const (
 	EventChunk         EventType = "chunk"
 	EventToolCall      EventType = "tool.call"
 	EventToolResult    EventType = "tool.result"
-	EventConsentNeeded EventType = "consent.needed"
-	EventConsentResult EventType = "consent.result"
+	EventToolCallStarted EventType = "tool.call.started" // Emitted when a tool begins execution (streaming executor).
+	EventConsentNeeded    EventType = "consent.needed"
+	EventConsentResult   EventType = "consent.result"
+	EventConsentEscalated EventType = "consent.escalated" // Tool denied 3+ times → session-blocked.
 	EventVoiceStarted  EventType = "voice.started"
 	EventVoiceAudio    EventType = "voice.audio"    // Audio chunk received from model.
 	EventVoiceText     EventType = "voice.text"     // Transcript received.

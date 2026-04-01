@@ -11,11 +11,11 @@ import (
 
 // BudgetEngine tracks per-request costs and enforces spending limits.
 type BudgetEngine struct {
-	db           *sql.DB
-	mu           sync.RWMutex
-	config       BudgetConfig
-	alerts       []BudgetAlert
-	pricingCache *PricingCache // Optional: live pricing from OpenRouter.
+	db       *sql.DB
+	mu       sync.RWMutex
+	config   BudgetConfig
+	alerts   []BudgetAlert
+	resolver PricingResolver // Unified pricing via ModelRegistry.
 }
 
 // BudgetAlert represents a triggered budget alert.
@@ -72,14 +72,17 @@ type DailyCost struct {
 }
 
 // NewBudgetEngine creates a budget engine backed by the given DB.
-// pricingCache is optional — pass nil to use only KnownModels for pricing.
-func NewBudgetEngine(db *sql.DB, pricingCache ...*PricingCache) *BudgetEngine {
+func NewBudgetEngine(db *sql.DB) *BudgetEngine {
 	be := &BudgetEngine{db: db}
-	if len(pricingCache) > 0 {
-		be.pricingCache = pricingCache[0]
-	}
 	be.loadConfig()
 	return be
+}
+
+// SetResolver sets the unified pricing resolver for cost calculation.
+func (be *BudgetEngine) SetResolver(r PricingResolver) {
+	be.mu.Lock()
+	be.resolver = r
+	be.mu.Unlock()
 }
 
 func (be *BudgetEngine) loadConfig() {
@@ -117,64 +120,22 @@ func (be *BudgetEngine) RecordCost(ctx context.Context, entry CostEntry) error {
 }
 
 func (be *BudgetEngine) calculateCost(entry CostEntry) (cost, saved float64) {
-	// Try live pricing first, then KnownModels, then Sonnet fallback.
 	pricing := be.resolvePricing(entry.Model)
-
-	// Regular input cost.
-	regularInput := entry.InputTokens - entry.CacheRead
-	if regularInput < 0 {
-		regularInput = 0
-	}
-
-	// Separate thinking tokens from regular output.
-	regularOutput := entry.OutputTokens - entry.ThinkingTokens
-	if regularOutput < 0 {
-		regularOutput = 0
-	}
-	thinkingCost := float64(entry.ThinkingTokens) / 1_000_000 * pricing.EffectiveThinkingCost()
-
-	cost = float64(regularInput)/1_000_000*pricing.InputCost +
-		float64(regularOutput)/1_000_000*pricing.OutputCost +
-		thinkingCost +
-		float64(entry.CacheCreation)/1_000_000*pricing.InputCost*1.25 + // Cache creation costs 25% more
-		float64(entry.CacheRead)/1_000_000*pricing.CacheCost
-
-	// What it would have cost without caching.
-	fullCost := float64(entry.InputTokens)/1_000_000*pricing.InputCost +
-		float64(regularOutput)/1_000_000*pricing.OutputCost +
-		thinkingCost
-	saved = fullCost - cost
-	if saved < 0 {
-		saved = 0
-	}
-	return
+	return CalculateCost(pricing, entry.InputTokens, entry.OutputTokens,
+		entry.CacheCreation, entry.CacheRead, entry.ThinkingTokens)
 }
 
-// resolvePricing finds pricing for a model: PricingCache → KnownModels → Sonnet fallback.
+// resolvePricing finds pricing for a model via the unified ModelRegistry.
+// Returns nil for unknown models (cost = $0).
 func (be *BudgetEngine) resolvePricing(modelID string) *ModelPricing {
-	// Try live pricing from OpenRouter.
-	if be.pricingCache != nil {
-		if p := be.pricingCache.FindModelPricing(modelID); p != nil {
-			return p
-		}
-	}
+	be.mu.RLock()
+	r := be.resolver
+	be.mu.RUnlock()
 
-	// Try KnownModels.
-	if m := FindModel(modelID); m != nil {
-		return &ModelPricing{
-			InputCost:    m.InputCost,
-			OutputCost:   m.OutputCost,
-			CacheCost:    m.CacheCost,
-			ThinkingCost: m.ThinkingCost,
-		}
+	if r != nil {
+		return r.ResolvePricing(modelID)
 	}
-
-	// Sonnet fallback.
-	return &ModelPricing{
-		InputCost:  3.0,
-		OutputCost: 15.0,
-		CacheCost:  0.3,
-	}
+	return nil // Resolver not yet set (startup race) — cost = $0.
 }
 
 func (be *BudgetEngine) checkLimits(ctx context.Context) error {
@@ -409,7 +370,8 @@ func (be *BudgetEngine) GetTopModels(ctx context.Context, limit int) []map[strin
 
 	rows, err := be.db.QueryContext(ctx,
 		`SELECT model, provider, SUM(cost_usd) as total, COUNT(*) as requests,
-			SUM(input_tokens) as input, SUM(output_tokens) as output
+			SUM(input_tokens) as input, SUM(output_tokens) as output,
+			SUM(thinking_tokens) as thinking
 		 FROM cost_log
 		 WHERE created_at >= date('now', 'start of month')
 		 GROUP BY model, provider ORDER BY total DESC LIMIT ?`, limit)
@@ -422,12 +384,16 @@ func (be *BudgetEngine) GetTopModels(ctx context.Context, limit int) []map[strin
 	for rows.Next() {
 		var model, prov string
 		var total float64
-		var requests, input, output int
-		rows.Scan(&model, &prov, &total, &requests, &input, &output)
-		models = append(models, map[string]any{
+		var requests, input, output, thinking int
+		rows.Scan(&model, &prov, &total, &requests, &input, &output, &thinking)
+		entry := map[string]any{
 			"model": model, "provider": prov, "cost_usd": total,
 			"requests": requests, "input_tokens": input, "output_tokens": output,
-		})
+		}
+		if thinking > 0 {
+			entry["thinking_tokens"] = thinking
+		}
+		models = append(models, entry)
 	}
 	return models
 }

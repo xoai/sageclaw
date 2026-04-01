@@ -62,6 +62,48 @@ import (
 
 const version = "0.4.0-dev"
 
+// pricingStoreAdapter bridges store.Store to provider.PricingStore.
+// Avoids provider → store import by adapting at the wiring layer.
+type pricingStoreAdapter struct {
+	store store.Store
+}
+
+func (a *pricingStoreAdapter) GetModelPricing(ctx context.Context, modelID string) (*provider.PricingStoreResult, error) {
+	m, err := a.store.GetModelPricing(ctx, modelID)
+	if err != nil || m == nil {
+		return nil, err
+	}
+	return &provider.PricingStoreResult{
+		InputCost:         m.InputCost,
+		OutputCost:        m.OutputCost,
+		CacheCost:         m.CacheCost,
+		ThinkingCost:      m.ThinkingCost,
+		CacheCreationCost: m.CacheCreationCost,
+		ContextWindow:     m.ContextWindow,
+		MaxOutputTokens:   m.MaxOutputTokens,
+		PricingSource:     m.PricingSource,
+	}, nil
+}
+
+func (a *pricingStoreAdapter) BulkUpdatePricing(ctx context.Context, updates []provider.PricingUpdate) error {
+	bulk := make([]store.ModelPricingBulk, len(updates))
+	for i, u := range updates {
+		bulk[i] = store.ModelPricingBulk{
+			ModelID:           u.ModelID,
+			Provider:          u.Provider,
+			InputCost:         u.InputCost,
+			OutputCost:        u.OutputCost,
+			CacheCost:         u.CacheCost,
+			ThinkingCost:      u.ThinkingCost,
+			CacheCreationCost: u.CacheCreationCost,
+			ContextWindow:     u.ContextWindow,
+			MaxOutputTokens:   u.MaxOutputTokens,
+			Source:            u.Source,
+		}
+	}
+	return a.store.BulkUpdateModelPricing(ctx, bulk)
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -143,6 +185,7 @@ Flags:
   --tui              Launch TUI dashboard
   --rpc              Start RPC server (default: off, port 9090)
   --full-access      Enable full access mode (default: standard)
+  --context-v2       Enable v2 context pipeline (multi-layer compaction)
   --workspace PATH   Workspace root (default: current directory)
   --db PATH          Database file path (default: ~/.sageclaw/sageclaw.db)
 
@@ -177,6 +220,7 @@ type flags struct {
 	rpc        bool
 	mcpMode    bool
 	fullAccess bool
+	contextV2  bool
 	workspace  string
 	dbPath     string
 	configDir  string
@@ -200,6 +244,8 @@ func parseFlags() flags {
 			f.mcpMode = true
 		case arg == "--full-access":
 			f.fullAccess = true
+		case arg == "--context-v2":
+			f.contextV2 = true
 		case strings.HasPrefix(arg, "--workspace="):
 			f.workspace = strings.TrimPrefix(arg, "--workspace=")
 		case strings.HasPrefix(arg, "--db="):
@@ -501,13 +547,47 @@ func run() error {
 	if orpClient != nil {
 		router.RegisterProvider("openrouter", orpClient)
 	}
+	if ollamaHealthy {
+		router.RegisterProvider("ollama", ollamaClient)
+	}
 
-	// Load combos from DB into the router (must run for ALL routers, not just empty).
+	// Seed preset combos once: if no presets exist in DB, generate from KnownModels
+	// with all providers (unconnected models are skipped at resolution time).
+	// Once seeded, users are free to edit them — they're never overwritten.
+	{
+		var presetCount int
+		appStore.DB().QueryRow(`SELECT COUNT(*) FROM combos WHERE is_preset = 1`).Scan(&presetCount)
+		if presetCount == 0 {
+			known := make([]provider.DiscoveredModelInfo, 0, len(provider.KnownModels))
+			for _, m := range provider.KnownModels {
+				known = append(known, provider.DiscoveredModelInfo{
+					ModelID:       m.ModelID,
+					Provider:      m.Provider,
+					OutputCost:    m.OutputCost,
+					ContextWindow: m.ContextWindow,
+				})
+			}
+			presets := provider.GeneratePresetCombos(known, nil) // nil = all providers
+			for _, combo := range presets {
+				modelsJSON, err := json.Marshal(combo.Models)
+				if err != nil {
+					continue
+				}
+				appStore.DB().Exec(
+					`INSERT OR IGNORE INTO combos (id, name, description, strategy, models, is_preset) VALUES (?, ?, ?, ?, ?, 1)`,
+					combo.Name, combo.Name, "Auto-generated preset", combo.Strategy, string(modelsJSON))
+			}
+			log.Printf("router: seeded %d preset combos from known models", len(presets))
+		}
+	}
+
+	// Load ALL combos from DB into the router (both user-created and presets).
 	if comboRows, err := appStore.DB().Query(
-		`SELECT id, name, strategy, models FROM combos ORDER BY name`); err == nil {
+		`SELECT id, name, strategy, models, is_preset FROM combos ORDER BY is_preset DESC, name`); err == nil {
 		for comboRows.Next() {
 			var id, name, strategy, modelsJSON string
-			comboRows.Scan(&id, &name, &strategy, &modelsJSON)
+			var isPreset int
+			comboRows.Scan(&id, &name, &strategy, &modelsJSON, &isPreset)
 			var models []provider.ComboModel
 			if json.Unmarshal([]byte(modelsJSON), &models) != nil {
 				// Handle double-encoded JSON strings from earlier frontend bug.
@@ -521,6 +601,7 @@ func run() error {
 					Name:     name,
 					Strategy: strategy,
 					Models:   models,
+					IsUser:   isPreset == 0,
 				})
 			}
 		}
@@ -569,6 +650,7 @@ func run() error {
 	tool.RegisterPlan(toolReg)
 	tool.RegisterSkillLoader(toolReg, skillsDir)
 	tool.RegisterDatetime(toolReg)
+	tool.RegisterToolSearch(toolReg)
 	tool.RegisterSessions(toolReg, appStore)
 	tool.RegisterBrowser(toolReg, browserMgr)
 	// Build provider chain for media tools (vision, document, image gen).
@@ -631,6 +713,28 @@ func run() error {
 				teamIDCopy := reloaded.TeamInfo.TeamID
 				rc.TaskSummaryFunc = func(ctx context.Context) string {
 					return buildLeadTaskSummary(ctx, appStore, teamIDCopy)
+				}
+				// Re-build delegation routing on hot-reload.
+				var profiles []team.MemberProfile
+				for _, mi := range reloaded.TeamInfo.Members {
+					if mi.Role == "lead" {
+						continue
+					}
+					soulContent := ""
+					if mfa, ok := fileAgents[mi.AgentID]; ok {
+						soulContent = mfa.Soul
+					}
+					profiles = append(profiles, team.MemberProfile{
+						AgentID:     mi.AgentID,
+						DisplayName: mi.DisplayName,
+						Keywords:    team.ExtractKeywords(mi.Description, soulContent),
+					})
+				}
+				if len(profiles) > 0 {
+					rc.DelegationAnalyzeFunc = func(message string) string {
+						hint := team.AnalyzeDelegation(message, profiles, nil)
+						return team.FormatDelegationHint(hint)
+					}
 				}
 			} else if reloaded.TeamInfo != nil && reloaded.TeamInfo.Role == "member" {
 				memberAgentID := agentID
@@ -886,6 +990,27 @@ Key behaviors:
 	})
 	loopOpts = append(loopOpts, agent.WithSubagentManager(subagentMgr))
 
+	// Streaming & parallel tool execution — always enabled.
+	// Early consent check is nil: consent-requiring tools skip early execution
+	// and are handled in ExecuteRemaining's batch path instead.
+	resourceSem := agent.NewResourceSemaphores()
+	streamingExec := agent.NewStreamingExecutor(toolReg, resourceSem, func(e agent.Event) {
+		if sseBroadcast != nil {
+			sseBroadcast(e)
+		}
+	}, nil)
+	loopOpts = append(loopOpts, agent.WithStreamingExecutor(streamingExec))
+	log.Println("tools: streaming & parallel execution enabled")
+
+	// Apply --context-v2 flag to all agent configs.
+	if f.contextV2 {
+		for id, ac := range agentConfigs {
+			ac.ContextPipeline = "v2"
+			agentConfigs[id] = ac
+		}
+		log.Println("context: v2 pipeline enabled for all agents (--context-v2)")
+	}
+
 	// Always create LoopPool so hot-reload from dashboard works.
 	// When no providers exist yet, defaultProvider is nil — the router handles resolution.
 	loopPool = agent.NewLoopPool(agentConfigs, defaultProvider, toolReg, preCtx, postTool,
@@ -1051,6 +1176,29 @@ Key behaviors:
 					rc.TaskSummaryFunc = func(ctx context.Context) string {
 						return buildLeadTaskSummary(ctx, appStore, teamIDCopy)
 					}
+					// Build member profiles for delegation routing.
+					var profiles []team.MemberProfile
+					for _, mi := range memberInfos {
+						if mi.Role == "lead" {
+							continue
+						}
+						// Use description (agent role) + soul content for keyword extraction.
+						soulContent := ""
+						if mfa, ok := fileAgents[mi.AgentID]; ok {
+							soulContent = mfa.Soul
+						}
+						profiles = append(profiles, team.MemberProfile{
+							AgentID:     mi.AgentID,
+							DisplayName: mi.DisplayName,
+							Keywords:    team.ExtractKeywords(mi.Description, soulContent),
+						})
+					}
+					if len(profiles) > 0 {
+						rc.DelegationAnalyzeFunc = func(message string) string {
+							hint := team.AnalyzeDelegation(message, profiles, nil)
+							return team.FormatDelegationHint(hint)
+						}
+					}
 				} else {
 					memberAgentID := aid
 					rc.MemberTaskContextFunc = func(ctx context.Context) string {
@@ -1101,12 +1249,41 @@ Key behaviors:
 		log.Println("security: channel pairing disabled")
 	}
 
-	// Live pricing from OpenRouter (background refresh, 24h TTL).
-	pricingCache := provider.NewPricingCache()
-	pricingCache.StartPricingRefresh(context.Background())
-
 	// Budget engine (must be before pipeline for cost recording).
-	budgetEngine := provider.NewBudgetEngine(appStore.DB(), pricingCache)
+	budgetEngine := provider.NewBudgetEngine(appStore.DB())
+
+	// Unified Model Registry — single source of truth for pricing.
+	// Owns the OpenRouter pricing refresh goroutine (fetches every 24h, persists to DB).
+	modelRegistry := provider.NewModelRegistry(&pricingStoreAdapter{store: appStore})
+	modelRegistry.SeedFromKnownModels(context.Background()) // Seed baseline data for offline users.
+	budgetEngine.SetResolver(modelRegistry)
+	provider.GlobalCacheStats.SetResolver(modelRegistry)
+	// StartPricingRefresh is called after startCtx is created (below)
+	// so the goroutine stops on graceful shutdown.
+
+	// First-boot seeding: populate discovered_models from KnownModels if empty.
+	if models, _ := appStore.ListAllDiscoveredModels(ctx); len(models) == 0 {
+		var seeds []store.DiscoveredModel
+		for _, km := range provider.KnownModels {
+			seeds = append(seeds, store.DiscoveredModel{
+				ID:                km.ID,
+				Provider:          km.Provider,
+				ModelID:           km.ModelID,
+				DisplayName:       km.Name,
+				ContextWindow:     km.ContextWindow,
+				InputCost:         km.InputCost,
+				OutputCost:        km.OutputCost,
+				CacheCost:         km.CacheCost,
+				ThinkingCost:      km.ThinkingCost,
+				PricingSource:     "known",
+			})
+		}
+		if err := appStore.UpsertDiscoveredModels(ctx, seeds); err != nil {
+			log.Printf("pricing: seed failed: %v", err)
+		} else {
+			log.Printf("pricing: seeded %d models from KnownModels", len(seeds))
+		}
+	}
 
 	// --- Bus + Pipeline ---
 	msgBus := localbus.New()
@@ -1251,14 +1428,15 @@ Key behaviors:
 		},
 		CostRecorder: func(ctx context.Context, sessionID, agentID, provName, model string, usage canonical.Usage) {
 			budgetEngine.RecordCost(ctx, provider.CostEntry{
-				SessionID:     sessionID,
-				AgentID:       agentID,
-				Provider:      provName,
-				Model:         model,
-				InputTokens:   usage.InputTokens,
-				OutputTokens:  usage.OutputTokens,
-				CacheCreation: usage.CacheCreation,
-				CacheRead:     usage.CacheRead,
+				SessionID:      sessionID,
+				AgentID:        agentID,
+				Provider:       provName,
+				Model:          model,
+				InputTokens:    usage.InputTokens,
+				OutputTokens:   usage.OutputTokens,
+				CacheCreation:  usage.CacheCreation,
+				CacheRead:      usage.CacheRead,
+				ThinkingTokens: usage.ThinkingTokens,
 			})
 		},
 	})
@@ -1311,6 +1489,7 @@ Key behaviors:
 		return fmt.Errorf("starting pipeline: %w", err)
 	}
 	cronRunner.Start(startCtx)
+	modelRegistry.StartPricingRefresh(startCtx)
 	if noProviders {
 		log.Println("agent: no providers configured yet — add one via dashboard to start chatting")
 	}
@@ -1426,6 +1605,7 @@ Key behaviors:
 		rpc.WithAgentsDir(agentsDir),
 		rpc.WithPairing(pairingMgr),
 		rpc.WithBudgetEngine(budgetEngine),
+		rpc.WithModelRegistry(modelRegistry),
 		rpc.WithEncryptionKey(encKey),
 		rpc.WithRouter(router),
 		rpc.WithChannelManager(chanMgr),

@@ -218,11 +218,14 @@ func (r *ReadabilityExtractor) Extract(_ context.Context, rawHTML string, source
 	if err != nil {
 		return "", fmt.Errorf("readability parse: %w", err)
 	}
+	// Two-stage: Readability isolates main content → DOM walker converts to markdown.
+	// This preserves headings, links, bold, code blocks — unlike RenderText() which
+	// produces unstructured plain text.
 	var sb strings.Builder
-	if err := article.RenderText(&sb); err != nil {
-		return "", fmt.Errorf("readability render: %w", err)
+	if err := article.RenderHTML(&sb); err != nil {
+		return "", fmt.Errorf("readability render html: %w", err)
 	}
-	return strings.TrimSpace(sb.String()), nil
+	return htmlToMarkdown(sb.String()), nil
 }
 
 // --- PlainTextExtractor ---

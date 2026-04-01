@@ -41,8 +41,18 @@ type quirksFunction struct {
 }
 
 type quirksUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	PromptTokensDetails     *quirksPromptDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *quirksCompletionDetails `json:"completion_tokens_details,omitempty"`
+}
+
+type quirksPromptDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+type quirksCompletionDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 // toolAccum accumulates incremental tool call fragments.
@@ -83,13 +93,8 @@ func parseQuirksStream(r io.Reader, events chan<- provider.StreamEvent, quirks Q
 		// Usage-only chunk.
 		if len(chunk.Choices) == 0 {
 			if chunk.Usage != nil {
-				events <- provider.StreamEvent{
-					Type: "usage",
-					Usage: &canonical.Usage{
-						InputTokens:  chunk.Usage.PromptTokens,
-						OutputTokens: chunk.Usage.CompletionTokens,
-					},
-				}
+				u := quirksUsageToCanonical(chunk.Usage)
+				events <- provider.StreamEvent{Type: "usage", Usage: &u}
 			}
 			continue
 		}
@@ -176,6 +181,21 @@ func extractDeltaField(data []byte, field string) string {
 	}
 	val, _ := raw.Choices[0].Delta[field].(string)
 	return val
+}
+
+// quirksUsageToCanonical converts compat usage (with optional detail breakdowns).
+func quirksUsageToCanonical(u *quirksUsage) canonical.Usage {
+	usage := canonical.Usage{
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
+	}
+	if u.PromptTokensDetails != nil {
+		usage.CacheRead = u.PromptTokensDetails.CachedTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		usage.ThinkingTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+	return usage
 }
 
 func mapFinishReason(reason string) string {

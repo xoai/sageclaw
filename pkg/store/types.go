@@ -223,6 +223,29 @@ type DiscoveredModel struct {
 	Capabilities    map[string]bool // {"vision":true,"thinking":true}
 	DiscoveredAt    time.Time
 	UpdatedAt       time.Time
+
+	// Pricing: $/1M tokens. Zero means unknown or free.
+	InputCost         float64 // $/1M input tokens
+	OutputCost        float64 // $/1M output tokens
+	CacheCost         float64 // $/1M cached input tokens
+	ThinkingCost      float64 // $/1M thinking tokens (0 = use output_cost)
+	CacheCreationCost float64 // $/1M cache creation tokens (0 = input_cost * 1.25)
+	PricingSource     string  // "openrouter", "known", "user", ""
+}
+
+// ModelPricingBulk is a pricing-only update for a discovered model.
+// Used by OpenRouter refresh to update pricing without touching capabilities.
+type ModelPricingBulk struct {
+	ModelID           string
+	Provider          string // OpenRouter provider prefix (e.g. "anthropic")
+	InputCost         float64
+	OutputCost        float64
+	CacheCost         float64
+	ThinkingCost      float64
+	CacheCreationCost float64
+	ContextWindow     int    // Max input tokens (0 = don't update)
+	MaxOutputTokens   int    // Max output tokens (0 = don't update)
+	Source            string // "openrouter", "known"
 }
 
 // MCPFilter for listing MCP registry entries.

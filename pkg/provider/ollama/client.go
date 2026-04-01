@@ -49,6 +49,11 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 }
 
 func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan provider.StreamEvent, error) {
+	// Ollama doesn't support stream_options — tell ToOpenAIRequest to skip it.
+	if req.Options == nil {
+		req.Options = make(map[string]any)
+	}
+	req.Options["no_stream_options"] = true
 	return c.inner.ChatStream(ctx, req)
 }
 

@@ -17,9 +17,9 @@ func RegisterCron(reg *Registry, store store.CronStore) {
 		json.RawMessage(`{"type":"object","properties":{"schedule":{"type":"string","description":"Schedule: @every 5m, @hourly, @daily, */N * * * *, or @at 2026-03-30T15:00:00Z (one-time)"},"prompt":{"type":"string","description":"Prompt to send to the agent on schedule"},"agent_id":{"type":"string","description":"Agent ID (default: current agent)"}},"required":["schedule","prompt"]}`),
 		GroupCron, RiskModerate, "builtin", cronCreate(store))
 
-	reg.RegisterWithGroup("cron_list", "List active cron jobs",
+	reg.RegisterFull("cron_list", "List active cron jobs",
 		json.RawMessage(`{"type":"object","properties":{}}`),
-		GroupCron, RiskModerate, "builtin", cronList(store))
+		GroupCron, RiskModerate, "builtin", true, cronList(store))
 
 	reg.RegisterWithGroup("cron_update", "Update a cron job's schedule or prompt",
 		json.RawMessage(`{"type":"object","properties":{"id":{"type":"string","description":"Cron job ID"},"schedule":{"type":"string","description":"New schedule (optional)"},"prompt":{"type":"string","description":"New prompt (optional)"}},"required":["id"]}`),

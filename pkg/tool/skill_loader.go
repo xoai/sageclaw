@@ -15,7 +15,7 @@ import (
 // Skills listed in the system prompt manifest can be fully loaded at runtime
 // instead of eagerly injected into the system prompt.
 func RegisterSkillLoader(reg *Registry, skillsDir string) {
-	reg.RegisterWithGroup("load_skill", "Load the full content of a skill by name. "+
+	reg.RegisterFull("load_skill", "Load the full content of a skill by name. "+
 		"Use this when you need a skill's detailed instructions. "+
 		"The skill manifest in your system prompt lists available skills with descriptions.",
 		json.RawMessage(`{
@@ -28,7 +28,7 @@ func RegisterSkillLoader(reg *Registry, skillsDir string) {
 			},
 			"required": ["name"]
 		}`),
-		GroupCore, RiskSafe, "",
+		GroupCore, RiskSafe, "", true,
 		func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 			var params struct {
 				Name string `json:"name"`
@@ -58,9 +58,10 @@ func RegisterSkillLoader(reg *Registry, skillsDir string) {
 			}
 
 			content := string(data)
-			// Cap at 512KB to match read_file limit.
-			if len(content) > maxOutputBytes {
-				content = content[:maxOutputBytes] + "\n... [truncated]"
+			// Skill files are small; 512KB cap is a safety net, not a budget concern.
+			const maxSkillOutputBytes = 512_000
+			if len(content) > maxSkillOutputBytes {
+				content = content[:maxSkillOutputBytes] + "\n... [truncated]"
 			}
 
 			return &canonical.ToolResult{

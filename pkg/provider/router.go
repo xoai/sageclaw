@@ -29,6 +29,7 @@ type Combo struct {
 	Name     string
 	Strategy string // "priority" (default), "round-robin", "cost"
 	Models   []ComboModel
+	IsUser   bool // true for user-created combos (shadows presets)
 }
 
 // ComboModel is a single entry in a combo's fallback chain.
@@ -167,8 +168,15 @@ func (r *Router) SetDefault(provider Provider) {
 }
 
 // Resolve returns the provider and model for a given tier.
-// Falls back to the default tier if the requested tier is not configured.
+// Checks preset/user combos first (tier name as combo key), then falls back
+// to the static routes map, then to the fallback tier.
 func (r *Router) Resolve(tier Tier) (Provider, string) {
+	// Try combo resolution first (preset combos use tier names as keys).
+	if p, model, err := r.ResolveCombo(string(tier)); err == nil {
+		return p, model
+	}
+
+	// Fallback to static routes.
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	route, ok := r.routes[tier]
@@ -231,6 +239,14 @@ func (r *Router) RemoveCombo(name string) {
 	delete(r.combos, name)
 }
 
+// GetCombo returns a combo by name. Returns ok=false if not found.
+func (r *Router) GetCombo(name string) (Combo, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	c, ok := r.combos[name]
+	return c, ok
+}
+
 // Combos returns all registered combo names.
 func (r *Router) Combos() []string {
 	r.mu.RLock()
@@ -252,19 +268,6 @@ func (r *Router) ResolveCombo(name string) (Provider, string, error) {
 	r.mu.RUnlock()
 
 	if !ok {
-		// Fallback: if combo name matches a tier, resolve as tier.
-		// Handles backward compat after preset combo deletion.
-		switch Tier(name) {
-		case TierStrong, TierFast, TierLocal:
-			log.Printf("router: combo %q not found, falling back to tier %q (deprecated)", name, name)
-			p, model := r.Resolve(Tier(name))
-			return p, model, nil
-		}
-		if name == "balanced" {
-			log.Printf("router: combo %q not found, falling back to tier fast (deprecated)", name)
-			p, model := r.Resolve(TierFast)
-			return p, model, nil
-		}
 		return nil, "", fmt.Errorf("combo %q not found", name)
 	}
 
@@ -355,6 +358,43 @@ func (r *Router) ResolveComboExcluding(name, excludeProvider string) (Provider, 
 	return nil, "", fmt.Errorf("combo %q: no available provider after excluding %s", name, excludeProvider)
 }
 
+// SetPresetCombos stores auto-generated preset combos in the router.
+// Presets are stored alongside user combos; user combos with the same name
+// take precedence (checked first in SetCombo which overwrites).
+// Use this for auto-generated presets only — user combos go through SetCombo.
+func (r *Router) SetPresetCombos(presets map[string]Combo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, combo := range presets {
+		// Don't overwrite user-created combos.
+		if existing, ok := r.combos[name]; ok && existing.IsUser {
+			continue
+		}
+		r.combos[name] = combo
+	}
+	log.Printf("router: preset combos updated (%d presets)", len(presets))
+}
+
+// GetProvider returns a registered provider by name (e.g. "gemini", "anthropic").
+// Used for direct model references like "gemini/gemini-3-flash-preview".
+func (r *Router) GetProvider(name string) (Provider, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.providers[name]
+	return p, ok
+}
+
+// ConnectedProviders returns the names of all registered providers.
+func (r *Router) ConnectedProviders() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.providers))
+	for name := range r.providers {
+		names = append(names, name)
+	}
+	return names
+}
+
 // ForEachProvider calls fn for each registered provider.
 func (r *Router) ForEachProvider(fn func(name string, p Provider)) {
 	r.mu.RLock()
@@ -364,94 +404,6 @@ func (r *Router) ForEachProvider(fn func(name string, p Provider)) {
 	}
 }
 
-// ResolveTierFromDiscovered updates a tier route based on discovered models.
-// Picks the best available model for the tier from connected providers.
-func (r *Router) ResolveTierFromDiscovered(tier Tier, providerModels []TierCandidate) {
-	best := pickBestForTier(tier, providerModels)
-	if best == nil {
-		return
-	}
-
-	r.mu.RLock()
-	prov, ok := r.providers[best.Provider]
-	r.mu.RUnlock()
-	if !ok {
-		return
-	}
-
-	r.SetRoute(tier, Route{Provider: prov, Model: best.ModelID})
-}
-
-// ResolveAllTiers updates all three tier routes from discovered models.
-func (r *Router) ResolveAllTiers(candidates []TierCandidate) {
-	for _, tier := range []Tier{TierStrong, TierFast, TierLocal} {
-		r.ResolveTierFromDiscovered(tier, candidates)
-	}
-}
-
-// TierCandidate is a model considered for tier routing.
-type TierCandidate struct {
-	Provider      string
-	ModelID       string
-	ContextWindow int
-	TierHint      string  // From KnownModels: "strong", "fast", "local", "reasoning"
-	InputCost     float64 // From KnownModels (0 if unknown)
-}
-
-// pickBestForTier scores candidates and returns the best one for a tier.
-func pickBestForTier(tier Tier, candidates []TierCandidate) *TierCandidate {
-	var best *TierCandidate
-	bestScore := -1.0
-
-	for i := range candidates {
-		c := &candidates[i]
-		score := scoreTierCandidate(tier, c)
-		if score < 0 {
-			continue // Filtered out.
-		}
-		if score > bestScore {
-			bestScore = score
-			best = c
-		}
-	}
-	return best
-}
-
-func scoreTierCandidate(tier Tier, c *TierCandidate) float64 {
-	switch tier {
-	case TierStrong:
-		score := float64(c.ContextWindow) / 1000.0
-		if c.TierHint == "strong" {
-			score += 100
-		}
-		if c.TierHint == "reasoning" {
-			score += 50
-		}
-		if c.Provider == "ollama" {
-			return -1 // Exclude local models from strong tier.
-		}
-		return score
-	case TierFast:
-		score := 0.0
-		if c.TierHint == "fast" {
-			score += 100
-		}
-		if c.InputCost > 0 {
-			score += 50 - c.InputCost*10
-		}
-		if c.Provider == "ollama" {
-			return -1 // Exclude local models from fast tier.
-		}
-		return score
-	case TierLocal:
-		if c.Provider != "ollama" {
-			return -1 // Only local providers.
-		}
-		return 1 // Pick first available.
-	default:
-		return -1
-	}
-}
 
 // DefaultTPM returns the default tokens-per-minute for a provider type.
 func DefaultTPM(providerType string) int {

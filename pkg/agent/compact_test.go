@@ -126,7 +126,7 @@ func TestCompactionManager_TryCompactWithBudget_SkipsBelowThreshold(t *testing.T
 	llm := mockLLM(`[]`)
 	cm := NewCompactionManager(mem, llm)
 
-	budget := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	budget := NewContextBudget(200000, 8192)
 
 	// Small history — should not compact.
 	msgs := []canonical.Message{

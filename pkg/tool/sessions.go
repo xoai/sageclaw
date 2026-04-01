@@ -14,17 +14,17 @@ const maxSessionHistoryBytes = 80_000 // ~20K tokens
 
 // RegisterSessions registers session introspection tools.
 func RegisterSessions(reg *Registry, s store.Store) {
-	reg.RegisterWithGroup("sessions_list", "List recent sessions",
+	reg.RegisterFull("sessions_list", "List recent sessions",
 		json.RawMessage(`{"type":"object","properties":{"limit":{"type":"integer","description":"Max sessions to return (default 20)"}}}`),
-		GroupSessions, RiskSafe, "builtin", sessionsList(s))
+		GroupSessions, RiskSafe, "builtin", true, sessionsList(s))
 
-	reg.RegisterWithGroup("session_status", "Get session metadata",
+	reg.RegisterFull("session_status", "Get session metadata",
 		json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID"}},"required":["session_id"]}`),
-		GroupSessions, RiskSafe, "builtin", sessionStatus(s))
+		GroupSessions, RiskSafe, "builtin", true, sessionStatus(s))
 
-	reg.RegisterWithGroup("sessions_history", "Get message history from a session",
+	reg.RegisterFull("sessions_history", "Get message history from a session",
 		json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID"},"limit":{"type":"integer","description":"Max messages (default 50)"}},"required":["session_id"]}`),
-		GroupSessions, RiskSafe, "builtin", sessionsHistory(s))
+		GroupSessions, RiskSafe, "builtin", true, sessionsHistory(s))
 
 	reg.RegisterWithGroup("sessions_send", "Send a message to a session",
 		json.RawMessage(`{"type":"object","properties":{"session_id":{"type":"string","description":"Session ID"},"content":{"type":"string","description":"Message content"}},"required":["session_id","content"]}`),

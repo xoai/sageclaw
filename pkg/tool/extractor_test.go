@@ -69,6 +69,31 @@ func TestExtractorChain_AllFail(t *testing.T) {
 	}
 }
 
+func TestReadabilityExtractor_ProducesMarkdown(t *testing.T) {
+	ext := &ReadabilityExtractor{}
+	// Readability needs enough content to identify an article.
+	html := `<html><head><title>Test</title></head><body>
+		<article>
+			<h2>Section Title</h2>
+			<p>This is a <strong>bold</strong> paragraph with a <a href="https://example.com">link</a>.</p>
+			<p>Another paragraph with enough text to pass the readability content threshold.
+			This needs to be a reasonable length article for readability to extract it properly.
+			Adding more sentences to ensure the algorithm identifies this as the main content.</p>
+		</article>
+	</body></html>`
+	result, err := ext.Extract(context.Background(), html, "https://example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should contain markdown formatting, not plain text.
+	if !containsAny(result, "##", "**bold**") {
+		t.Errorf("expected markdown headings or bold, got: %s", result)
+	}
+	if !containsAny(result, "[link](https://example.com)") {
+		t.Errorf("expected markdown link, got: %s", result)
+	}
+}
+
 func TestNewDefaultChain_WithoutDefuddle(t *testing.T) {
 	chain := NewDefaultChain("")
 	if len(chain.extractors) != 3 {

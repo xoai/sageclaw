@@ -2,11 +2,43 @@ package tool
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
+
+// Regex patterns for markdownToText().
+var (
+	reMdImage      = regexp.MustCompile(`!\[([^\]]*)\]\([^)]+\)`)
+	reMdLink       = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
+	reMdCodeFence  = regexp.MustCompile("(?m)^```[a-zA-Z]*\\n")
+	reMdCodeClose  = regexp.MustCompile("(?m)^```\\s*$")
+	reMdHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+	reMdListMarker = regexp.MustCompile(`(?m)^(\s*)[-*+]\s+`)
+	reMdNumList    = regexp.MustCompile(`(?m)^(\s*)\d+\.\s+`)
+	reMdBold       = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	reMdItalic     = regexp.MustCompile(`\*([^*]+)\*`)
+	reMdInlineCode = regexp.MustCompile("`([^`]+)`")
+)
+
+// markdownToText strips markdown formatting, returning plain text.
+// Used for text-mode output and Cloudflare markdown passthrough.
+func markdownToText(md string) string {
+	s := md
+	s = reMdImage.ReplaceAllString(s, "")           // ![alt](url) → ""
+	s = reMdLink.ReplaceAllString(s, "$1")           // [text](url) → text
+	s = reMdCodeFence.ReplaceAllString(s, "")        // ```lang → ""
+	s = reMdCodeClose.ReplaceAllString(s, "")        // ``` → ""
+	s = reMdHeading.ReplaceAllString(s, "")          // ## heading → heading
+	s = reMdListMarker.ReplaceAllString(s, "$1")     // - item → item
+	s = reMdNumList.ReplaceAllString(s, "$1")        // 1. item → item
+	s = reMdBold.ReplaceAllString(s, "$1")           // **bold** → bold
+	s = reMdItalic.ReplaceAllString(s, "$1")         // *italic* → italic
+	s = reMdInlineCode.ReplaceAllString(s, "$1")     // `code` → code
+	return cleanOutput(s)
+}
 
 // convertMode selects output format for the DOM walker.
 type convertMode int

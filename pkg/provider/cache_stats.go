@@ -17,13 +17,22 @@ type CacheStats struct {
 	mu              sync.RWMutex
 	accCostUSD      float64      // Accumulated cost using real per-model pricing.
 	accSavedUSD     float64      // Accumulated savings from caching.
+	resolver        PricingResolver // Set via SetResolver after startup.
 }
 
 // Global cache stats instance.
 var GlobalCacheStats = &CacheStats{}
 
+// SetResolver sets the pricing resolver for cost calculation.
+// Called once at startup after the ModelRegistry is constructed.
+func (cs *CacheStats) SetResolver(r PricingResolver) {
+	cs.mu.Lock()
+	cs.resolver = r
+	cs.mu.Unlock()
+}
+
 // Record adds a request's usage to the stats.
-// model is used to compute per-request cost using real pricing (not hardcoded Sonnet rates).
+// model is used to compute per-request cost using the unified pricing resolver.
 func (cs *CacheStats) Record(model string, inputTokens, outputTokens, cacheCreation, cacheRead, thinkingTokens int) {
 	cs.TotalRequests.Add(1)
 	cs.TotalInput.Add(int64(inputTokens))
@@ -35,27 +44,21 @@ func (cs *CacheStats) Record(model string, inputTokens, outputTokens, cacheCreat
 		cs.CacheHits.Add(1)
 	}
 
-	// Accumulate real cost using per-model pricing.
-	modelInfo := FindModel(model)
-	if modelInfo != nil {
-		cost := EstimateCost(modelInfo, inputTokens, outputTokens, cacheRead)
-		saved := float64(cacheRead) / 1_000_000 * (modelInfo.InputCost - modelInfo.CacheCost)
-		if saved < 0 {
-			saved = 0
-		}
-		cs.mu.Lock()
-		cs.accCostUSD += cost
-		cs.accSavedUSD += saved
-		cs.mu.Unlock()
-	} else {
-		// Fallback: Sonnet pricing for unknown models.
-		cost := float64(inputTokens)/1_000_000*3.0 + float64(outputTokens)/1_000_000*15.0
-		saved := float64(cacheRead) / 1_000_000 * 2.7
-		cs.mu.Lock()
-		cs.accCostUSD += cost
-		cs.accSavedUSD += saved
-		cs.mu.Unlock()
+	// Resolve pricing via unified registry. Nil resolver = skip cost (startup race).
+	cs.mu.RLock()
+	r := cs.resolver
+	cs.mu.RUnlock()
+	if r == nil {
+		return
 	}
+
+	pricing := r.ResolvePricing(model)
+	// nil pricing = unknown model → cost $0.
+	cost, saved := CalculateCost(pricing, inputTokens, outputTokens, cacheCreation, cacheRead, thinkingTokens)
+	cs.mu.Lock()
+	cs.accCostUSD += cost
+	cs.accSavedUSD += saved
+	cs.mu.Unlock()
 }
 
 // Snapshot returns a point-in-time copy of the stats.

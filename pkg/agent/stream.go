@@ -22,17 +22,22 @@ type streamResult struct {
 //
 // Tool call deltas are accumulated by index — partial JSON fragments are
 // concatenated until the stream completes, then parsed as complete JSON.
+//
+// onToolCallReady is called when a tool call is fully accumulated during
+// streaming. Pass nil to disable early tool execution.
 func consumeStream(
 	ctx context.Context,
 	stream <-chan provider.StreamEvent,
 	sessionID string,
 	iteration int,
 	onEvent EventHandler,
+	onToolCallReady func(tc canonical.ToolCall),
 ) streamResult {
 	var textBuf strings.Builder
 	var thinkingBuf strings.Builder
 	var thinkingSig string
 	toolCallBuilders := map[int]*toolCallBuilder{}
+	lastFlushedIdx := -1 // Track highest flushed index for ordered readiness detection.
 	var completeToolCalls []canonical.Content // From providers that accumulate internally.
 	var usage canonical.Usage
 	var stopReason string
@@ -75,6 +80,10 @@ func consumeStream(
 					Type:     "tool_call",
 					ToolCall: ev.Delta.ToolCall,
 				})
+				// Fire callback immediately for complete tool calls.
+				if onToolCallReady != nil {
+					onToolCallReady(*ev.Delta.ToolCall)
+				}
 				continue
 			}
 			// Delta path: accumulate partial fragments.
@@ -100,6 +109,18 @@ func consumeStream(
 				b.meta = ev.Delta.Meta
 			} else if len(ev.Delta.ToolMeta) > 0 {
 				b.meta = ev.Delta.ToolMeta
+			}
+
+			// Delta readiness detection: when a new index arrives at idx > lastFlushedIdx+1,
+			// all builders with index <= idx-1 are complete. Flush them in order.
+			if onToolCallReady != nil && idx > lastFlushedIdx+1 {
+				for i := lastFlushedIdx + 1; i < idx; i++ {
+					if fb, exists := toolCallBuilders[i]; exists && !fb.flushed {
+						fb.flushed = true
+						onToolCallReady(fb.build())
+					}
+				}
+				lastFlushedIdx = idx - 1
 			}
 
 		case "usage":
@@ -153,16 +174,44 @@ func consumeStream(
 		})
 	}
 
-	// Estimate thinking tokens from accumulated thinking text.
-	if thinkingBuf.Len() > 0 {
+	// Estimate thinking tokens only when provider didn't report them.
+	if thinkingBuf.Len() > 0 && usage.ThinkingTokens == 0 {
 		usage.ThinkingTokens = len([]rune(thinkingBuf.String())) / 4
+		usage.Estimated = true
+	}
+
+	// Estimate output tokens when provider reported 0 but we have text.
+	if usage.OutputTokens == 0 && textBuf.Len() > 0 {
+		usage.OutputTokens = len([]rune(textBuf.String())) / 4
+		usage.Estimated = true
+	}
+
+	// Zero out usage on failed streams to prevent partial token leaks.
+	if streamErr != nil {
+		usage = canonical.Usage{Estimated: true}
 	}
 
 	// Add complete tool calls from providers that accumulate internally.
 	content = append(content, completeToolCalls...)
 
-	// Assemble tool calls from accumulated delta builders.
-	for _, b := range toolCallBuilders {
+	// Flush remaining unflushed builders in index order at stream end.
+	// Use numeric iteration (not map iteration) for deterministic order.
+	maxIdx := -1
+	for idx := range toolCallBuilders {
+		if idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	for i := 0; i <= maxIdx; i++ {
+		b, ok := toolCallBuilders[i]
+		if !ok {
+			continue
+		}
+		// Fire callback for any unflushed builders.
+		if onToolCallReady != nil && !b.flushed {
+			b.flushed = true
+			onToolCallReady(b.build())
+		}
 		tc := b.build()
 		content = append(content, canonical.Content{
 			Type: "tool_call",
@@ -192,6 +241,7 @@ type toolCallBuilder struct {
 	name     string
 	inputBuf strings.Builder
 	meta     map[string]string // Provider metadata (e.g., Gemini thought_signature).
+	flushed  bool              // True if this builder's tool call was already flushed via onToolCallReady.
 }
 
 func (b *toolCallBuilder) build() canonical.ToolCall {

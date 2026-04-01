@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,7 +23,7 @@ import (
 
 const (
 	maxResponseBytes  = 10 * 1024 * 1024 // 10MB download limit
-	maxFetchChars     = 60_000           // ~15K tokens inline — matches GoClaw default
+	maxFetchChars     = 50_000           // ~12.5K tokens inline — matches OpenClaw default
 	fetchTimeout      = 30 * time.Second
 )
 
@@ -45,15 +46,15 @@ func RegisterWeb(reg *Registry, cfg *WebConfig) {
 	if !cfg.InjectionConfig.Enabled && cfg.InjectionConfig.BlockThreshold == 0 {
 		cfg.InjectionConfig = security.DefaultInjectionConfig()
 	}
-	reg.RegisterWithGroup("web_fetch", "Fetch a URL and return its text content",
+	reg.RegisterFull("web_fetch", "Fetch a URL and return its text content",
 		json.RawMessage(`{"type":"object","properties":{`+
 			`"url":{"type":"string","description":"URL to fetch"},`+
 			`"extractMode":{"type":"string","enum":["markdown","text"],"description":"Output format (default: markdown)"},`+
-			`"maxChars":{"type":"integer","description":"Maximum output characters (100-60000, default: 60000)"}`+
+			`"maxChars":{"type":"integer","description":"Maximum output characters (100-50000, default: 50000)"}`+
 			`},"required":["url"]}`),
-		GroupWeb, RiskModerate, "builtin", webFetch(cfg))
+		GroupWeb, RiskModerate, "builtin", true, webFetch(cfg))
 
-	reg.RegisterWithGroup("web_search", "Search the web",
+	reg.RegisterFull("web_search", "Search the web",
 		json.RawMessage(`{"type":"object","properties":{`+
 			`"query":{"type":"string","description":"Search query"},`+
 			`"num_results":{"type":"integer","description":"Number of results (default 5)"},`+
@@ -61,7 +62,7 @@ func RegisterWeb(reg *Registry, cfg *WebConfig) {
 			`"country":{"type":"string","description":"Country code (e.g. us, gb, de)"},`+
 			`"search_lang":{"type":"string","description":"Search language (e.g. en, vi, de)"}`+
 			`},"required":["query"]}`),
-		GroupWeb, RiskModerate, "builtin", webSearch(cfg))
+		GroupWeb, RiskModerate, "builtin", true, webSearch(cfg))
 }
 
 func isPrivateIP(ipStr string) bool {
@@ -204,18 +205,22 @@ func webFetch(cfg *WebConfig) ToolFunc {
 			params.MaxChars = maxFetchChars
 		}
 
-		// Adaptive maxChars: scale down as iterations progress to preserve context budget.
-		// Early iterations (0-50%): full maxChars. Late iterations (50-100%): scale to 40%.
+		// Adaptive maxChars: step-function scaling (GoClaw pattern).
+		// Aggressively reduce context budget as iterations progress.
 		if iter, ok := GetIteration(ctx); ok && iter.Max > 0 {
 			pct := float64(iter.Current) / float64(iter.Max)
-			if pct > 0.5 {
-				// Linear scale from 100% at 50% progress to 40% at 100% progress.
-				scale := 1.0 - 1.2*(pct-0.5)
-				scaled := int(float64(params.MaxChars) * scale)
-				if scaled < 2000 {
-					scaled = 2000 // Floor: always return at least 2K chars.
+			switch {
+			case pct >= 0.75:
+				if params.MaxChars > 10_000 {
+					params.MaxChars = 10_000
 				}
-				params.MaxChars = scaled
+			case pct >= 0.50:
+				if params.MaxChars > 20_000 {
+					params.MaxChars = 20_000
+				}
+			}
+			if params.MaxChars < 2000 {
+				params.MaxChars = 2000
 			}
 		}
 
@@ -262,63 +267,90 @@ func webFetch(cfg *WebConfig) ToolFunc {
 
 		rawBody := string(body)
 
-		// Extraction waterfall (OpenClaw pattern):
-		// ExtractorChain: Defuddle → Readability → Markdown → PlainText
-		// Fallback: DOM tree walker (GoClaw pattern — skips nav/footer/hidden)
-		// Quality signal if all extractors return thin content
 		var text string
 		var extractor string
 
-		// Stage 1: ExtractorChain (Defuddle → Readability → Markdown → PlainText).
-		if cfg.ExtractorChain != nil {
-			if extracted, label, err := cfg.ExtractorChain.ExtractWithLabel(ctx, rawBody, params.URL); err == nil && isQualityContent(extracted) {
-				text = extracted
-				extractor = label
+		// Cloudflare Markdown passthrough: skip extraction for pre-extracted markdown.
+		if strings.Contains(ct, "text/markdown") {
+			text = rawBody
+			extractor = "cf-markdown"
+			if params.ExtractMode == "text" {
+				text = markdownToText(text)
+			}
+			if mdTokens := resp.Header.Get("x-markdown-tokens"); mdTokens != "" {
+				log.Printf("[web_fetch] cf-markdown tokens hint: %s for %s", mdTokens, params.URL)
+			}
+		} else {
+			// Extraction waterfall (OpenClaw pattern):
+			// ExtractorChain: Defuddle → Readability → Markdown → PlainText
+			// Fallback: DOM tree walker (GoClaw pattern — skips nav/footer/hidden)
+			// Quality signal if all extractors return thin content
+
+			// Stage 1: ExtractorChain (Defuddle → Readability → Markdown → PlainText).
+			if cfg.ExtractorChain != nil {
+				if extracted, label, err := cfg.ExtractorChain.ExtractWithLabel(ctx, rawBody, params.URL); err == nil && isQualityContent(extracted) {
+					text = extracted
+					extractor = label
+				}
+			}
+
+			// Stage 2: DOM tree walker fallback (skips nav/footer/hidden elements).
+			if text == "" {
+				if params.ExtractMode == "markdown" {
+					text = htmlToMarkdown(rawBody)
+				} else {
+					text = htmlToText(rawBody)
+				}
+				extractor = "dom-walker"
+			}
+
+			// Stage 3: Browser fallback for JS-heavy pages.
+			needsBrowser := !isRichContent(text) ||
+				(len(rawBody) > 5000 && len(strings.TrimSpace(text))*50 < len(rawBody))
+			if needsBrowser && cfg.BrowserFallback != nil {
+				if browserText, err := browserFallbackFetch(ctx, cfg.BrowserFallback, params.URL); err == nil && len(browserText) > len(text) {
+					text = browserText
+					extractor = "browser"
+				}
+			}
+
+			// Quality signal — prevent LLM from retrying when extraction is thin.
+			if text == "" && len(rawBody) > 0 {
+				text = "[No content extracted. The page may require JavaScript to render, " +
+					"or returned a bot-protection challenge. Do NOT retry this URL — " +
+					"try using execute_command with curl instead, or ask the user for the content.]"
+				extractor = "none"
+			}
+
+			// Text mode post-processing: if extractor chain returned markdown but
+			// user requested text mode, convert now. (Readability now produces markdown.)
+			if params.ExtractMode == "text" && extractor != "dom-walker" && extractor != "none" {
+				text = markdownToText(text)
 			}
 		}
-
-		// Stage 2: DOM tree walker fallback (skips nav/footer/hidden elements).
-		if text == "" {
-			if params.ExtractMode == "markdown" {
-				text = htmlToMarkdown(rawBody)
-			} else {
-				text = htmlToText(rawBody)
-			}
-			extractor = "dom-walker"
-		}
-
-		// Stage 3: Browser fallback for JS-heavy pages.
-		// Trigger when extraction is thin OR suspiciously small relative to the raw HTML.
-		// A news homepage might be 200KB of HTML but only yield 800 chars of footer —
-		// that's a signal the real content is JS-rendered.
-		needsBrowser := !isRichContent(text) ||
-			(len(rawBody) > 5000 && len(strings.TrimSpace(text))*50 < len(rawBody))
-		if needsBrowser && cfg.BrowserFallback != nil {
-			if browserText, err := browserFallbackFetch(ctx, cfg.BrowserFallback, params.URL); err == nil && len(browserText) > len(text) {
-				text = browserText
-				extractor = "browser"
-			}
-		}
-
-		// Quality signal — prevent LLM from retrying when extraction is thin.
-		if text == "" && len(rawBody) > 0 {
-			text = "[No content extracted. The page may require JavaScript to render, " +
-				"or returned a bot-protection challenge. Do NOT retry this URL — " +
-				"try using execute_command with curl instead, or ask the user for the content.]"
-			extractor = "none"
-		}
-
 		// Sanitize external content: homoglyph normalization, zero-width stripping,
 		// injection detection (warn/block).
 		text = security.SanitizeExternal(text, cfg.InjectionConfig)
 
-		// Wrap with trust boundary markers.
-		text = security.WrapBoundary(text, "web_fetch", params.URL)
+		// Compute overhead so truncation is wrapper-aware.
+		// This ensures the final output (including boundary markers) fits within maxChars.
+		// The boundary closing tag is never chopped because we truncate the inner text
+		// before wrapping — the wrapper is applied to already-truncated content.
+		metaLine := fmt.Sprintf("HTTP %d [extractor: %s]\n\n", resp.StatusCode, extractor)
+		wrapShell := security.WrapBoundary("", "web_fetch", params.URL)
+		overhead := len(metaLine) + len(wrapShell)
+		contentBudget := params.MaxChars - overhead
+		if contentBudget < 500 {
+			contentBudget = 500
+		}
 
-		content := fmt.Sprintf("HTTP %d [extractor: %s]\n\n%s", resp.StatusCode, extractor, text)
+		truncated := len(text) > contentBudget
+		fullText := text // preserve for temp file
 
-		// Truncate to maxChars.
-		if len(content) <= params.MaxChars {
+		if !truncated {
+			// Fits within budget — wrap and return.
+			wrapped := security.WrapBoundary(text, "web_fetch", params.URL)
+			content := metaLine + wrapped
 			if cfg.FetchCache != nil {
 				cfg.FetchCache.Set(cacheChannel(ctx), cacheKey, content)
 			}
@@ -326,21 +358,32 @@ func webFetch(cfg *WebConfig) ToolFunc {
 		}
 
 		// Overflow: write full content to temp file, return preview + path.
-		tmpPath, err := writeWebFetchTempFile(text)
-		if err != nil {
-			content = content[:params.MaxChars] + "\n... [truncated — temp file write failed]"
+		tmpPath, writeErr := writeWebFetchTempFile(fullText)
+		// Reserve space for the overflow suffix in the content budget.
+		suffixTemplate := "\n\n... [truncated — full content (%d chars) saved to: %s]\n" +
+			"Use read_file or execute_command to access the full content."
+		suffixApprox := fmt.Sprintf(suffixTemplate, len(fullText), "/tmp/sageclaw-web-fetch/placeholder.txt")
+		previewBudget := contentBudget - len(suffixApprox)
+		if previewBudget < 200 {
+			previewBudget = 200
+		}
+
+		preview := text[:previewBudget]
+		wrapped := security.WrapBoundary(preview, "web_fetch", params.URL)
+		content := metaLine + wrapped
+
+		if writeErr != nil {
+			content += "\n... [truncated]"
 			return &canonical.ToolResult{Content: content}, nil
 		}
 
-		preview := content[:params.MaxChars]
-		preview += fmt.Sprintf("\n\n... [truncated at %dK chars — full content (%d chars) saved to: %s]\n"+
-			"Use read_file or execute_command to access the full content.",
-			params.MaxChars/1000, len(text), tmpPath)
+		suffix := fmt.Sprintf(suffixTemplate, len(fullText), tmpPath)
+		result := content + suffix
 
 		if cfg.FetchCache != nil {
-			cfg.FetchCache.Set(cacheChannel(ctx), cacheKey, preview)
+			cfg.FetchCache.Set(cacheChannel(ctx), cacheKey, result)
 		}
-		return &canonical.ToolResult{Content: preview}, nil
+		return &canonical.ToolResult{Content: result}, nil
 	}
 }
 
@@ -369,9 +412,12 @@ func webSearch(cfg *WebConfig) ToolFunc {
 			params.NumResults = 10
 		}
 
-		// Build cache key.
+		// Adaptive result count: reduce at late iterations to save context.
+		adaptedCount := adaptiveSearchCount(ctx, params.NumResults)
+
+		// Build cache key (uses adapted count so late iterations get separate cache).
 		searchCacheKey := fmt.Sprintf("%s|%d|%s|%s|%s",
-			params.Query, params.NumResults, params.Freshness, params.Country, params.SearchLang)
+			params.Query, adaptedCount, params.Freshness, params.Country, params.SearchLang)
 
 		// Check cache.
 		if cfg.SearchCache != nil {
@@ -410,10 +456,16 @@ func webSearch(cfg *WebConfig) ToolFunc {
 			return &canonical.ToolResult{Content: fmt.Sprintf("No results found for: %s. Try a different query or use web_fetch to access a specific URL.", params.Query)}, nil
 		}
 
+		// Apply adaptive count limit.
+		if len(results) > adaptedCount {
+			results = results[:adaptedCount]
+		}
+
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("Search results for: %s (via %s)\n\n", params.Query, source))
 		for i, r := range results {
-			sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, r.title, r.url, r.snippet))
+			snippet := truncateSnippet(r.snippet, 200)
+			sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, r.title, r.url, snippet))
 		}
 
 		content := sb.String()
@@ -428,6 +480,32 @@ type searchResult struct {
 	title   string
 	url     string
 	snippet string
+}
+
+// truncateSnippet limits a search result description to maxLen characters.
+func truncateSnippet(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// adaptiveSearchCount reduces the number of search results at late iterations.
+func adaptiveSearchCount(ctx context.Context, requested int) int {
+	if iter, ok := GetIteration(ctx); ok && iter.Max > 0 {
+		pct := float64(iter.Current) / float64(iter.Max)
+		switch {
+		case pct >= 0.75:
+			if requested > 3 {
+				return 3
+			}
+		case pct >= 0.50:
+			if requested > 5 {
+				return 5
+			}
+		}
+	}
+	return requested
 }
 
 // duckDuckGoSearch uses DuckDuckGo's HTML interface (no API key needed).

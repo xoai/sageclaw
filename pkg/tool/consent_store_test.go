@@ -270,3 +270,34 @@ func TestPersistentConsentStore_RevokeNotFound(t *testing.T) {
 		t.Error("should error when no active grant found")
 	}
 }
+
+func TestPersistentConsentStore_DenyTool(t *testing.T) {
+	cs := NewPersistentConsentStore(nil)
+
+	// Initially not denied.
+	if cs.IsToolDenied("sess1", "exec_command") {
+		t.Fatal("tool should not be denied initially")
+	}
+
+	// Deny a specific tool.
+	cs.DenyTool("sess1", "exec_command")
+	if !cs.IsToolDenied("sess1", "exec_command") {
+		t.Fatal("tool should be denied after DenyTool")
+	}
+
+	// Other tools in the same conceptual group are NOT affected.
+	if cs.IsToolDenied("sess1", "read_file") {
+		t.Fatal("other tools should not be affected by DenyTool")
+	}
+
+	// Other sessions are NOT affected.
+	if cs.IsToolDenied("sess2", "exec_command") {
+		t.Fatal("other sessions should not be affected by DenyTool")
+	}
+
+	// ClearSession removes tool denials.
+	cs.ClearSession("sess1")
+	if cs.IsToolDenied("sess1", "exec_command") {
+		t.Fatal("tool denial should be cleared after ClearSession")
+	}
+}

@@ -22,11 +22,12 @@ const (
 
 // registeredTool holds a tool's definition and implementation.
 type registeredTool struct {
-	def    canonical.ToolDef
-	exec   ToolFunc
-	group  string // e.g. "fs", "runtime", "web", "memory", "mcp"
-	risk   string // "safe", "moderate", "sensitive"
-	source string // "builtin", "mcp:{server}", "skill:{name}"
+	def             canonical.ToolDef
+	exec            ToolFunc
+	group           string // e.g. "fs", "runtime", "web", "memory", "mcp"
+	risk            string // "safe", "moderate", "sensitive"
+	source          string // "builtin", "mcp:{server}", "skill:{name}"
+	concurrencySafe bool   // True if safe to run in parallel with other tools.
 }
 
 // Registry manages available tools.
@@ -46,6 +47,7 @@ func (r *Registry) Register(name, description string, schema json.RawMessage, fn
 }
 
 // RegisterWithGroup adds a tool with group, risk level, and source metadata.
+// ConcurrencySafe defaults to false — use RegisterFull for concurrent-safe tools.
 func (r *Registry) RegisterWithGroup(name, description string, schema json.RawMessage, group, risk, source string, fn ToolFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -60,6 +62,36 @@ func (r *Registry) RegisterWithGroup(name, description string, schema json.RawMe
 		risk:   risk,
 		source: source,
 	}
+}
+
+// RegisterFull adds a tool with all metadata including concurrency classification.
+func (r *Registry) RegisterFull(name, description string, schema json.RawMessage, group, risk, source string, concurrencySafe bool, fn ToolFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[name] = registeredTool{
+		def: canonical.ToolDef{
+			Name:        name,
+			Description: description,
+			InputSchema: schema,
+		},
+		exec:            fn,
+		group:           group,
+		risk:            risk,
+		source:          source,
+		concurrencySafe: concurrencySafe,
+	}
+}
+
+// IsConcurrencySafe returns whether a tool can safely run in parallel.
+// Unknown tools and MCP tools default to false (exclusive execution).
+func (r *Registry) IsConcurrencySafe(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	if !ok {
+		return false
+	}
+	return t.concurrencySafe
 }
 
 // Get returns a tool's definition and function by name.

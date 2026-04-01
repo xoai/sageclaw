@@ -128,7 +128,7 @@ func TestPrepareHistoryWithBudget_NilFallback(t *testing.T) {
 
 func TestPrepareHistoryWithBudget_UsesCalibrated(t *testing.T) {
 	// Create a budget with a tiny history budget.
-	budget := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	budget := NewContextBudget(200000, 8192)
 	// Force calibration with a very high overhead to make history budget tiny.
 	budget.overheadTokens = 198000
 	budget.historyBudget = 2000 - 8192 // Effectively very small.
@@ -154,7 +154,7 @@ func TestPrepareHistoryWithBudget_UsesCalibrated(t *testing.T) {
 }
 
 func TestPrepareHistoryWithBudget_Empty(t *testing.T) {
-	budget := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	budget := NewContextBudget(200000, 8192)
 	result := PrepareHistoryWithBudget(nil, budget)
 	if len(result) != 0 {
 		t.Errorf("expected 0 messages for nil input, got %d", len(result))

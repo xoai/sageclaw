@@ -138,6 +138,32 @@ type ModelStore interface {
 	ListAllDiscoveredModels(ctx context.Context) ([]DiscoveredModel, error)
 	DeleteDiscoveredModelsByProvider(ctx context.Context, provider string) error
 	GetDiscoveredModelAge(ctx context.Context, provider string) (time.Duration, error)
+	RefreshDiscoveredModels(ctx context.Context, provider string, models []DiscoveredModel) error
+}
+
+// ModelPricingOverride represents a user-set pricing override.
+type ModelPricingOverride struct {
+	ModelID           string
+	Provider          string
+	InputCost         float64
+	OutputCost        float64
+	CacheCost         float64
+	ThinkingCost      float64
+	CacheCreationCost float64
+	UpdatedAt         time.Time
+}
+
+// PricingStore manages model pricing lookups and user overrides.
+type PricingStore interface {
+	// GetModelPricing returns pricing for a model: override > discovered > nil.
+	GetModelPricing(ctx context.Context, modelID string) (*DiscoveredModel, error)
+	UpsertModelPricingOverride(ctx context.Context, o ModelPricingOverride) error
+	DeleteModelPricingOverride(ctx context.Context, modelID string) error
+	ListModelPricingOverrides(ctx context.Context) ([]ModelPricingOverride, error)
+	// BulkUpdateModelPricing updates pricing columns on discovered_models rows.
+	// Only updates rows where pricing_source is not "user". Creates rows for
+	// models not yet in discovered_models (OpenRouter-only models).
+	BulkUpdateModelPricing(ctx context.Context, updates []ModelPricingBulk) error
 }
 
 // Store composes all store interfaces.
@@ -151,6 +177,7 @@ type Store interface {
 	ConnectionStore
 	MCPRegistryStore
 	ModelStore
+	PricingStore
 	DB() *sql.DB
 	Close() error
 }

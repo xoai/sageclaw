@@ -4,62 +4,17 @@ import (
 	"testing"
 )
 
-func TestFindModelPricing_FromCache(t *testing.T) {
-	pc := NewPricingCache()
-	pc.mu.Lock()
-	pc.models["claude-sonnet-4-20250514"] = &ModelPricing{
-		InputCost: 3.5, OutputCost: 16.0, CacheCost: 0.35,
-	}
-	pc.mu.Unlock()
-
-	p := pc.FindModelPricing("claude-sonnet-4-20250514")
-	if p == nil {
-		t.Fatal("expected pricing from cache")
-	}
-	if p.InputCost != 3.5 {
-		t.Errorf("expected InputCost=3.5, got %v", p.InputCost)
-	}
-}
-
-func TestFindModelPricing_FallbackToKnownModels(t *testing.T) {
-	pc := NewPricingCache() // Empty cache.
-
-	// Should fall back to KnownModels.
-	p := pc.FindModelPricing("claude-sonnet-4-20250514")
-	if p == nil {
-		t.Fatal("expected pricing from KnownModels fallback")
-	}
-	if p.InputCost != 3.0 {
-		t.Errorf("expected InputCost=3.0 from KnownModels, got %v", p.InputCost)
-	}
-}
-
-func TestFindModelPricing_UnknownModel(t *testing.T) {
-	pc := NewPricingCache()
-	p := pc.FindModelPricing("unknown-model-xyz")
-	if p != nil {
-		t.Error("expected nil for unknown model")
-	}
-}
-
-func TestFindModelPricing_NilCache(t *testing.T) {
-	var pc *PricingCache
-	// Should fall back to KnownModels even with nil cache.
-	p := pc.FindModelPricing("gpt-4o")
-	if p == nil {
-		t.Fatal("expected pricing from KnownModels with nil cache")
-	}
-}
-
-func TestParseOpenRouterResponse(t *testing.T) {
-	pc := NewPricingCache()
-
-	// Simulated OpenRouter response.
+func TestParseOpenRouterPricing(t *testing.T) {
 	body := []byte(`{
 		"data": [
 			{
 				"id": "anthropic/claude-sonnet-4-20250514",
-				"pricing": {"prompt": "0.000003", "completion": "0.000015"}
+				"pricing": {
+					"prompt": "0.000003",
+					"completion": "0.000015",
+					"input_cache_read": "0.0000003",
+					"input_cache_write": "0.00000375"
+				}
 			},
 			{
 				"id": "google/gemini-2.5-pro-preview",
@@ -76,34 +31,84 @@ func TestParseOpenRouterResponse(t *testing.T) {
 		]
 	}`)
 
-	if err := pc.parseOpenRouterResponse(body); err != nil {
+	updates, err := parseOpenRouterPricing(body)
+	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
 
-	// Check direct model ID lookup.
-	p := pc.FindModelPricing("claude-sonnet-4-20250514")
-	if p == nil {
-		t.Fatal("expected pricing for claude-sonnet-4-20250514")
-	}
-	if p.InputCost != 3.0 {
-		t.Errorf("expected InputCost=3.0, got %v", p.InputCost)
-	}
-	if p.OutputCost != 15.0 {
-		t.Errorf("expected OutputCost=15.0, got %v", p.OutputCost)
+	byID := make(map[string]PricingUpdate)
+	for _, u := range updates {
+		byID[u.ModelID] = u
 	}
 
-	// Check GPT-4o.
-	p = pc.FindModelPricing("gpt-4o")
-	if p == nil {
-		t.Fatal("expected pricing for gpt-4o")
+	// Claude Sonnet 4 — should have real cache pricing from API.
+	if p, ok := byID["claude-sonnet-4-20250514"]; !ok {
+		t.Error("expected claude-sonnet-4-20250514 in updates")
+	} else {
+		if p.InputCost != 3.0 {
+			t.Errorf("InputCost = %v, want 3.0", p.InputCost)
+		}
+		if p.OutputCost != 15.0 {
+			t.Errorf("OutputCost = %v, want 15.0", p.OutputCost)
+		}
+		// Cache read: 0.0000003 * 1M = 0.3
+		if p.CacheCost != 0.3 {
+			t.Errorf("CacheCost = %v, want 0.3 (from input_cache_read)", p.CacheCost)
+		}
+		// Cache creation: 0.00000375 * 1M = 3.75
+		if p.CacheCreationCost != 3.75 {
+			t.Errorf("CacheCreationCost = %v, want 3.75 (from input_cache_write)", p.CacheCreationCost)
+		}
 	}
-	if p.InputCost != 2.5 {
-		t.Errorf("expected InputCost=2.5, got %v", p.InputCost)
+
+	// GPT-4o — no cache fields, should fall back to 10% estimate.
+	if p, ok := byID["gpt-4o"]; !ok {
+		t.Error("expected gpt-4o in updates")
+	} else {
+		if p.InputCost != 2.5 {
+			t.Errorf("InputCost = %v, want 2.5", p.InputCost)
+		}
+		// Fallback: 2.5 * 0.1 = 0.25
+		if p.CacheCost != 0.25 {
+			t.Errorf("CacheCost = %v, want 0.25 (10%% fallback)", p.CacheCost)
+		}
+		// No cache write field → 0.
+		if p.CacheCreationCost != 0 {
+			t.Errorf("CacheCreationCost = %v, want 0 (no field)", p.CacheCreationCost)
+		}
 	}
 
 	// Free model should be skipped.
-	if pc.models["model"] != nil {
+	if _, ok := byID["model"]; ok {
 		t.Error("expected free models to be skipped")
+	}
+}
+
+func TestParseOpenRouterPricing_DeduplicatesKnownModelMatch(t *testing.T) {
+	body := []byte(`{
+		"data": [
+			{
+				"id": "google/gemini-2.5-pro-preview",
+				"pricing": {"prompt": "0.00000125", "completion": "0.00001"}
+			}
+		]
+	}`)
+
+	updates, err := parseOpenRouterPricing(body)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	// Should have both the normalized ID and the KnownModels ID.
+	byID := make(map[string]PricingUpdate)
+	for _, u := range updates {
+		byID[u.ModelID] = u
+	}
+	if _, ok := byID["gemini-2.5-pro-preview"]; !ok {
+		t.Error("expected gemini-2.5-pro-preview (normalized)")
+	}
+	if _, ok := byID["gemini-2.5-pro"]; !ok {
+		t.Error("expected gemini-2.5-pro (KnownModel match)")
 	}
 }
 
@@ -115,7 +120,6 @@ func TestMatchToKnownModel_ExactMatch(t *testing.T) {
 }
 
 func TestMatchToKnownModel_FuzzyGeminiPreview(t *testing.T) {
-	// OpenRouter uses "google/gemini-2.5-pro-preview", SageClaw uses "gemini-2.5-pro".
 	result := matchToKnownModel("google/gemini-2.5-pro-preview")
 	if result != "gemini-2.5-pro" {
 		t.Errorf("expected gemini-2.5-pro, got %q", result)
@@ -143,8 +147,8 @@ func TestStripModelSuffix(t *testing.T) {
 		{"gemini-2.5-pro-preview", "gemini-2.5-pro"},
 		{"claude-3.5-sonnet-latest", "claude-3.5-sonnet"},
 		{"gpt-4o", "gpt-4o"},
-		{"model-20250514", "model"}, // Date suffix stripped.
-		{"claude-sonnet-4-20250514", "claude-sonnet-4"}, // Date suffix stripped.
+		{"model-20250514", "model"},
+		{"claude-sonnet-4-20250514", "claude-sonnet-4"},
 	}
 
 	for _, tt := range tests {
@@ -166,3 +170,16 @@ func TestEffectiveThinkingCost(t *testing.T) {
 		t.Errorf("expected explicit ThinkingCost, got %v", p.EffectiveThinkingCost())
 	}
 }
+
+func TestEffectiveCacheCreationCost(t *testing.T) {
+	p := &ModelPricing{InputCost: 3.0, CacheCreationCost: 0}
+	if p.EffectiveCacheCreationCost() != 3.75 { // 3.0 * 1.25
+		t.Errorf("expected fallback to InputCost*1.25, got %v", p.EffectiveCacheCreationCost())
+	}
+
+	p.CacheCreationCost = 4.0
+	if p.EffectiveCacheCreationCost() != 4.0 {
+		t.Errorf("expected explicit CacheCreationCost, got %v", p.EffectiveCacheCreationCost())
+	}
+}
+

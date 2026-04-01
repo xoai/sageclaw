@@ -4,7 +4,6 @@ import (
 	"log"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
-	"github.com/xoai/sageclaw/pkg/provider"
 	"github.com/xoai/sageclaw/pkg/tokenizer"
 )
 
@@ -22,12 +21,12 @@ type ContextBudget struct {
 	calibrated      bool // True after first calibration.
 }
 
-// NewContextBudget creates a budget from a model ID and response reserve.
+// NewContextBudget creates a budget from a context window size and response reserve.
 // Before calibration, uses a conservative 70% estimate for history budget.
-func NewContextBudget(modelID string, responseReserve int) *ContextBudget {
-	contextWindow := 200000 // Default (Claude).
-	if m := provider.FindModel(modelID); m != nil {
-		contextWindow = m.ContextWindow
+// If contextWindow is 0, defaults to 200000 (Claude default).
+func NewContextBudget(contextWindow int, responseReserve int) *ContextBudget {
+	if contextWindow <= 0 {
+		contextWindow = 200000 // Default (Claude).
 	}
 	if responseReserve <= 0 {
 		responseReserve = 8192

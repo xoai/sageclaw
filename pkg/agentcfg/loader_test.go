@@ -441,15 +441,15 @@ func TestAssembleSystemPrompt_WithTeamLead(t *testing.T) {
 	if !contains(prompt, "parent_id") {
 		t.Error("prompt should contain subtask creation example with parent_id")
 	}
-	// Hybrid worker-orchestrator model.
-	if !contains(prompt, "Handle yourself") {
-		t.Error("prompt should contain 'Handle yourself' guidance")
+	// Delegation guidance (v2: [Delegation Analysis] directive).
+	if !contains(prompt, "Delegation Guidance") {
+		t.Error("prompt should contain Delegation Guidance section")
+	}
+	if !contains(prompt, "[Delegation Analysis]") {
+		t.Error("prompt should reference [Delegation Analysis] block")
 	}
 	if contains(prompt, "MANDATORY DEFAULT") {
 		t.Error("prompt should NOT contain pure-orchestrator MANDATORY DEFAULT")
-	}
-	if contains(prompt, "ORCHESTRATE") {
-		t.Error("prompt should NOT contain 'you ORCHESTRATE' pure-orchestrator framing")
 	}
 	// Task planning section.
 	if !contains(prompt, "Task Planning") {
@@ -458,9 +458,9 @@ func TestAssembleSystemPrompt_WithTeamLead(t *testing.T) {
 	if !contains(prompt, "Anti-pattern") {
 		t.Error("prompt should contain task planning anti-pattern")
 	}
-	// Hybrid rules.
-	if !contains(prompt, "Handle simple, delegate complex") {
-		t.Error("prompt should contain hybrid rule")
+	// Rules.
+	if !contains(prompt, "Follow the [Delegation Analysis]") {
+		t.Error("prompt should contain analysis-following rule")
 	}
 	if !contains(prompt, "Search before create") {
 		t.Error("prompt should contain search-before-create rule")

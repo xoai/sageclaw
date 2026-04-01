@@ -90,17 +90,3 @@ func FindModel(id string) *ModelInfo {
 	return nil
 }
 
-// EstimateCost calculates the cost for a request given token counts.
-func EstimateCost(model *ModelInfo, inputTokens, outputTokens, cacheReadTokens int) float64 {
-	if model == nil {
-		return 0
-	}
-	inputCost := float64(inputTokens) / 1_000_000 * model.InputCost
-	outputCost := float64(outputTokens) / 1_000_000 * model.OutputCost
-	// Cache reads are cheaper — use cache cost for cached tokens.
-	cacheSavings := 0.0
-	if model.CacheCost > 0 && cacheReadTokens > 0 {
-		cacheSavings = float64(cacheReadTokens) / 1_000_000 * (model.InputCost - model.CacheCost)
-	}
-	return inputCost + outputCost - cacheSavings
-}

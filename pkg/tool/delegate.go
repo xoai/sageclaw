@@ -20,9 +20,9 @@ func RegisterDelegate(reg *Registry, delegateFn DelegateFunc, statusFn DelegateS
 		json.RawMessage(`{"type":"object","properties":{"agent_id":{"type":"string","description":"Target agent ID"},"prompt":{"type":"string","description":"Task prompt for the target agent"},"mode":{"type":"string","description":"sync (wait for result) or async (return immediately)","default":"sync"}},"required":["agent_id","prompt"]}`),
 		GroupOrchestration, RiskSensitive, "builtin", delegateToolFn(delegateFn))
 
-	reg.RegisterWithGroup("delegation_status", "Check the status of an async delegation",
+	reg.RegisterFull("delegation_status", "Check the status of an async delegation",
 		json.RawMessage(`{"type":"object","properties":{"delegation_id":{"type":"string","description":"Delegation record ID"}},"required":["delegation_id"]}`),
-		GroupOrchestration, RiskSensitive, "builtin", delegationStatusFn(statusFn))
+		GroupOrchestration, RiskSensitive, "builtin", true, delegationStatusFn(statusFn))
 }
 
 func delegateToolFn(delegateFn DelegateFunc) ToolFunc {

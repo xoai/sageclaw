@@ -252,41 +252,45 @@ func (s *Server) discoverModels(provType string) {
 
 	log.Printf("discover models: %s: cached %d models", provType, len(discovered))
 
-	// Re-resolve tiers from all discovered models.
-	s.resolveAllTiers()
-}
-
-// resolveAllTiers loads all discovered models, enriches with KnownModels, and resolves tiers.
-func (s *Server) resolveAllTiers() {
-	if s.router == nil {
-		return
-	}
-	all, err := s.store.ListAllDiscoveredModels(context.Background())
-	if err != nil {
-		log.Printf("resolve tiers: load models failed: %v", err)
-		return
-	}
-
-	// Build tier candidates enriched with KnownModels data.
-	candidates := make([]provider.TierCandidate, 0, len(all))
-	for _, d := range all {
-		tc := provider.TierCandidate{
-			Provider:      d.Provider,
-			ModelID:       d.ModelID,
-			ContextWindow: d.ContextWindow,
+	// Enrich newly discovered models with KnownModels pricing,
+	// but only for models that have NO pricing yet (empty source).
+	// Models already priced by OpenRouter or user are not downgraded.
+	allModels, _ := s.store.ListAllDiscoveredModels(context.Background())
+	hasPricing := make(map[string]bool)
+	for _, m := range allModels {
+		if m.PricingSource != "" {
+			hasPricing[m.ModelID] = true
+			hasPricing[m.ID] = true
 		}
-		// Enrich from KnownModels (pricing, tier hint, context_window if missing).
-		if known := provider.FindModel(d.ID); known != nil {
-			tc.TierHint = known.Tier
-			tc.InputCost = known.InputCost
-			if tc.ContextWindow == 0 {
-				tc.ContextWindow = known.ContextWindow
-			}
-		}
-		candidates = append(candidates, tc)
 	}
 
-	s.router.ResolveAllTiers(candidates)
+	var pricingUpdates []store.ModelPricingBulk
+	for _, d := range discovered {
+		if hasPricing[d.ModelID] || hasPricing[d.ID] {
+			continue // Already has pricing — don't downgrade.
+		}
+		km := provider.FindModel(d.ModelID)
+		if km == nil {
+			km = provider.FindModel(d.ID)
+		}
+		if km != nil {
+			pricingUpdates = append(pricingUpdates, store.ModelPricingBulk{
+				ModelID:   km.ModelID,
+				Provider:  d.Provider,
+				InputCost: km.InputCost, OutputCost: km.OutputCost,
+				CacheCost: km.CacheCost, ThinkingCost: km.ThinkingCost,
+				Source: "known",
+			})
+		}
+	}
+	if len(pricingUpdates) > 0 {
+		if err := s.store.BulkUpdateModelPricing(context.Background(), pricingUpdates); err != nil {
+			log.Printf("discover models: %s: pricing enrichment failed: %v", provType, err)
+		}
+	}
+
+	// Preset combos are seeded once at startup from KnownModels and stored in DB.
+	// No regeneration here — users may have edited them. DB is source of truth.
 }
 
 // handleProvidersUpdateConfig updates a provider's config (e.g. tokens_per_minute).
@@ -375,46 +379,38 @@ func (s *Server) handleProvidersModels(w http.ResponseWriter, r *http.Request) {
 		log.Printf("models: failed to load discovered models: %v", dbErr)
 	}
 
-	// 2. Build model list from discovered models, enriched with KnownModels pricing/tier.
+	// 2. Derive tier labels from preset combo membership.
+	modelTier := map[string]string{} // modelID → "strong", "fast", "balanced", "local"
+	if s.router != nil {
+		for _, tierName := range []string{"strong", "fast", "balanced", "local"} {
+			if combo, ok := s.router.GetCombo(tierName); ok {
+				for _, m := range combo.Models {
+					if _, already := modelTier[m.ModelID]; !already {
+						modelTier[m.ModelID] = tierName
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Build model list from discovered models (pricing comes from DB — seeded or OpenRouter).
 	var models []map[string]any
-	seen := map[string]bool{}
 	for _, d := range discovered {
 		entry := map[string]any{
 			"id": d.ID, "provider": d.Provider, "model_id": d.ModelID,
 			"name": d.DisplayName, "context_window": d.ContextWindow,
 			"max_output_tokens": d.MaxOutputTokens,
+			"input_cost": d.InputCost, "output_cost": d.OutputCost,
+			"cache_cost": d.CacheCost, "thinking_cost": d.ThinkingCost,
+			"cache_creation_cost": d.CacheCreationCost,
 			"available": connectedProviders[d.Provider],
-			"source":    "discovered",
+			"source":    d.PricingSource,
 		}
-		if known := provider.FindModel(d.ID); known != nil {
-			entry["input_cost"] = known.InputCost
-			entry["output_cost"] = known.OutputCost
-			entry["cache_cost"] = known.CacheCost
-			entry["tier"] = known.Tier
-			entry["name"] = known.Name
+		if tier, ok := modelTier[d.ModelID]; ok {
+			entry["tier"] = tier
 		}
 		// Enrich with capabilities from the registry.
 		if caps, ok := provider.LookupModelCapabilities(d.ModelID); ok {
-			entry["capabilities"] = caps
-		}
-		models = append(models, entry)
-		seen[d.ID] = true
-	}
-
-	// 3. Add KnownModels not yet discovered (fallback for unconnected providers).
-	for _, m := range provider.KnownModels {
-		if seen[m.ID] {
-			continue
-		}
-		entry := map[string]any{
-			"id": m.ID, "provider": m.Provider, "model_id": m.ModelID,
-			"name": m.Name, "tier": m.Tier,
-			"input_cost": m.InputCost, "output_cost": m.OutputCost,
-			"cache_cost": m.CacheCost, "context_window": m.ContextWindow,
-			"available": connectedProviders[m.Provider],
-			"source":    "known",
-		}
-		if caps, ok := provider.LookupModelCapabilities(m.ModelID); ok {
 			entry["capabilities"] = caps
 		}
 		models = append(models, entry)
@@ -485,23 +481,27 @@ func (s *Server) handleProvidersModelsRefresh(w http.ResponseWriter, r *http.Req
 }
 
 // refreshAllProviderModels discovers models for all connected providers.
+// Collects provider names first to avoid holding the router lock during discovery.
 func (s *Server) refreshAllProviderModels() (refreshed, failed []string) {
 	if s.router == nil {
 		return
 	}
+	// Collect names under read lock, then discover outside the lock.
+	var providers []string
 	s.router.ForEachProvider(func(name string, p provider.Provider) {
-		if _, ok := p.(provider.ModelLister); !ok {
-			return
+		if _, ok := p.(provider.ModelLister); ok {
+			providers = append(providers, name)
 		}
+	})
+	for _, name := range providers {
 		s.discoverModels(name)
-		// Check if models were actually cached.
 		models, err := s.store.ListDiscoveredModels(context.Background(), name)
 		if err == nil && len(models) > 0 {
 			refreshed = append(refreshed, name)
 		} else {
 			failed = append(failed, name)
 		}
-	})
+	}
 	return
 }
 
@@ -614,7 +614,7 @@ func (s *Server) handleCombosCreate(w http.ResponseWriter, r *http.Request) {
 		var models []provider.ComboModel
 		if json.Unmarshal(modelsRaw, &models) == nil && len(models) > 0 {
 			s.router.SetCombo(newID, provider.Combo{
-				Name: p.Name, Strategy: p.Strategy, Models: models,
+				Name: p.Name, Strategy: p.Strategy, Models: models, IsUser: true,
 			})
 		}
 	}

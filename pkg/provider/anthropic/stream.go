@@ -44,6 +44,7 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line for large tool args.
 	var current sseEvent
 	toolAccums := make(map[int]*toolAccum)
+	thinkingChars := 0 // Accumulated thinking text chars for token estimation.
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -51,7 +52,7 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 		if line == "" {
 			// Empty line = dispatch event.
 			if current.Event != "" && current.Data != "" {
-				processSSEEvent(current, events, toolAccums)
+				processSSEEvent(current, events, toolAccums, &thinkingChars)
 			}
 			current = sseEvent{}
 			continue
@@ -66,11 +67,11 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 
 	// Handle any remaining event.
 	if current.Event != "" && current.Data != "" {
-		processSSEEvent(current, events, toolAccums)
+		processSSEEvent(current, events, toolAccums, &thinkingChars)
 	}
 }
 
-func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent, toolAccums map[int]*toolAccum) {
+func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent, toolAccums map[int]*toolAccum, thinkingChars *int) {
 	switch evt.Event {
 	case eventContentBlockDelta:
 		var delta struct {
@@ -97,6 +98,7 @@ func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent, toolAccum
 				},
 			}
 		case "thinking_delta":
+			*thinkingChars += len(delta.Delta.Thinking)
 			events <- provider.StreamEvent{
 				Type:  "content_delta",
 				Index: delta.Index,
@@ -142,6 +144,15 @@ func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent, toolAccum
 			}
 		}
 		// thinking blocks start — no action needed until deltas arrive.
+		if block.ContentBlock.Type == "redacted_thinking" {
+			events <- provider.StreamEvent{
+				Type: "content_delta",
+				Delta: &canonical.Content{
+					Type:     "thinking",
+					Thinking: "[redacted]",
+				},
+			}
+		}
 
 	case eventContentBlockStop:
 		var stop struct {
@@ -201,11 +212,21 @@ func processSSEEvent(evt sseEvent, events chan<- provider.StreamEvent, toolAccum
 		if err := json.Unmarshal([]byte(evt.Data), &delta); err != nil {
 			return
 		}
+		// Estimate thinking tokens from accumulated thinking content (~4 chars/token).
+		// Anthropic doesn't report a separate thinking token count in streaming events.
+		estimatedThinking := 0
+		if *thinkingChars > 0 {
+			estimatedThinking = *thinkingChars / 4
+		}
 		ev := provider.StreamEvent{
 			Type:       "usage",
 			StopReason: delta.Delta.StopReason,
 			Usage: &canonical.Usage{
-				OutputTokens: delta.Usage.OutputTokens,
+				OutputTokens:   delta.Usage.OutputTokens,
+				CacheCreation:  delta.Usage.CacheCreationInputTokens,
+				CacheRead:      delta.Usage.CacheReadInputTokens,
+				ThinkingTokens: estimatedThinking,
+				Estimated:      estimatedThinking > 0,
 			},
 		}
 		events <- ev

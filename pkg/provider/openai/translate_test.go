@@ -207,6 +207,94 @@ func TestIsOSeries(t *testing.T) {
 	}
 }
 
+func TestUsesLegacyMaxTokens(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-4o", true},
+		{"gpt-4o-mini", true},
+		{"gpt-4", true},
+		{"gpt-4-turbo", true},
+		{"gpt-3.5-turbo", true},
+		{"chatgpt-4o-latest", true},
+		{"gpt-5.4-mini", false},  // New models use max_completion_tokens.
+		{"gpt-5", false},
+		{"gpt-5-turbo", false},
+		{"o3-mini", false},       // O-series handled separately.
+		{"claude-sonnet-4", false},
+	}
+	for _, tt := range tests {
+		if got := usesLegacyMaxTokens(tt.model); got != tt.want {
+			t.Errorf("usesLegacyMaxTokens(%q) = %v, want %v", tt.model, got, tt.want)
+		}
+	}
+}
+
+func TestToOpenAIRequest_GPT5_MaxCompletionTokens(t *testing.T) {
+	req := &canonical.Request{
+		Model:       "gpt-5.4-mini",
+		MaxTokens:   4096,
+		Temperature: 0.7,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "hello"}}},
+		},
+	}
+
+	data, err := ToOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	// GPT-5 uses max_completion_tokens, not max_tokens.
+	if _, ok := raw["max_tokens"]; ok {
+		t.Error("gpt-5 should not have max_tokens")
+	}
+	if raw["max_completion_tokens"].(float64) != 4096 {
+		t.Errorf("expected max_completion_tokens=4096, got %v", raw["max_completion_tokens"])
+	}
+	// GPT-5 supports temperature (unlike o-series).
+	if raw["temperature"].(float64) != 0.7 {
+		t.Errorf("expected temperature=0.7, got %v", raw["temperature"])
+	}
+}
+
+func TestToOpenAIRequest_StreamOptions(t *testing.T) {
+	// Streaming request should include stream_options with include_usage.
+	req := &canonical.Request{
+		Model:     "gpt-5.4-mini",
+		MaxTokens: 1024,
+		Stream:    true,
+		Messages: []canonical.Message{
+			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "hi"}}},
+		},
+	}
+
+	data, _ := ToOpenAIRequest(req)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+
+	opts, ok := raw["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatal("expected stream_options in streaming request")
+	}
+	if opts["include_usage"] != true {
+		t.Errorf("expected include_usage=true, got %v", opts["include_usage"])
+	}
+
+	// Non-streaming request should NOT have stream_options.
+	req.Stream = false
+	data2, _ := ToOpenAIRequest(req)
+	var raw2 map[string]any
+	json.Unmarshal(data2, &raw2)
+	if _, ok := raw2["stream_options"]; ok {
+		t.Error("non-streaming request should not have stream_options")
+	}
+}
+
 func TestFromOpenAIResponse_Text(t *testing.T) {
 	apiResp := `{
 		"id": "chatcmpl-123",

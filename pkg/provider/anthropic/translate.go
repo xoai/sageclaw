@@ -123,7 +123,24 @@ func ToAPIRequest(req *canonical.Request, enableCache bool) ([]byte, error) {
 	}
 
 	// System prompt with optional caching.
-	if req.System != "" {
+	// If SystemParts available: multi-block with per-part cache_control.
+	// Otherwise: single block with cache_control on everything (backward compat).
+	if len(req.SystemParts) > 0 {
+		var blocks []apiSystemBlock
+		for _, p := range req.SystemParts {
+			if p.Content == "" {
+				continue
+			}
+			block := apiSystemBlock{Type: "text", Text: p.Content}
+			if p.Cacheable && enableCache {
+				block.CacheControl = &cacheCtrl{Type: "ephemeral"}
+			}
+			blocks = append(blocks, block)
+		}
+		if len(blocks) > 0 {
+			ar.System = blocks
+		}
+	} else if req.System != "" {
 		block := apiSystemBlock{Type: "text", Text: req.System}
 		if enableCache {
 			block.CacheControl = &cacheCtrl{Type: "ephemeral"}
@@ -441,6 +458,7 @@ type apiContentBlock struct {
 	Text      string          `json:"text,omitempty"`
 	Thinking  string          `json:"thinking,omitempty"`  // thinking block text
 	Signature string          `json:"signature,omitempty"` // thinking block signature (must round-trip)
+	Data      string          `json:"data,omitempty"`      // redacted_thinking block payload
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
@@ -470,6 +488,11 @@ func FromAPIResponse(data []byte) (*canonical.Response, error) {
 				c.Meta = map[string]string{"thinking_signature": b.Signature}
 			}
 			content = append(content, c)
+		case "redacted_thinking":
+			content = append(content, canonical.Content{
+				Type:     "thinking",
+				Thinking: "[redacted]",
+			})
 		case "text":
 			content = append(content, canonical.Content{Type: "text", Text: b.Text})
 		case "tool_use":
@@ -484,11 +507,11 @@ func FromAPIResponse(data []byte) (*canonical.Response, error) {
 		}
 	}
 
-	// Estimate thinking tokens from thinking block text.
-	// Anthropic includes thinking in output_tokens but doesn't report separately.
+	// Estimate thinking tokens from thinking block text (~4 chars/token).
+	// Anthropic includes thinking in output_tokens but has no separate field in usage.
 	thinkingTokens := 0
 	for _, b := range blocks {
-		if b.Type == "thinking" && b.Thinking != "" {
+		if (b.Type == "thinking" || b.Type == "redacted_thinking") && b.Thinking != "" {
 			thinkingTokens += len([]rune(b.Thinking)) / 4
 		}
 	}

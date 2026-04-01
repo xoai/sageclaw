@@ -58,6 +58,7 @@ type Server struct {
 	tunnel         *tunnel.Client
 	pairing        *security.PairingManager
 	budgetEngine   *provider.BudgetEngine
+	modelRegistry  *provider.ModelRegistry
 	router         *provider.Router
 	chanMgr        *channel.Manager
 	mcpMgr         *mcp.Manager
@@ -130,6 +131,11 @@ func WithPairing(pm *security.PairingManager) ServerOption {
 // WithBudgetEngine adds budget tracking to the server.
 func WithBudgetEngine(be *provider.BudgetEngine) ServerOption {
 	return func(s *Server) { s.budgetEngine = be }
+}
+
+// WithModelRegistry adds model pricing registry to the server.
+func WithModelRegistry(mr *provider.ModelRegistry) ServerOption {
+	return func(s *Server) { s.modelRegistry = mr }
 }
 
 // WithEncryptionKey sets the credential encryption key.
@@ -489,6 +495,9 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("GET /api/budget/alerts/unread", srv.authGuard(srv.handleBudgetAlertsUnread))
 	mux.HandleFunc("POST /api/budget/alerts/", srv.authGuard(srv.handleBudgetAlertAck))
 	mux.HandleFunc("GET /api/budget/top-models", srv.authGuard(srv.handleBudgetTopModels))
+	mux.HandleFunc("GET /api/budget/pricing", srv.authGuard(srv.handleBudgetPricingList))
+	mux.HandleFunc("PUT /api/budget/pricing", srv.authGuard(srv.handleBudgetPricingOverride))
+	mux.HandleFunc("DELETE /api/budget/pricing/", srv.authGuard(srv.handleBudgetPricingDelete))
 
 	// Audio file serving (authenticated).
 	mux.HandleFunc("GET /api/audio/", srv.authGuard(srv.handleAudioServe))
@@ -595,8 +604,10 @@ func (s *Server) EventHandler() agent.EventHandler {
 			s.pendingConsent = append(s.pendingConsent, map[string]any{
 				"tool_name":   e.Consent.ToolName,
 				"group":       e.Consent.Group,
+				"source":      e.Consent.Source,
 				"risk_level":  e.Consent.RiskLevel,
 				"explanation": e.Consent.Explanation,
+				"tool_input":  e.Consent.ToolInput,
 				"nonce":       e.Consent.Nonce,
 				"agent_id":    e.AgentID,
 				"agent_name":  s.resolveAgentName(e.AgentID),

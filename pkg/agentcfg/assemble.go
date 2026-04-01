@@ -210,6 +210,13 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 		ThinkingLevel:    cfg.Identity.ThinkingLevel,
 		Grounding:        cfg.Tools.Grounding,
 		CodeExecution:    cfg.Tools.CodeExecution,
+
+		ContextPipeline:          cfg.Context.Pipeline,
+		ContextAggregateBudget:   cfg.Context.AggregateBudget,
+		ContextSnipAge:           cfg.Context.SnipAge,
+		ContextMicroCompactAge:   cfg.Context.MicroCompactAge,
+		ContextCollapseThreshold: cfg.Context.CollapseThreshold,
+		ContextOverflowMaxBytes:  int64(cfg.Context.OverflowMaxMB) * 1024 * 1024,
 	}
 
 	// Map team info to runtime.
@@ -277,35 +284,16 @@ func buildTeamSection(info *TeamInfo) string {
 		}
 		sb.WriteString("\nThis list is authoritative. Do NOT use tools to verify it.\n")
 
-		// --- 3-Layer routing ---
-		sb.WriteString("\n### How to Route Requests (3 layers — check in order)\n\n")
-
-		// Layer 1: keyword → member mapping (dynamic from descriptions)
-		sb.WriteString("**Layer 1 — Quick route (check FIRST):**\n")
-		routingTable := buildMemberRoutingTable(info.Members)
-		if routingTable != "" {
-			sb.WriteString(routingTable)
-		}
-		sb.WriteString("- Simple question / greeting / clarification → handle yourself\n\n")
-
-		// Layer 2: expertise matching
-		sb.WriteString("**Layer 2 — Expertise match (when no keyword match):**\n")
-		sb.WriteString("Compare the request to each member's specialty above. ")
-		sb.WriteString("Pick the best fit. If multiple members are needed, create one task per member.\n\n")
-
-		// Layer 3: fallback
-		sb.WriteString("**Layer 3 — Fallback:**\n")
-		sb.WriteString("- No member suited → handle it yourself\n")
-		sb.WriteString("- Request spans multiple skills → decompose into tasks for different members\n\n")
-
-		// --- When to delegate vs handle directly ---
-		sb.WriteString("### When to Delegate vs Handle Directly\n\n")
-		sb.WriteString("**Handle yourself:** Simple requests — greetings, clarifications, lookups, ")
-		sb.WriteString("translations, single-tool calls. If you can answer in one response with ")
-		sb.WriteString("one or two tool calls, do it yourself.\n\n")
-		sb.WriteString("**Delegate:** Tasks requiring member expertise, multiple steps, sustained ")
-		sb.WriteString("work, or parallel execution → use team_tasks.\n\n")
-		sb.WriteString("Do NOT use `spawn` for delegation — spawn is only for self-clone subagent work.\n\n")
+		// --- Delegation guidance ---
+		sb.WriteString("\n### Delegation Guidance\n\n")
+		sb.WriteString("A [Delegation Analysis] block appears in your context for each user message. ")
+		sb.WriteString("It scores your team members' fitness for the request.\n\n")
+		sb.WriteString("RULES:\n")
+		sb.WriteString("- When analysis says DELEGATE → create tasks using team_tasks. Do NOT handle the work yourself.\n")
+		sb.WriteString("- When analysis says SELF → handle it directly.\n")
+		sb.WriteString("- When the user explicitly asks you to delegate → ALWAYS delegate, regardless of analysis.\n")
+		sb.WriteString("- When unsure → ask the user if they want you to delegate.\n")
+		sb.WriteString("- Do NOT use `spawn` for delegation — spawn is only for self-clone subagent work.\n\n")
 
 		// --- Workflow ---
 		sb.WriteString("### Workflow\n")
@@ -332,10 +320,9 @@ func buildTeamSection(info *TeamInfo) string {
 
 		// --- Rules ---
 		sb.WriteString("### Rules\n")
-		sb.WriteString("- **Handle simple, delegate complex** — greetings and lookups yourself, sustained work to members\n")
+		sb.WriteString("- **Follow the [Delegation Analysis]** — it scores member fitness programmatically\n")
 		sb.WriteString("- **Search before create** — call team_tasks(action: \"search\") before creating tasks\n")
 		sb.WriteString("- **Batch create** — create ALL tasks in one turn, then announce, then STOP\n")
-		sb.WriteString("- **Assign by expertise** — match member skills from the roster\n")
 		sb.WriteString("- **Never self-assign** — you cannot create tasks assigned to yourself. If no member is suited, handle directly.\n")
 		sb.WriteString("- **Delegation ≠ completion** — do NOT say \"done\" after delegating. Only report when ALL results arrive.\n\n")
 

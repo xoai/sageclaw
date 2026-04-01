@@ -41,6 +41,7 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 
 	toolAccums := make(map[int]*oaiToolAccum)
 	var stopReason string
+	usageEmitted := false
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max line for large tool args.
@@ -67,14 +68,10 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 
 		if len(chunk.Choices) == 0 {
 			// Usage-only chunk (OpenAI sends this at the end with stream_options).
-			if chunk.Usage != nil {
-				events <- provider.StreamEvent{
-					Type: "usage",
-					Usage: &canonical.Usage{
-						InputTokens:  chunk.Usage.PromptTokens,
-						OutputTokens: chunk.Usage.CompletionTokens,
-					},
-				}
+			if chunk.Usage != nil && !usageEmitted {
+				u := openAIUsageToCanonical(*chunk.Usage)
+				events <- provider.StreamEvent{Type: "usage", Usage: &u}
+				usageEmitted = true
 			}
 			continue
 		}
@@ -114,6 +111,14 @@ func ParseSSEStream(r io.Reader, events chan<- provider.StreamEvent) {
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			stopReason = mapFinishReason(*choice.FinishReason)
 			emitAccumulatedToolCalls(toolAccums, events)
+		}
+
+		// Usage bundled with choices (OpenRouter sends usage on the final choice chunk).
+		// Dedup: only emit once across both paths.
+		if chunk.Usage != nil && !usageEmitted {
+			u := openAIUsageToCanonical(*chunk.Usage)
+			events <- provider.StreamEvent{Type: "usage", Usage: &u}
+			usageEmitted = true
 		}
 	}
 }

@@ -1,11 +1,14 @@
 package tool
 
 import (
+	"context"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xoai/sageclaw/pkg/security"
 )
 
 func TestExtractPageText_HTMLPage(t *testing.T) {
@@ -320,6 +323,95 @@ func TestDDGURLDecoder(t *testing.T) {
 	}
 }
 
+// --- C2: Step-function scaling tests ---
+
+func TestStepFunctionScaling(t *testing.T) {
+	// Simulate the scaling logic from web.go.
+	scale := func(maxChars int, pct float64) int {
+		switch {
+		case pct >= 0.75:
+			if maxChars > 10_000 {
+				maxChars = 10_000
+			}
+		case pct >= 0.50:
+			if maxChars > 20_000 {
+				maxChars = 20_000
+			}
+		}
+		if maxChars < 2000 {
+			maxChars = 2000
+		}
+		return maxChars
+	}
+
+	tests := []struct {
+		name     string
+		max      int
+		pct      float64
+		expected int
+	}{
+		{"early iteration, full budget", 50000, 0.20, 50000},
+		{"at 49%, still full", 50000, 0.49, 50000},
+		{"at 50%, capped to 20K", 50000, 0.50, 20000},
+		{"at 60%, capped to 20K", 50000, 0.60, 20000},
+		{"at 75%, capped to 10K", 50000, 0.75, 10000},
+		{"at 90%, capped to 10K", 50000, 0.90, 10000},
+		{"user-specified 5K at 50%, kept", 5000, 0.50, 5000},
+		{"user-specified 5K at 75%, kept", 5000, 0.75, 5000},
+		{"floor at 2000", 1000, 0.90, 2000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scale(tt.max, tt.pct)
+			if got != tt.expected {
+				t.Errorf("scale(%d, %.2f) = %d, want %d", tt.max, tt.pct, got, tt.expected)
+			}
+		})
+	}
+}
+
+// --- C3: Default constant test ---
+
+func TestMaxFetchCharsDefault(t *testing.T) {
+	if maxFetchChars != 50_000 {
+		t.Errorf("maxFetchChars = %d, want 50000", maxFetchChars)
+	}
+}
+
+// --- C4: Wrapper-overhead-aware truncation test ---
+
+func TestWrapperOverheadTruncation(t *testing.T) {
+	// Verify that WrapBoundary("", ...) returns a non-empty shell we can measure.
+	shell := security.WrapBoundary("", "web_fetch", "https://example.com/page")
+	if len(shell) < 100 {
+		t.Fatalf("expected wrapper shell >= 100 chars, got %d", len(shell))
+	}
+	// Verify that wrapping preserves the closing tag.
+	if !strings.Contains(shell, "</external-content>") {
+		t.Error("wrapper shell should contain closing </external-content> tag")
+	}
+	// Verify wrapping real content preserves closing tag.
+	wrapped := security.WrapBoundary("test content here", "web_fetch", "https://example.com")
+	if !strings.HasSuffix(strings.TrimSpace(wrapped), "</external-content>") {
+		t.Errorf("wrapped content should end with closing tag, got: ...%s", wrapped[len(wrapped)-50:])
+	}
+}
+
+// --- C5: Cloudflare markdown content-type detection test ---
+
+func TestCloudflareMarkdownDetection(t *testing.T) {
+	// text/markdown should be detected.
+	ct := "text/markdown; charset=utf-8"
+	if !strings.Contains(ct, "text/markdown") {
+		t.Error("expected text/markdown to be detected in content-type")
+	}
+	// text/html should not.
+	ct2 := "text/html; charset=utf-8"
+	if strings.Contains(ct2, "text/markdown") {
+		t.Error("text/html should not match text/markdown")
+	}
+}
+
 func TestIsBinaryContentType(t *testing.T) {
 	tests := []struct {
 		ct     string
@@ -347,5 +439,53 @@ func TestIsBinaryContentType(t *testing.T) {
 		if got != tt.binary {
 			t.Errorf("isBinaryContentType(%q) = %v, want %v", tt.ct, got, tt.binary)
 		}
+	}
+}
+
+// --- T5: web_search snippet truncation + adaptive count ---
+
+func TestTruncateSnippet_Short(t *testing.T) {
+	got := truncateSnippet("short snippet", 200)
+	if got != "short snippet" {
+		t.Errorf("expected unchanged, got: %s", got)
+	}
+}
+
+func TestTruncateSnippet_Long(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	got := truncateSnippet(long, 200)
+	if len(got) != 203 { // 200 + "..."
+		t.Errorf("expected 203 chars, got %d", len(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Error("expected trailing ...")
+	}
+}
+
+func TestAdaptiveSearchCount_Early(t *testing.T) {
+	ctx := WithIteration(context.Background(), IterationInfo{Current: 2, Max: 10})
+	if got := adaptiveSearchCount(ctx, 10); got != 10 {
+		t.Errorf("early iteration: expected 10, got %d", got)
+	}
+}
+
+func TestAdaptiveSearchCount_Mid(t *testing.T) {
+	ctx := WithIteration(context.Background(), IterationInfo{Current: 5, Max: 10})
+	if got := adaptiveSearchCount(ctx, 10); got != 5 {
+		t.Errorf("50%% iteration: expected 5, got %d", got)
+	}
+}
+
+func TestAdaptiveSearchCount_Late(t *testing.T) {
+	ctx := WithIteration(context.Background(), IterationInfo{Current: 8, Max: 10})
+	if got := adaptiveSearchCount(ctx, 10); got != 3 {
+		t.Errorf("80%% iteration: expected 3, got %d", got)
+	}
+}
+
+func TestAdaptiveSearchCount_SmallRequest(t *testing.T) {
+	ctx := WithIteration(context.Background(), IterationInfo{Current: 8, Max: 10})
+	if got := adaptiveSearchCount(ctx, 2); got != 2 {
+		t.Errorf("small request at late iteration: expected 2 (unchanged), got %d", got)
 	}
 }

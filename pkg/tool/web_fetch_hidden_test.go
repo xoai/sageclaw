@@ -152,6 +152,92 @@ func TestIsHiddenElement_WordPressScreenReaderText(t *testing.T) {
 	}
 }
 
+// --- OpenClaw-sourced pattern tests ---
+
+func TestIsHiddenElement_TypeHidden(t *testing.T) {
+	node := parseElement(t, `<input type="hidden" name="csrf" value="abc123">`)
+	if !isHiddenElement(node) {
+		t.Error("expected type=hidden input to be detected")
+	}
+}
+
+func TestIsHiddenElement_TypeText(t *testing.T) {
+	node := parseElement(t, `<input type="text" name="query">`)
+	if isHiddenElement(node) {
+		t.Error("type=text input should not be hidden")
+	}
+}
+
+func TestIsHiddenElement_ColorTransparent(t *testing.T) {
+	node := parseElement(t, `<span style="color: transparent;">Invisible text</span>`)
+	if !isHiddenElement(node) {
+		t.Error("expected color:transparent to be detected")
+	}
+}
+
+func TestIsHiddenElement_BackgroundTransparent_NotHidden(t *testing.T) {
+	node := parseElement(t, `<div style="background-color: transparent;">Visible</div>`)
+	if isHiddenElement(node) {
+		t.Error("background-color:transparent should NOT be detected as hidden")
+	}
+}
+
+func TestIsHiddenElement_ClipPathInset(t *testing.T) {
+	node := parseElement(t, `<span style="clip-path: inset(100%);">Clipped</span>`)
+	if !isHiddenElement(node) {
+		t.Error("expected clip-path:inset(100%) to be detected")
+	}
+}
+
+func TestIsHiddenElement_TransformScale0(t *testing.T) {
+	node := parseElement(t, `<div style="transform: scale(0);">Scaled to zero</div>`)
+	if !isHiddenElement(node) {
+		t.Error("expected transform:scale(0) to be detected")
+	}
+}
+
+func TestIsHiddenElement_TransformTranslateX(t *testing.T) {
+	node := parseElement(t, `<div style="transform: translateX(-9999px);">Far away</div>`)
+	if !isHiddenElement(node) {
+		t.Error("expected translateX(-9999px) to be detected")
+	}
+}
+
+func TestIsHiddenElement_TextIndentHide(t *testing.T) {
+	node := parseElement(t, `<span style="text-indent: -9999px;">Indented away</span>`)
+	if !isHiddenElement(node) {
+		t.Error("expected text-indent:-9999px to be detected")
+	}
+}
+
+func TestIsHiddenElement_ZeroSizeOverflowHidden(t *testing.T) {
+	node := parseElement(t, `<div style="width: 0; height: 0; overflow: hidden;">Tiny box</div>`)
+	if !isHiddenElement(node) {
+		t.Error("expected zero-size container with overflow:hidden to be detected")
+	}
+}
+
+func TestIsHiddenElement_ZeroWidthOnly_NotHidden(t *testing.T) {
+	node := parseElement(t, `<div style="width: 0; height: 100px; overflow: hidden;">Half zero</div>`)
+	if isHiddenElement(node) {
+		t.Error("width:0 alone (without height:0) should not be hidden")
+	}
+}
+
+func TestIsHiddenElement_FractionalSize_NotHidden(t *testing.T) {
+	node := parseElement(t, `<div style="width: 0.5em; height: 0.3em; overflow: hidden;">Small but visible</div>`)
+	if isHiddenElement(node) {
+		t.Error("fractional width/height (0.5em) should NOT be detected as zero-size hidden")
+	}
+}
+
+func TestIsHiddenElement_ScreenReaderOnly(t *testing.T) {
+	node := parseElement(t, `<span class="screen-reader-only">Generic sr class</span>`)
+	if !isHiddenElement(node) {
+		t.Error("expected 'screen-reader-only' class to be detected")
+	}
+}
+
 // Integration: verify hidden elements are stripped from DOM walker output.
 func TestHtmlToMarkdown_StripsHiddenElements(t *testing.T) {
 	html := `<html><body>

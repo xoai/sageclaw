@@ -11,6 +11,8 @@ export default function Budget() {
   const [editForm, setEditForm] = useState({});
   const [toast, setToast] = useState(null);
   const [tab, setTab] = useState('overview');
+  const [pricing, setPricing] = useState([]);
+  const [pricingEdit, setPricingEdit] = useState(null);
 
   const load = () => {
     fetch('/api/budget/summary').then(r => r.json()).then(setSummary).catch(() => {});
@@ -18,6 +20,7 @@ export default function Budget() {
     fetch('/api/budget/history?days=30').then(r => r.json()).then(d => setHistory(d || [])).catch(() => {});
     fetch('/api/budget/alerts').then(r => r.json()).then(d => setAlerts(d || [])).catch(() => {});
     fetch('/api/budget/top-models').then(r => r.json()).then(d => setTopModels(d || [])).catch(() => {});
+    fetch('/api/budget/pricing').then(r => r.json()).then(d => setPricing(d || [])).catch(() => {});
   };
 
   useEffect(load, []);
@@ -114,6 +117,7 @@ export default function Budget() {
             <span class="badge badge-red" style="margin-left:4px">{alerts.filter(a => !a.acknowledged).length}</span>
           )}
         </button>
+        <button class={tab === 'pricing' ? 'tab-active' : ''} onClick={() => setTab('pricing')}>Pricing</button>
       </div>
 
       {tab === 'overview' && summary && (
@@ -149,28 +153,36 @@ export default function Budget() {
           </div>
 
           {/* Top models */}
-          {topModels.length > 0 && (
-            <div class="card" style="padding:20px;margin-bottom:1.5rem">
-              <h3 style="margin-bottom:12px">Top Models (This Month)</h3>
-              <table class="data-table">
-                <thead>
-                  <tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col">Cost</th><th scope="col">Requests</th><th scope="col">Input Tokens</th><th scope="col">Output Tokens</th></tr>
-                </thead>
-                <tbody>
-                  {topModels.map((m, i) => (
-                    <tr key={i}>
-                      <td><code>{m.model}</code></td>
-                      <td>{m.provider}</td>
-                      <td style="font-weight:600">${m.cost_usd?.toFixed(4)}</td>
-                      <td>{m.requests}</td>
-                      <td>{(m.input_tokens || 0).toLocaleString()}</td>
-                      <td>{(m.output_tokens || 0).toLocaleString()}</td>
+          {topModels.length > 0 && (() => {
+            const hasThinking = topModels.some(m => m.thinking_tokens > 0);
+            return (
+              <div class="card" style="padding:20px;margin-bottom:1.5rem">
+                <h3 style="margin-bottom:12px">Top Models (This Month)</h3>
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Model</th><th scope="col">Provider</th><th scope="col">Cost</th><th scope="col">Requests</th>
+                      <th scope="col">Input Tokens</th><th scope="col">Output Tokens</th>
+                      {hasThinking && <th scope="col">Thinking</th>}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody>
+                    {topModels.map((m, i) => (
+                      <tr key={i}>
+                        <td><code>{m.model}</code></td>
+                        <td>{m.provider}</td>
+                        <td style="font-weight:600">${m.cost_usd?.toFixed(4)}</td>
+                        <td>{m.requests}</td>
+                        <td>{(m.input_tokens || 0).toLocaleString()}</td>
+                        <td>{(m.output_tokens || 0).toLocaleString()}</td>
+                        {hasThinking && <td>{(m.thinking_tokens || 0).toLocaleString()}</td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
 
           {/* Quick stats */}
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
@@ -271,6 +283,108 @@ export default function Budget() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {tab === 'pricing' && (
+        <div>
+          {/* Pricing editor modal */}
+          {pricingEdit && (
+            <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100"
+              onClick={e => { if (e.target === e.currentTarget) setPricingEdit(null); }}>
+              <div class="card" style="padding:24px;min-width:400px;max-width:500px" onClick={e => e.stopPropagation()}>
+                <h3 style="margin-bottom:16px">Edit Pricing: {pricingEdit.model_id}</h3>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                  {['input_cost', 'output_cost', 'cache_cost', 'thinking_cost', 'cache_creation_cost'].map(field => (
+                    <div class="form-group" key={field}>
+                      <label style="font-size:12px;text-transform:capitalize">{field.replace(/_/g, ' ')} ($/1M)</label>
+                      <input type="number" step="0.01" min="0"
+                        value={pricingEdit[field] ?? 0}
+                        onInput={e => setPricingEdit({ ...pricingEdit, [field]: parseFloat(e.target.value) || 0 })} />
+                    </div>
+                  ))}
+                </div>
+                <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+                  <button class="btn-secondary" onClick={() => setPricingEdit(null)}>Cancel</button>
+                  <button class="btn-primary" onClick={async () => {
+                    const res = await fetch('/api/budget/pricing', {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(pricingEdit),
+                    });
+                    if (res.ok) {
+                      showToast(`Pricing override saved for ${pricingEdit.model_id}`);
+                      setPricingEdit(null);
+                      load();
+                    } else {
+                      showToast('Failed to save override', 'error');
+                    }
+                  }}>Save Override</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div class="card" style="padding:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+              <h3>Model Pricing</h3>
+              <span style="font-size:12px;color:var(--text-muted)">{pricing.length} models</span>
+            </div>
+            {pricing.length === 0 ? (
+              <p style="color:var(--text-muted);text-align:center;padding:2rem 0">No models discovered yet. Add a provider to see pricing.</p>
+            ) : (
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Model</th>
+                    <th scope="col">Provider</th>
+                    <th scope="col">Source</th>
+                    <th scope="col">Input</th>
+                    <th scope="col">Output</th>
+                    <th scope="col">Cache</th>
+                    <th scope="col" style="width:1px"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pricing.map((m, i) => (
+                    <tr key={i}>
+                      <td><code style="font-size:12px">{m.model_id}</code></td>
+                      <td>{m.provider}</td>
+                      <td>
+                        <span class={`badge ${
+                          m.pricing_source === 'user' ? 'badge-blue' :
+                          m.pricing_source === 'openrouter' ? 'badge-green' :
+                          m.pricing_source === 'known' ? 'badge-gray' : 'badge-yellow'
+                        }`} style="font-size:10px;text-transform:uppercase">
+                          {m.pricing_source === 'user' ? 'Custom' :
+                           m.pricing_source === 'openrouter' ? 'Auto' :
+                           m.pricing_source === 'known' ? 'Built-in' : 'Unknown'}
+                        </span>
+                      </td>
+                      <td style="font-size:12px">${m.input_cost?.toFixed(2)}</td>
+                      <td style="font-size:12px">${m.output_cost?.toFixed(2)}</td>
+                      <td style="font-size:12px">${m.cache_cost?.toFixed(2)}</td>
+                      <td style="white-space:nowrap">
+                        <button class="btn-small" onClick={() => setPricingEdit({
+                          model_id: m.model_id, provider: m.provider,
+                          input_cost: m.input_cost, output_cost: m.output_cost,
+                          cache_cost: m.cache_cost, thinking_cost: m.thinking_cost,
+                          cache_creation_cost: m.cache_creation_cost,
+                        })}>Edit</button>
+                        {m.has_override && (
+                          <button class="btn-small" style="margin-left:4px;color:var(--error)" onClick={async () => {
+                            await fetch(`/api/budget/pricing/${encodeURIComponent(m.model_id)}`, { method: 'DELETE' });
+                            showToast(`Override removed for ${m.model_id}`);
+                            load();
+                          }}>Reset</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
       )}
     </div>

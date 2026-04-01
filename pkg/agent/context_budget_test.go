@@ -14,7 +14,7 @@ func makeTextMsg(role, text string) canonical.Message {
 }
 
 func TestContextBudget_NewDefaults(t *testing.T) {
-	b := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	b := NewContextBudget(200000, 8192)
 	if b.contextWindow != 200000 {
 		t.Errorf("expected context window 200000, got %d", b.contextWindow)
 	}
@@ -26,15 +26,15 @@ func TestContextBudget_NewDefaults(t *testing.T) {
 	}
 }
 
-func TestContextBudget_NewUnknownModel(t *testing.T) {
-	b := NewContextBudget("unknown-model-xyz", 8192)
+func TestContextBudget_NewZeroContextWindow(t *testing.T) {
+	b := NewContextBudget(0, 8192)
 	if b.contextWindow != 200000 {
-		t.Errorf("expected default 200000 for unknown model, got %d", b.contextWindow)
+		t.Errorf("expected default 200000 for zero context window, got %d", b.contextWindow)
 	}
 }
 
 func TestContextBudget_Calibrate(t *testing.T) {
-	b := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	b := NewContextBudget(200000, 8192)
 
 	history := []canonical.Message{
 		makeTextMsg("user", "Hello, how are you?"),
@@ -61,7 +61,7 @@ func TestContextBudget_Calibrate(t *testing.T) {
 }
 
 func TestContextBudget_CalibrateOnlyOnce(t *testing.T) {
-	b := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	b := NewContextBudget(200000, 8192)
 	history := []canonical.Message{makeTextMsg("user", "hi")}
 
 	b.Calibrate(5000, history)
@@ -74,7 +74,7 @@ func TestContextBudget_CalibrateOnlyOnce(t *testing.T) {
 }
 
 func TestContextBudget_CalibrateSkipsInvalid(t *testing.T) {
-	b := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	b := NewContextBudget(200000, 8192)
 	history := []canonical.Message{makeTextMsg("user", "hi")}
 
 	b.Calibrate(0, history)
@@ -89,7 +89,7 @@ func TestContextBudget_CalibrateSkipsInvalid(t *testing.T) {
 }
 
 func TestContextBudget_Usage(t *testing.T) {
-	b := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	b := NewContextBudget(200000, 8192)
 	history := []canonical.Message{makeTextMsg("user", "hi")}
 
 	usage := b.Usage(history)
@@ -109,7 +109,7 @@ func TestContextBudget_UsageZeroBudget(t *testing.T) {
 }
 
 func TestContextBudget_CalibrateNegativeOverhead(t *testing.T) {
-	b := NewContextBudget("claude-sonnet-4-20250514", 8192)
+	b := NewContextBudget(200000, 8192)
 	// Simulate: inputTokens < estimated history (shouldn't happen, but be safe).
 	history := []canonical.Message{makeTextMsg("user", "hi")}
 	b.Calibrate(1, history)

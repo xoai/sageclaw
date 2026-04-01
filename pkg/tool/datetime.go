@@ -11,9 +11,9 @@ import (
 
 // RegisterDatetime registers the datetime tool.
 func RegisterDatetime(reg *Registry) {
-	reg.RegisterWithGroup("datetime", "Get the current date, time, and timezone",
+	reg.RegisterFull("datetime", "Get the current date, time, and timezone",
 		json.RawMessage(`{"type":"object","properties":{}}`),
-		GroupCore, RiskSafe, "builtin", datetimeTool())
+		GroupCore, RiskSafe, "builtin", true, datetimeTool())
 }
 
 func datetimeTool() ToolFunc {

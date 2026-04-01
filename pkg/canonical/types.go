@@ -2,10 +2,23 @@ package canonical
 
 import "encoding/json"
 
+// MessageAnnotations holds pipeline metadata for a message.
+// Never serialized to providers or storage (json:"-" on Message field).
+type MessageAnnotations struct {
+	Iteration     int    // Loop iteration that produced this message.
+	TokenEstimate int    // Cached token count. 0 = not yet computed.
+	Snippable     bool   // True if all tool results are read-only.
+	Snipped       bool   // True if content was replaced by snip marker.
+	OverflowPath  string // Disk path if result was persisted to overflow.
+	CollapsedFrom int    // Original message index before projection.
+	Summary       string // One-line tool summary (generated async, may be empty).
+}
+
 // Message represents a single message in a conversation.
 type Message struct {
-	Role    string    `json:"role"`    // "user", "assistant", "tool"
-	Content []Content `json:"content"` // Always an array (sage-router convention)
+	Role        string              `json:"role"`    // "user", "assistant", "tool"
+	Content     []Content           `json:"content"` // Always an array (sage-router convention)
+	Annotations *MessageAnnotations `json:"-"`       // Pipeline metadata, never serialized.
 }
 
 // Content represents a content block within a message.
@@ -64,11 +77,42 @@ type ImageSource struct {
 	Data      string `json:"data"`
 }
 
+// SystemPart represents a segment of the system prompt with caching intent.
+// Providers that support prompt caching use the Cacheable flag to apply
+// their specific caching mechanism (Anthropic cache_control, Gemini
+// cachedContent, OpenAI automatic prefix caching).
+type SystemPart struct {
+	Content   string `json:"content"`
+	Cacheable bool   `json:"cacheable"`
+}
+
+// JoinSystemParts concatenates all parts into a single string,
+// separated by double newlines. Used for backward compatibility
+// with providers that don't support SystemParts.
+func JoinSystemParts(parts []SystemPart) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	var total int
+	for _, p := range parts {
+		total += len(p.Content) + 2
+	}
+	buf := make([]byte, 0, total)
+	for i, p := range parts {
+		if i > 0 {
+			buf = append(buf, '\n', '\n')
+		}
+		buf = append(buf, p.Content...)
+	}
+	return string(buf)
+}
+
 // Request is the canonical LLM request format.
 type Request struct {
 	Model            string         `json:"model"`
 	Messages         []Message      `json:"messages"`
 	System           string         `json:"system,omitempty"`
+	SystemParts      []SystemPart   `json:"system_parts,omitempty"` // Structured system prompt for provider-specific caching.
 	Tools            []ToolDef      `json:"tools,omitempty"`
 	MaxTokens        int            `json:"max_tokens,omitempty"`
 	Temperature      float64        `json:"temperature,omitempty"`
@@ -117,9 +161,10 @@ func MessagesHaveAudio(msgs []Message) bool {
 
 // Usage tracks token consumption.
 type Usage struct {
-	InputTokens    int `json:"input_tokens"`
-	OutputTokens   int `json:"output_tokens"`
-	CacheCreation  int `json:"cache_creation_input_tokens,omitempty"`
-	CacheRead      int `json:"cache_read_input_tokens,omitempty"`
-	ThinkingTokens int `json:"thinking_tokens,omitempty"` // Tokens used for extended thinking/reasoning.
+	InputTokens    int  `json:"input_tokens"`
+	OutputTokens   int  `json:"output_tokens"`
+	CacheCreation  int  `json:"cache_creation_input_tokens,omitempty"`
+	CacheRead      int  `json:"cache_read_input_tokens,omitempty"`
+	ThinkingTokens int  `json:"thinking_tokens,omitempty"` // Tokens used for extended thinking/reasoning.
+	Estimated      bool `json:"estimated,omitempty"`        // True when tokens were estimated (not reported by provider).
 }

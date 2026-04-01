@@ -13,19 +13,25 @@ import (
 	"github.com/xoai/sageclaw/pkg/security"
 )
 
+const readFileMaxChars = 30_000 // ~7.5K tokens — GoClaw uses 50K, we use 30K since read_file is called frequently.
+
 // RegisterFS registers file system tools on the registry.
 func RegisterFS(reg *Registry, sandbox *security.Sandbox) {
-	reg.RegisterWithGroup("read_file", "Read the contents of a file",
-		json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path relative to workspace"}},"required":["path"]}`),
-		GroupFS, RiskModerate, "builtin", fsRead(sandbox))
+	reg.RegisterFull("read_file", "Read the contents of a file",
+		json.RawMessage(`{"type":"object","properties":{`+
+			`"path":{"type":"string","description":"File path relative to workspace"},`+
+			`"offset":{"type":"integer","description":"Starting line number (0-based, optional)"},`+
+			`"limit":{"type":"integer","description":"Maximum number of lines to return (optional)"}`+
+			`},"required":["path"]}`),
+		GroupFS, RiskModerate, "builtin", true, fsRead(sandbox))
 
 	reg.RegisterWithGroup("write_file", "Write content to a file",
 		json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path relative to workspace"},"content":{"type":"string","description":"Content to write"}},"required":["path","content"]}`),
 		GroupFS, RiskModerate, "builtin", fsWrite(sandbox))
 
-	reg.RegisterWithGroup("list_directory", "List files and directories",
+	reg.RegisterFull("list_directory", "List files and directories",
 		json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Directory path relative to workspace"}},"required":["path"]}`),
-		GroupFS, RiskModerate, "builtin", fsList(sandbox))
+		GroupFS, RiskModerate, "builtin", true, fsList(sandbox))
 }
 
 // binaryFileExts lists extensions that are binary and shouldn't be read as text.
@@ -65,7 +71,9 @@ func BinaryFileExtensions() []string {
 func fsRead(sandbox *security.Sandbox) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
-			Path string `json:"path"`
+			Path   string `json:"path"`
+			Offset int    `json:"offset"`
+			Limit  int    `json:"limit"`
 		}
 		if err := json.Unmarshal(input, &params); err != nil {
 			return errorResult("invalid input: " + err.Error()), nil
@@ -92,13 +100,47 @@ func fsRead(sandbox *security.Sandbox) ToolFunc {
 			return errorResult("read failed: " + err.Error()), nil
 		}
 
-		// Truncate large files.
 		content := string(data)
-		if len(content) > maxOutputBytes {
-			content = content[:maxOutputBytes] + fmt.Sprintf("\n... [truncated at %dKB]", maxOutputBytes/1000)
+		lines := strings.Split(content, "\n")
+		totalLines := len(lines)
+
+		// Apply offset/limit (line-based).
+		startLine := 0
+		if params.Offset > 0 {
+			startLine = params.Offset
+		}
+		if startLine >= totalLines {
+			return &canonical.ToolResult{
+				Content: fmt.Sprintf("[offset %d exceeds file length of %d lines]", startLine, totalLines),
+			}, nil
 		}
 
-		return &canonical.ToolResult{Content: content}, nil
+		endLine := totalLines
+		if params.Limit > 0 && startLine+params.Limit < endLine {
+			endLine = startLine + params.Limit
+		}
+
+		selected := strings.Join(lines[startLine:endLine], "\n")
+
+		// Adaptive character cap.
+		maxChars := adaptiveMax(ctx, readFileMaxChars)
+		truncated := len(selected) > maxChars
+
+		if truncated {
+			selected = capOutput(selected, maxChars)
+		}
+
+		// Pagination hint.
+		if truncated || startLine > 0 || endLine < totalLines {
+			hint := fmt.Sprintf("\n[Showing lines %d-%d of %d total", startLine, endLine-1, totalLines)
+			if truncated {
+				hint += fmt.Sprintf(" (capped at %d chars)", maxChars)
+			}
+			hint += ". Use offset/limit to read more.]"
+			selected += hint
+		}
+
+		return &canonical.ToolResult{Content: selected}, nil
 	}
 }
 

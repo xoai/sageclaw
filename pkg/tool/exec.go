@@ -15,7 +15,7 @@ import (
 const (
 	defaultExecTimeout = 30 * time.Second
 	maxExecTimeout     = 300 * time.Second
-	maxOutputBytes     = 512_000 // ~128K tokens — GoClaw uses 1MB; 512KB balances detail vs context pressure
+	maxOutputChars     = 30_000 // ~7.5K tokens — GoClaw uses 30K; head+tail truncation preserves errors.
 )
 
 // RegisterExec registers the shell execution tool.
@@ -74,10 +74,9 @@ func execCommand(workdir string, disabledDenyGroups map[string]bool) ToolFunc {
 		output, err := cmd.CombinedOutput()
 		result := string(output)
 
-		// Truncate large output.
-		if len(result) > maxOutputBytes {
-			result = result[:maxOutputBytes] + fmt.Sprintf("\n... [truncated at %dKB]", maxOutputBytes/1000)
-		}
+		// Truncate large output with head+tail (preserves error summaries).
+		maxChars := adaptiveMax(ctx, maxOutputChars)
+		result = capOutputHeadTail(result, maxChars)
 
 		if err != nil {
 			if execCtx.Err() == context.DeadlineExceeded {
