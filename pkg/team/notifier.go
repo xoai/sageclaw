@@ -14,8 +14,11 @@ import (
 )
 
 // WakeLeadFunc is called when the lead agent needs to process inbox results.
-// It receives the lead's agent ID, the team ID, and a system message with results.
-type WakeLeadFunc func(ctx context.Context, leadAgentID, teamID, systemMessage string)
+// It receives the lead's agent ID, the team ID, a system message with results,
+// and an optional sessionID. If sessionID is non-empty, the lead runs in that
+// session (used by workflow synthesis to deliver to the user's original chat).
+// If sessionID is empty, a new internal session is created.
+type WakeLeadFunc func(ctx context.Context, leadAgentID, teamID, systemMessage, sessionID string)
 
 // TeamProgressNotifier monitors task events and decides when to wake the lead agent.
 // It implements channel-adaptive behavior:
@@ -136,7 +139,7 @@ func (n *TeamProgressNotifier) wakeIfReady(ctx context.Context, team *store.Team
 
 	msg := n.buildWakeupMessage(completions)
 	log.Printf("[team] waking lead %s for team %s with %d results", team.LeadID, team.ID, len(completions))
-	n.wakeLead(ctx, team.LeadID, team.ID, msg)
+	n.wakeLead(ctx, team.LeadID, team.ID, msg, "") // No sessionID — create internal session.
 }
 
 // buildWakeupMessage constructs the system message for the lead from completed tasks.

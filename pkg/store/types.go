@@ -152,6 +152,25 @@ type TeamTaskComment struct {
 	CreatedAt   time.Time
 }
 
+// TeamWorkflow represents a deterministic workflow managed by the team workflow engine.
+type TeamWorkflow struct {
+	ID             string     `json:"id"`
+	TeamID         string     `json:"team_id"`
+	SessionID      string     `json:"session_id"`
+	State          string     `json:"state"`           // analyze, plan, create, execute, monitor, synthesize, deliver, complete, cancelled, failed
+	Version        int        `json:"version"`          // Optimistic concurrency version.
+	PlanJSON       string     `json:"plan_json"`        // Serialized task plan from PLAN state.
+	TaskIDs        string     `json:"task_ids"`          // Comma-separated created task IDs.
+	UserMessage    string     `json:"user_message"`      // Original user message (for restart retry).
+	Announcement   string     `json:"announcement"`      // Text sent to user at CREATE.
+	ResultsJSON    string     `json:"results_json"`      // Serialized task results for SYNTHESIZE.
+	Error          string     `json:"error"`
+	StateEnteredAt time.Time  `json:"state_entered_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+}
+
 // TeamMessage represents a mailbox message.
 type TeamMessage struct {
 	ID        string

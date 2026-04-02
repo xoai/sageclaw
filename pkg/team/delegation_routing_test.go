@@ -175,7 +175,7 @@ func TestIntegration_SkillMatchedDelegationFlow(t *testing.T) {
 	var wakeMessages []string
 
 	exec := &TeamExecutor{store: s, inboxes: make(map[string]*TeamInbox)}
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		wakeMessages = append(wakeMessages, msg)
@@ -264,7 +264,7 @@ func TestIntegration_FailedSpecialistNotifiesLead(t *testing.T) {
 
 	var wakeMsg string
 	exec := &TeamExecutor{store: s, inboxes: make(map[string]*TeamInbox)}
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		wakeMsg = msg
 	})
 

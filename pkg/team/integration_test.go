@@ -41,7 +41,7 @@ func TestIntegration_FullTaskFlow(t *testing.T) {
 		inboxes: make(map[string]*TeamInbox),
 	}
 
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		wakeAgents = append(wakeAgents, leadAgentID)
@@ -121,7 +121,7 @@ func TestIntegration_DetailedWakesPerTask(t *testing.T) {
 
 	wakeCount := 0
 	exec := &TeamExecutor{store: s, inboxes: make(map[string]*TeamInbox)}
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		wakeCount++
 	})
 
@@ -156,7 +156,7 @@ func TestIntegration_FailedTasksWakeLead(t *testing.T) {
 
 	var wakeMsg string
 	exec := &TeamExecutor{store: s, inboxes: make(map[string]*TeamInbox)}
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		wakeMsg = msg
 	})
 

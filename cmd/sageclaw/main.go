@@ -679,8 +679,10 @@ func run() error {
 	// Agent config provider for runtime consumers (pipeline, handlers).
 	agentProvider := agentcfg.NewMapProvider(fileAgents)
 
-	// Forward-declare loopPool so the file watcher closure can reference it.
+	// Forward-declare loopPool and workflowEngine so the file watcher closure can reference them.
 	var loopPool *agent.LoopPool
+	var workflowEngine *team.WorkflowEngine
+	var workflowRelay *team.WorkflowRelay
 
 	if len(fileAgents) > 0 {
 		for id, ac := range fileAgents {
@@ -715,6 +717,39 @@ func run() error {
 				teamIDCopy := reloaded.TeamInfo.TeamID
 				rc.TaskSummaryFunc = func(ctx context.Context) string {
 					return buildLeadTaskSummary(ctx, appStore, teamIDCopy)
+				}
+				// Re-wire workflow engine on hot-reload.
+				if reloaded.TeamInfo.WorkflowEnabled {
+					rc.WorkflowEnabled = true
+					rc.WorkflowToolDefs = team.WorkflowToolDefs()
+					var memberIDs []string
+					for _, mi := range reloaded.TeamInfo.Members {
+						if mi.Role != "lead" {
+							memberIDs = append(memberIDs, mi.AgentID)
+						}
+					}
+					memberIDsCopy := memberIDs
+					rc.WorkflowToolHandler = func(ctx context.Context, sid, toolName, toolInput, userMessage string) (*canonical.ToolResult, error) {
+						if workflowEngine == nil {
+							return &canonical.ToolResult{Content: "Workflow engine not available.", IsError: true}, nil
+						}
+						switch toolName {
+						case team.ToolWorkflowAnalyze:
+							text, _, err := workflowEngine.HandleAnalyze(ctx, teamIDCopy, sid, userMessage, toolInput)
+							if err != nil {
+								return nil, err
+							}
+							return &canonical.ToolResult{Content: text}, nil
+						case team.ToolWorkflowPlan:
+							text, err := workflowEngine.HandlePlan(ctx, teamIDCopy, sid, toolInput, memberIDsCopy)
+							if err != nil {
+								return nil, err
+							}
+							return &canonical.ToolResult{Content: text}, nil
+						default:
+							return &canonical.ToolResult{Content: "Unknown workflow tool: " + toolName, IsError: true}, nil
+						}
+					}
 				}
 				// Re-build delegation routing on hot-reload.
 				var profiles []team.MemberProfile
@@ -844,10 +879,16 @@ Key behaviors:
 		return handoffMgr.Transfer(ctx, sessionID, sourceAgentID, targetAgentID, reason)
 	})
 
-	// Evaluate loop.
+	// Evaluate loop — uses the calling agent's config so model combos are respected.
 	tool.RegisterEvaluate(toolReg, func(ctx context.Context, prompt string, maxRounds int, threshold float64) (string, float64, int, error) {
-		genConfig := agentConfigs["default"]
-		evalConfig := agentConfigs["default"]
+		callerID := tool.AgentIDFromContext(ctx)
+		agentMu.Lock()
+		genConfig, ok := agentConfigs[callerID]
+		if !ok {
+			genConfig = agentConfigs["default"]
+		}
+		agentMu.Unlock()
+		evalConfig := genConfig
 		evalConfig.SystemPrompt = "You are a quality evaluator. Score responses from 0.0 to 1.0. First line is the score. Then provide feedback."
 		el := orchestration.NewEvalLoop(genConfig, evalConfig, defaultProvider, router, toolReg, maxRounds, threshold)
 		result, err := el.Run(ctx, prompt)
@@ -1033,6 +1074,35 @@ Key behaviors:
 			case agent.EventRunCompleted:
 				log.Printf("[%s] run completed", e.SessionID)
 				toolTracker.OnRunCompleted(e.SessionID)
+				// Check if a team lead just completed a synthesis run.
+				if workflowEngine != nil && e.AgentID != "" && e.SessionID != "" {
+					agentID := e.AgentID
+					sessID := e.SessionID
+					go func() {
+						ctx := context.Background()
+						teamInfo, role, err := appStore.GetTeamByAgent(ctx, agentID)
+						if err != nil || teamInfo == nil || role != "lead" {
+							return
+						}
+						// Fetch the last assistant message as the synthesis response.
+						var responseText string
+						msgs, err := appStore.GetMessages(ctx, sessID, 5)
+						if err == nil {
+							for i := len(msgs) - 1; i >= 0; i-- {
+								if msgs[i].Role == "assistant" {
+									for _, c := range msgs[i].Content {
+										if c.Type == "text" {
+											responseText = c.Text
+											break
+										}
+									}
+									break
+								}
+							}
+						}
+						workflowEngine.HandleLeadRunComplete(ctx, teamInfo.ID, sessID, responseText)
+					}()
+				}
 			case agent.EventToolCall:
 				if e.ToolCall != nil {
 					log.Printf("[%s] tool call: %s", e.SessionID, e.ToolCall.Name)
@@ -1060,9 +1130,13 @@ Key behaviors:
 			if telegramEventForwarder != nil {
 				telegramEventForwarder(e)
 			}
+			// Relay: detect lead pause/resume for workflow forwarding.
+			if workflowRelay != nil {
+				workflowRelay.HandleLeadEvent(e)
+			}
 		}, loopOpts...)
 
-	// --- TeamExecutor (needs LoopPool) ---
+	// --- TeamExecutor + WorkflowEngine (needs LoopPool) ---
 	var teamExec *team.TeamExecutor
 	var teamExecMu sync.Mutex
 
@@ -1080,16 +1154,74 @@ Key behaviors:
 			if sseBroadcast != nil {
 				sseBroadcast(e)
 			}
+			// Relay: forward member tool calls and task events to user's session.
+			if workflowRelay != nil {
+				workflowRelay.HandleMemberEvent(e)
+			}
+			// Chain: forward task events to the workflow monitor.
+			if workflowEngine != nil {
+				workflowEngine.Monitor().HandleEvent(e)
+			}
 		})
-		notifier := team.NewTeamProgressNotifier(appStore, teamExec, func(ctx context.Context, leadAgentID, teamID, systemMessage string) {
+		notifier := team.NewTeamProgressNotifier(appStore, teamExec, func(ctx context.Context, leadAgentID, teamID, systemMessage, sessionID string) {
 			if wakeLeadFn != nil {
-				wakeLeadFn(ctx, leadAgentID, teamID, systemMessage)
+				wakeLeadFn(ctx, leadAgentID, teamID, systemMessage, sessionID)
 			}
 		})
 		teamExec.SetNotifier(notifier)
 		tool.RegisterTeamTasks(toolReg, appStore, teamExec)
 		teamExec.StartRecoveryTicker(60 * time.Second)
-		log.Println("team: executor created (hot-reload)")
+		workflowEngine = team.NewWorkflowEngine(appStore, teamExec, func(e agent.Event) {
+			if sseBroadcast != nil {
+				sseBroadcast(e)
+			}
+		})
+		workflowRelay = team.NewWorkflowRelay(toolTracker, appStore, func(e agent.Event) {
+			// Relay synthetic events to SSE so the web chat sees member activity.
+			if sseBroadcast != nil {
+				sseBroadcast(e)
+			}
+		})
+		workflowEngine.SetRelay(workflowRelay)
+		// Register member sessions with relay when executor launches tasks.
+		teamExec.SetOnTaskSession(func(taskID, teamID, sessionID, agentID string) {
+			if workflowRelay == nil {
+				return
+			}
+			// Look up task to find batch_id (workflow ID) and agent display name.
+			task, err := appStore.GetTask(context.Background(), taskID)
+			if err != nil || task == nil || task.BatchID == "" {
+				return // Not a workflow task.
+			}
+			wf, err := appStore.GetWorkflow(context.Background(), task.BatchID)
+			if err != nil || wf == nil {
+				return
+			}
+			// Get display name from agent config.
+			agentMu.Lock()
+			displayName := agentID
+			if fa, ok := fileAgents[agentID]; ok && fa.Identity.Name != "" {
+				displayName = fa.Identity.Name
+			}
+			agentMu.Unlock()
+
+			workflowRelay.RegisterMemberSession(sessionID, team.RelayEntry{
+				WorkflowID:        task.BatchID,
+				UserSessionID:     wf.SessionID,
+				TeamID:            teamID,
+				MemberAgentID:     agentID,
+				MemberDisplayName: displayName,
+			})
+		})
+		// Wire lead wakeup and start timeout ticker + recovery.
+		workflowEngine.Monitor().SetWakeLead(func(ctx context.Context, leadAgentID, teamID, systemMessage, sessionID string) {
+			if wakeLeadFn != nil {
+				wakeLeadFn(ctx, leadAgentID, teamID, systemMessage, sessionID)
+			}
+		})
+		workflowEngine.Monitor().StartTimeoutTicker(60*time.Second, team.DefaultTaskTimeout)
+		workflowEngine.Monitor().RecoverActiveWorkflows(context.Background())
+		log.Println("team: executor + workflow engine created (hot-reload)")
 		return teamExec
 	}
 
@@ -1098,7 +1230,7 @@ Key behaviors:
 	// reloadTeams re-reads teams from DB and updates agent configs.
 	reloadTeams := func() {
 		rows, err := appStore.DB().QueryContext(context.Background(),
-			`SELECT id, name, lead_id, config FROM teams WHERE status = 'active'`)
+			`SELECT id, name, lead_id, config, COALESCE(settings,'{}') FROM teams WHERE status = 'active'`)
 		if err != nil {
 			log.Printf("team reload: query failed: %v", err)
 			return
@@ -1108,16 +1240,23 @@ Key behaviors:
 		type teamRow struct {
 			ID, Name, LeadID string
 			Members          []string
+			WorkflowEnabled  bool
 		}
 		var dbTeams []teamRow
 		for rows.Next() {
-			var id, name, leadID, configJSON string
-			rows.Scan(&id, &name, &leadID, &configJSON)
+			var id, name, leadID, configJSON, settingsJSON string
+			rows.Scan(&id, &name, &leadID, &configJSON, &settingsJSON)
 			var cfg struct {
 				Members []string `json:"members"`
 			}
 			json.Unmarshal([]byte(configJSON), &cfg)
-			dbTeams = append(dbTeams, teamRow{ID: id, Name: name, LeadID: leadID, Members: cfg.Members})
+			// Parse team settings for kill switch.
+			var settings struct {
+				Workflow *bool `json:"workflow"`
+			}
+			json.Unmarshal([]byte(settingsJSON), &settings)
+			workflowOn := settings.Workflow == nil || *settings.Workflow // Default: true
+			dbTeams = append(dbTeams, teamRow{ID: id, Name: name, LeadID: leadID, Members: cfg.Members, WorkflowEnabled: workflowOn})
 		}
 
 		agentMu.Lock()
@@ -1180,6 +1319,7 @@ Key behaviors:
 				fa.TeamInfo = &agentcfg.TeamInfo{
 					TeamID: tc.ID, TeamName: tc.Name, Role: role,
 					LeadName: leadName, Members: memberInfos,
+					WorkflowEnabled: tc.WorkflowEnabled,
 				}
 				rc := agentcfg.ToRuntimeConfig(fa)
 				if role == "lead" {
@@ -1187,6 +1327,42 @@ Key behaviors:
 					rc.TaskSummaryFunc = func(ctx context.Context) string {
 						return buildLeadTaskSummary(ctx, appStore, teamIDCopy)
 					}
+
+					// Wire workflow engine for this lead (if not disabled via kill switch).
+					rc.WorkflowEnabled = tc.WorkflowEnabled
+					if tc.WorkflowEnabled {
+						rc.WorkflowToolDefs = team.WorkflowToolDefs()
+						// Build member roster for plan validation.
+						var memberIDs []string
+						for _, mi := range memberInfos {
+							if mi.Role != "lead" {
+								memberIDs = append(memberIDs, mi.AgentID)
+							}
+						}
+						memberIDsCopy := memberIDs
+						rc.WorkflowToolHandler = func(ctx context.Context, sessionID, toolName, toolInput, userMessage string) (*canonical.ToolResult, error) {
+							if workflowEngine == nil {
+								return &canonical.ToolResult{Content: "Workflow engine not available.", IsError: true}, nil
+							}
+							switch toolName {
+							case team.ToolWorkflowAnalyze:
+								text, _, err := workflowEngine.HandleAnalyze(ctx, teamIDCopy, sessionID, userMessage, toolInput)
+								if err != nil {
+									return nil, err
+								}
+								return &canonical.ToolResult{Content: text}, nil
+							case team.ToolWorkflowPlan:
+								text, err := workflowEngine.HandlePlan(ctx, teamIDCopy, sessionID, toolInput, memberIDsCopy)
+								if err != nil {
+									return nil, err
+								}
+								return &canonical.ToolResult{Content: text}, nil
+							default:
+								return &canonical.ToolResult{Content: "Unknown workflow tool: " + toolName, IsError: true}, nil
+							}
+						}
+					}
+
 					// Build member profiles for delegation routing.
 					var profiles []team.MemberProfile
 					for _, mi := range memberInfos {
@@ -1452,20 +1628,27 @@ Key behaviors:
 		},
 	})
 
-	// Wire lead wakeup: creates/finds a session for the lead and dispatches a run.
-	wakeLeadFn = func(ctx context.Context, leadAgentID, teamID, systemMessage string) {
-		// Find or create an internal session for the lead's wakeup.
-		sess, err := appStore.CreateSessionWithKind(ctx, "internal", teamID, leadAgentID, "team_wakeup")
-		if err != nil {
-			log.Printf("[team] wakeup: failed to create session for %s: %v", leadAgentID, err)
-			return
+	// Wire lead wakeup: dispatches a run in the given session (or creates an internal one).
+	wakeLeadFn = func(ctx context.Context, leadAgentID, teamID, systemMessage, sessionID string) {
+		var sessID string
+		if sessionID != "" {
+			// Use the provided session (e.g., user's original chat session for synthesis delivery).
+			sessID = sessionID
+		} else {
+			// Create an internal session for non-workflow wakeups (inbox results).
+			sess, err := appStore.CreateSessionWithKind(ctx, "internal", teamID, leadAgentID, "team_wakeup")
+			if err != nil {
+				log.Printf("[team] wakeup: failed to create session for %s: %v", leadAgentID, err)
+				return
+			}
+			sessID = sess.ID
 		}
 		msg := canonical.Message{
 			Role:    "user",
-			Content: []canonical.Content{{Type: "text", Text: systemMessage}},
+			Content: []canonical.Content{{Type: "text", Text: "[system:workflow]\n" + systemMessage}},
 		}
 		req := pipeline.RunRequest{
-			SessionID: sess.ID,
+			SessionID: sessID,
 			AgentID:   leadAgentID,
 			Messages:  []canonical.Message{msg},
 			Lane:      pipeline.LaneDelegate,

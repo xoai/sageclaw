@@ -341,9 +341,23 @@ func (s *Server) handleProvidersUpdateConfig(w http.ResponseWriter, r *http.Requ
 
 	// Hot-reload TPM on the router.
 	if s.router != nil {
-		if tpm, ok := cfg["tokens_per_minute"]; ok {
-			if tpmFloat, ok := tpm.(float64); ok {
-				s.router.SetProviderTPM(provType, int(tpmFloat))
+		if raw, ok := cfg["tokens_per_minute"]; ok {
+			var tpmInt int
+			switch v := raw.(type) {
+			case float64:
+				tpmInt = int(v)
+			case int:
+				tpmInt = v
+			case json.Number:
+				if n, err := v.Int64(); err == nil {
+					tpmInt = int(n)
+				}
+			}
+			if tpmInt > 0 {
+				s.router.SetProviderTPM(provType, tpmInt)
+				log.Printf("provider: hot-reloaded TPM for %s → %d", provType, tpmInt)
+			} else {
+				log.Printf("provider: skipped TPM hot-reload for %s (value=%v type=%T)", provType, raw, raw)
 			}
 		}
 	}

@@ -9,9 +9,27 @@ import { IconPaperclip, IconArrowUp, IconStore, IconSparkle, IconChevronLeft, Ic
 import snarkdown from 'snarkdown';
 import DOMPurify from 'dompurify';
 
+// Convert markdown pipe tables to HTML before snarkdown (which doesn't support tables).
+function markdownTablesToHtml(text) {
+  return text.replace(/((?:^|\n)\|.+\|[ ]*\n\|[-:| ]+\|[ ]*\n(?:\|.+\|[ ]*\n?)+)/gm, (block) => {
+    const lines = block.trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2) return block;
+    const parseRow = (line) => line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+    const headers = parseRow(lines[0]);
+    // lines[1] is the separator (|---|---|)
+    const rows = lines.slice(2).map(parseRow);
+    let html = '<table><thead><tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+    for (const row of rows) {
+      html += '<tr>' + row.map(c => `<td>${c}</td>`).join('') + '</tr>';
+    }
+    html += '</tbody></table>';
+    return '\n' + html + '\n';
+  });
+}
+
 function renderMarkdown(text) {
   if (!text) return '';
-  return DOMPurify.sanitize(snarkdown(text));
+  return DOMPurify.sanitize(snarkdown(markdownTablesToHtml(text)), { ADD_TAGS: ['table', 'thead', 'tbody', 'tr', 'th', 'td'] });
 }
 
 // Direct fetch wrapper.
@@ -89,6 +107,7 @@ export function Chat() {
   const messagesContainerRef = useRef(null);
   const timerRef = useRef(null);
   const sseRef = useRef(null);
+  const watcherRef = useRef(null);
   const initialScrollDone = useRef(false);
   const pendingSend = useRef(false); // Auto-send after homepage → chat transition
   const chatTextareaRef = useRef(null);
@@ -112,7 +131,7 @@ export function Chat() {
       const text = extractText(m.content);
       const audio = extractAudio(m.content);
       return { role: m.role, text, audio };
-    }).filter(m => m.text || m.audio);
+    }).filter(m => (m.text || m.audio) && !m.text.startsWith('[system:workflow]') && !m.text.startsWith('[Workflow Results]'));
   }, []);
 
   const findWebSession = useCallback(async (agentId) => {
@@ -203,6 +222,7 @@ export function Chat() {
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
+      if (watcherRef.current) clearTimeout(watcherRef.current);
       if (sseRef.current) sseRef.current.close();
       window.removeEventListener('popstate', handleNavHome);
       window.removeEventListener('keydown', handleGlobalKeys);
@@ -391,11 +411,33 @@ export function Chat() {
     let streamText = '';
     let gotChunks = false;
     let completed = false;
+    let messageCountAtSend = 0; // Track message count to detect async arrivals.
 
     if (sseRef.current) sseRef.current.close();
 
     const es = new EventSource('/events', { withCredentials: true });
     sseRef.current = es;
+
+    // Background watcher: polls for new messages that arrive after the initial response.
+    // Handles delegation synthesis, team results, and any async agent output.
+    if (watcherRef.current) { clearTimeout(watcherRef.current); watcherRef.current = null; }
+    const startWatcher = (sessionId, knownCount) => {
+      let watchAttempts = 0;
+      const watch = async () => {
+        watchAttempts++;
+        if (watchAttempts > 150) return; // 5 min max (150 × 2s).
+        try {
+          const msgs = await loadMessages(sessionId);
+          if (msgs.length > knownCount) {
+            setMessages(msgs);
+            knownCount = msgs.length;
+            loadSessions();
+          }
+        } catch {}
+        watcherRef.current = setTimeout(watch, 2000);
+      };
+      watcherRef.current = setTimeout(watch, 3000); // First check after 3s.
+    };
 
     es.onmessage = (e) => {
       try {
@@ -433,7 +475,6 @@ export function Chat() {
 
         if (event.type === 'consent.needed' && event.consent) {
           gotChunks = true;
-          // Consent modal handled by Layout.jsx globally.
           setStreaming('Needs your approval to continue...');
         }
 
@@ -442,25 +483,49 @@ export function Chat() {
         }
 
         if (event.type === 'run.completed') {
-          completed = true;
-          es.close();
-          sseRef.current = null;
+          if (!completed) {
+            // First run.completed: show initial response, keep SSE OPEN for async events.
+            completed = true;
 
-          // Mark any remaining running tools as done.
-          setToolSteps(prev => prev.map(s =>
-            s.status === 'running' ? { ...s, status: 'done' } : s
-          ));
-          setToolCollapsed(true);
+            setToolSteps(prev => prev.map(s =>
+              s.status === 'running' ? { ...s, status: 'done' } : s
+            ));
+            setToolCollapsed(true);
 
-          if (gotChunks && streamText) {
-            setStreaming('');
-            setMessages(prev => [...prev, { role: 'assistant', text: streamText }]);
+            if (gotChunks && streamText) {
+              setStreaming('');
+              setMessages(prev => [...prev, { role: 'assistant', text: streamText }]);
+            } else {
+              startPoll();
+            }
             setSending(false); sendingRef.current = false;
+            loadSessions();
+
+            // Reset stream state for the next run (synthesis).
+            streamText = '';
+            gotChunks = false;
           } else {
-            startPoll();
+            // Subsequent run.completed (e.g., synthesis): show new response.
+            setToolSteps(prev => prev.map(s =>
+              s.status === 'running' ? { ...s, status: 'done' } : s
+            ));
+            setToolCollapsed(true);
+
+            if (gotChunks && streamText) {
+              setStreaming('');
+              setMessages(prev => [...prev, { role: 'assistant', text: streamText }]);
+            } else {
+              // Synthesis may have stored in DB without streaming — poll once.
+              findWebSession(selectedAgent).then(sid => {
+                if (sid) loadMessages(sid).then(msgs => setMessages(msgs));
+              });
+            }
+            loadSessions();
+
+            // Reset for potential further runs.
+            streamText = '';
+            gotChunks = false;
           }
-          // Refresh session list to show updated timestamp.
-          loadSessions();
         }
       } catch {}
     };
@@ -468,7 +533,14 @@ export function Chat() {
     es.onerror = () => {
       es.close();
       sseRef.current = null;
-      if (!completed && !gotChunks) startPoll();
+      if (!completed && !gotChunks) {
+        startPoll();
+      } else {
+        // SSE disconnected after initial response — start watcher for async results.
+        findWebSession(selectedAgent).then(sid => {
+          if (sid) loadMessages(sid).then(msgs => startWatcher(sid, msgs.length));
+        });
+      }
     };
 
     const { error } = await callRPC('chat.send', { text: fullText, agent_id: selectedAgent || undefined, chat_id: chatIdRef.current });
@@ -768,45 +840,33 @@ export function Chat() {
                   </div>
                 );
               })()}
+              {/* Render messages — defer last assistant msg when tools exist so timeline stays above it */}
               {messages.map((msg, i) => {
-                // Show tool timeline just before the final assistant message — same position whether collapsed or expanded.
-                const showTimelineBefore = toolSteps.length > 0
-                  && i === messages.length - 1 && msg.role === 'assistant';
+                if (toolSteps.length > 0 && i === messages.length - 1 && msg.role === 'assistant') return null;
                 return (
-                  <div key={i}>
-                    {showTimelineBefore && (
-                      <div class="message assistant">
-                        <ToolTimeline
-                          steps={toolSteps}
-                          collapsed={toolCollapsed}
-                          onToggle={() => setToolCollapsed(c => !c)}
-                        />
+                  <div key={i} class={`message ${msg.role}`}>
+                    {msg.audio && (
+                      <div style="margin-bottom:4px">
+                        <audio controls preload="none" style="max-width:100%;height:36px"
+                          src={`/api/audio/${msg.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
+                        </audio>
+                        {msg.audio.duration_ms > 0 && (
+                          <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
+                            {Math.round(msg.audio.duration_ms / 1000)}s
+                          </span>
+                        )}
                       </div>
                     )}
-                    <div class={`message ${msg.role}`}>
-                      {msg.audio && (
-                        <div style="margin-bottom:4px">
-                          <audio controls preload="none" style="max-width:100%;height:36px"
-                            src={`/api/audio/${msg.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
-                          </audio>
-                          {msg.audio.duration_ms > 0 && (
-                            <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
-                              {Math.round(msg.audio.duration_ms / 1000)}s
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {msg.text && msg.role === 'assistant'
-                        ? <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
-                        : msg.text && <div class="message-text">{msg.text}</div>
-                      }
-                    </div>
+                    {msg.text && msg.role === 'assistant'
+                      ? <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
+                      : msg.text && <div class="message-text">{msg.text}</div>
+                    }
                   </div>
                 );
               })}
 
-              {/* Tool timeline — shown at bottom only during active streaming (no final message yet) */}
-              {toolSteps.length > 0 && (messages.length === 0 || messages[messages.length - 1].role !== 'assistant') && (
+              {/* Tool timeline — single render location, always above response text */}
+              {toolSteps.length > 0 && (
                 <div class="message assistant">
                   <ToolTimeline
                     steps={toolSteps}
@@ -815,6 +875,32 @@ export function Chat() {
                   />
                 </div>
               )}
+
+              {/* Deferred last assistant message — rendered after tool timeline */}
+              {toolSteps.length > 0 && messages.length > 0 && (() => {
+                const last = messages[messages.length - 1];
+                if (last.role !== 'assistant') return null;
+                return (
+                  <div class="message assistant">
+                    {last.audio && (
+                      <div style="margin-bottom:4px">
+                        <audio controls preload="none" style="max-width:100%;height:36px"
+                          src={`/api/audio/${last.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
+                        </audio>
+                        {last.audio.duration_ms > 0 && (
+                          <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
+                            {Math.round(last.audio.duration_ms / 1000)}s
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {last.text
+                      ? <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(last.text) }} />
+                      : null
+                    }
+                  </div>
+                );
+              })()}
 
               {streaming && (
                 <div class="message assistant">

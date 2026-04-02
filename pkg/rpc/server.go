@@ -853,7 +853,8 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 
 	query := `SELECT id, COALESCE(key,''), channel, chat_id, agent_id, kind, COALESCE(label,''),
 		status, COALESCE(model,''), COALESCE(provider,''), input_tokens, output_tokens,
-		compaction_count, message_count, COALESCE(title,''), created_at, updated_at
+		compaction_count, message_count, COALESCE(title,''), created_at, updated_at,
+		COALESCE(metadata,'{}')
 	 FROM sessions WHERE 1=1`
 	var args []any
 
@@ -880,12 +881,12 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 
 	var sessions []map[string]any
 	for rows.Next() {
-		var id, key, channel, chatID, agentID, kind, label, status, model, provider, title, createdAt, updatedAt string
+		var id, key, channel, chatID, agentID, kind, label, status, model, provider, title, createdAt, updatedAt, metadataJSON string
 		var inputTokens, outputTokens int64
 		var compactionCount, messageCount int
 		rows.Scan(&id, &key, &channel, &chatID, &agentID, &kind, &label,
 			&status, &model, &provider, &inputTokens, &outputTokens,
-			&compactionCount, &messageCount, &title, &createdAt, &updatedAt)
+			&compactionCount, &messageCount, &title, &createdAt, &updatedAt, &metadataJSON)
 		sess := map[string]any{
 			"id": id, "key": key, "channel": channel, "chat_id": chatID,
 			"agent_id": agentID, "kind": kind, "label": label, "status": status,
@@ -894,6 +895,12 @@ func (s *Server) sessionsList(ctx context.Context, params json.RawMessage) (any,
 			"input_tokens": inputTokens, "output_tokens": outputTokens,
 			"compaction_count": compactionCount, "message_count": messageCount,
 			"created_at": createdAt, "updated_at": updatedAt,
+		}
+		if metadataJSON != "" && metadataJSON != "{}" {
+			var meta map[string]any
+			if json.Unmarshal([]byte(metadataJSON), &meta) == nil {
+				sess["metadata"] = meta
+			}
 		}
 		if agentID != "" {
 			sess["agent_name"] = s.resolveAgentName(agentID)
@@ -938,6 +945,12 @@ func (s *Server) sessionsMessages(ctx context.Context, params json.RawMessage) (
 	if p.Limit == 0 {
 		p.Limit = 50
 	}
+	// Clear unread indicator when user loads messages (without updating updated_at
+	// to prevent session list from jumping).
+	go func() {
+		s.store.DB().ExecContext(context.Background(),
+			`UPDATE sessions SET metadata = json_remove(metadata, '$.has_unread') WHERE id = ?`, p.ID)
+	}()
 	return s.store.GetMessages(ctx, p.ID, p.Limit)
 }
 

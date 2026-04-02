@@ -92,6 +92,12 @@ func DefaultDisplayMap() *ToolDisplayMap {
 			"datetime":   {Emoji: "🕐", Verb: "Checking time", DetailKey: "", Category: "tool"},
 			"load_skill": {Emoji: "🧩", Verb: "Loading skill", DetailKey: "skill", Category: "tool"},
 			"plan":       {Emoji: "📝", Verb: "Planning", DetailKey: "", Category: "tool"},
+
+			// Workflow progress (synthetic events from WorkflowRelay)
+			"_wf_delegating":     {Emoji: "📤", Verb: "Delegating to team", DetailKey: "count", Category: "tool"},
+			"_wf_task_started":   {Emoji: "📋", Verb: "Task started", DetailKey: "title", Category: "tool"},
+			"_wf_task_completed": {Emoji: "✅", Verb: "Task done", DetailKey: "title", Category: "tool"},
+			"_wf_task_failed":    {Emoji: "❌", Verb: "Task failed", DetailKey: "title", Category: "tool"},
 		},
 	}
 }
@@ -104,6 +110,16 @@ func (m *ToolDisplayMap) ResolveDisplay(toolName string, input json.RawMessage) 
 	var args map[string]any
 	if len(input) > 0 {
 		_ = json.Unmarshal(input, &args) // best-effort; args stays nil on failure
+	}
+
+	// Member-prefixed tool calls from WorkflowRelay: "member:{displayName}:{realTool}"
+	var memberPrefix string
+	if strings.HasPrefix(toolName, "member:") {
+		parts := strings.SplitN(toolName, ":", 3)
+		if len(parts) == 3 {
+			memberPrefix = parts[1] // display name
+			toolName = parts[2]     // real tool name
+		}
 	}
 
 	key := resolveDisplayKey(toolName, args, m.entries)
@@ -139,9 +155,15 @@ func (m *ToolDisplayMap) ResolveDisplay(toolName string, input json.RawMessage) 
 		}
 	}
 
+	// Prepend member identity for workflow-forwarded tool calls.
+	verb := entry.Verb
+	if memberPrefix != "" {
+		verb = memberPrefix + ": " + verb
+	}
+
 	return ToolDisplay{
 		Emoji:    entry.Emoji,
-		Verb:     entry.Verb,
+		Verb:     verb,
 		Detail:   detail,
 		Category: entry.Category,
 	}

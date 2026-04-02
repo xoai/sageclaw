@@ -85,6 +85,12 @@ func WithAgentID(ctx context.Context, agentID string) context.Context {
 	return context.WithValue(ctx, agentIDKey{}, agentID)
 }
 
+// AgentIDFromContext retrieves the agent ID from context.
+func AgentIDFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(agentIDKey{}).(string)
+	return s
+}
+
 // IterationInfo carries iteration progress for adaptive tool behavior.
 type IterationInfo struct {
 	Current int // 0-based current iteration

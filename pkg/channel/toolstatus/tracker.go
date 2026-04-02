@@ -129,6 +129,22 @@ func (t *Tracker) OnRunStarted(sessionID string) {
 	t.emitReactLocked(sessionID, PhaseThinking)
 }
 
+// EnsureSession creates session state if it doesn't exist, without triggering
+// run lifecycle side effects (no thinking emoji, no stall timer).
+// Used by the workflow relay to forward member tool calls to the user's session.
+func (t *Tracker) EnsureSession(sessionID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.sessions[sessionID] != nil {
+		return // Already exists.
+	}
+	t.sessions[sessionID] = &SessionState{
+		SessionID: sessionID,
+		Counts:    make(map[string]int),
+		FirstTool: true,
+	}
+}
+
 // OnToolCall records a new tool call and triggers status/reaction updates.
 func (t *Tracker) OnToolCall(sessionID string, tc *canonical.ToolCall) {
 	if tc == nil {

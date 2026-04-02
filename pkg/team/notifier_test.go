@@ -53,7 +53,7 @@ func TestNotifier_DetailedWakesImmediately(t *testing.T) {
 		BatchID:  "batch-1",
 	})
 
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		woken = append(woken, leadAgentID)
@@ -99,7 +99,7 @@ func TestNotifier_ProgressiveWaitsForBatch(t *testing.T) {
 		inboxes: make(map[string]*TeamInbox),
 	}
 
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		wakeCount++
@@ -149,7 +149,7 @@ func TestNotifier_NoBatchWakesImmediately(t *testing.T) {
 	inbox := exec.GetInbox("team-1")
 	inbox.Push(TaskCompletion{TaskID: "task-1", Status: "completed"})
 
-	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg string) {
+	notifier := NewTeamProgressNotifier(s, exec, func(ctx context.Context, leadAgentID, teamID, msg, sessionID string) {
 		wakeCount++
 	})
 

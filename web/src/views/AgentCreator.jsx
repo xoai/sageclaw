@@ -1,412 +1,216 @@
 import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
-import { rpc } from '../api';
-import BodyDiagram from '../components/BodyDiagram';
-import ConfigPanel from '../components/ConfigPanel';
 import { Breadcrumb } from '../components/Breadcrumb';
 
-const defaultConfig = {
-  identity: {}, soul: {}, behavior: {}, skills: {},
-  tools: {}, memory: {}, heartbeat: {}, channels: {}, bootstrap: {},
-};
-
-export default function AgentCreator({ id }) {
-  const [config, setConfig] = useState({ ...defaultConfig });
-  const [schemas, setSchemas] = useState([]);
-  const [activeNode, setActiveNode] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState('');
-  const [isNew, setIsNew] = useState(!id || id === 'create');
+/**
+ * AgentCreator — simplified creation page.
+ * Two paths: (1) pick a preset, (2) describe with AI.
+ * Both create the agent via quick-create then redirect to the editor.
+ */
+export default function AgentCreator() {
+  const [mode, setMode] = useState('pick'); // 'pick' | 'describe' | 'preview'
   const [presets, setPresets] = useState([]);
-  const [showPresets, setShowPresets] = useState(false);
-  const [showMagic, setShowMagic] = useState(false);
-  const [showAvatar, setShowAvatar] = useState(false);
-  const [magicDesc, setMagicDesc] = useState('');
+  const [description, setDescription] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
 
-  // Avatar state.
-  const [avatarURI, setAvatarURI] = useState(null);
-  const [avatarStyle, setAvatarStyle] = useState('minimalist');
-  const [generatingAvatar, setGeneratingAvatar] = useState(false);
-
-  // Load schemas + presets.
   useEffect(() => {
-    fetch('/api/v2/agents/schemas').then(r => r.json()).then(data => setSchemas(data || [])).catch(() => {});
-    fetch('/api/v2/agents/presets').then(r => r.json()).then(data => setPresets(data || [])).catch(() => {});
+    fetch('/api/v2/agents/presets', { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => setPresets(data || []))
+      .catch(() => {});
   }, []);
 
-  // Load existing agent config if editing.
-  useEffect(() => {
-    if (id && id !== 'create') {
-      setIsNew(false);
-      fetch(`/api/v2/agents/${id}`)
-        .then(r => r.json())
-        .then(data => {
-          if (data && !data.error) {
-            setConfig(prev => ({ ...prev, ...data }));
-          }
-        })
-        .catch(() => {});
-    }
-  }, [id]);
+  const presetIcons = {
+    search: '\uD83D\uDD0D', code: '\uD83D\uDCBB', pen: '\u270D\uFE0F',
+    tasks: '\uD83C\uDFAF', chart: '\uD83D\uDCCA', star: '\u2B50',
+  };
 
-  const applyPreset = async (presetId) => {
-    const res = await fetch(`/api/v2/agents/presets/${presetId}`, { method: 'POST' });
-    const data = await res.json();
-    if (data && !data.error) {
-      setConfig({ ...defaultConfig, ...data });
-      setShowPresets(false);
-      setMsg(`Applied "${presetId}" preset. Customize any section.`);
-      setTimeout(() => setMsg(''), 5000);
+  // Create agent from preset directly via quick-create.
+  const createFromPreset = async (preset) => {
+    setSaving(true);
+    setError('');
+    try {
+      const res = await fetch('/api/v2/agents/quick-create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          name: preset.name,
+          role: preset.description,
+          model: 'strong',
+          tool_profile: 'full',
+        }),
+      });
+      const data = await res.json();
+      if (data.error) { setError(data.error); setSaving(false); return; }
+      route(`/agents/${data.id}`);
+    } catch (e) {
+      setError('Failed: ' + e.message);
+      setSaving(false);
     }
   };
 
-  const generateFromDescription = async () => {
-    if (!magicDesc.trim()) return;
+  // Generate agent config from description via LLM.
+  const generate = async () => {
+    if (!description.trim()) return;
     setGenerating(true);
+    setError('');
     try {
       const res = await fetch('/api/v2/agents/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: magicDesc }),
+        credentials: 'include',
+        body: JSON.stringify({ description: description.trim() }),
       });
       const data = await res.json();
-      if (data.error) {
-        setMsg('Generation failed: ' + data.error);
-      } else if (data.config) {
-        setConfig({ ...defaultConfig, ...data.config });
-        setShowMagic(false);
-        setMagicDesc('');
-        setMsg(`Agent generated! Review and customize below.`);
+      if (data.error && !data.config) {
+        setError(data.error);
+        setGenerating(false);
+        return;
       }
-    } catch (err) {
-      setMsg('Generation failed: ' + err.message);
+      setPreview(data.config);
+      setMode('preview');
+    } catch (e) {
+      setError('Generation failed: ' + e.message);
     }
     setGenerating(false);
-    setTimeout(() => setMsg(''), 8000);
   };
 
-  const updateSection = (type, values) => {
-    setConfig(prev => ({ ...prev, [type]: { ...prev[type], ...values } }));
-  };
-
-  const getCompletionState = (type) => {
-    const section = config[type];
-    if (!section || Object.keys(section).length === 0) return 'empty';
-    const schema = schemas.find(s => s.type === type);
-    if (!schema) return 'empty';
-
-    const requiredFields = [];
-    schema.sections?.forEach(sec => {
-      sec.fields?.forEach(f => {
-        if (f.required) requiredFields.push(f.key);
-      });
-    });
-
-    if (requiredFields.length === 0) {
-      return Object.keys(section).length > 0 ? 'complete' : 'empty';
-    }
-
-    const filledRequired = requiredFields.filter(k => section[k] && section[k] !== '');
-    if (filledRequired.length === requiredFields.length) return 'complete';
-    if (filledRequired.length > 0) return 'partial';
-    return Object.keys(section).some(k => section[k] && section[k] !== '') ? 'partial' : 'empty';
-  };
-
-  const generateAvatar = async (provider) => {
-    const agentId = config.identity?.name?.toLowerCase().replace(/\s+/g, '-') || 'new-agent';
-    setGeneratingAvatar(true);
+  // Save the previewed config via quick-create, then redirect to editor.
+  const savePreview = async () => {
+    if (!preview) return;
+    setSaving(true);
+    setError('');
     try {
-      const res = await fetch('/api/v2/agents/avatar', {
+      const res = await fetch('/api/v2/agents/quick-create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agent_id: agentId,
-          style: avatarStyle,
-          provider,
-          context: {
-            identity: config.identity || {},
-            soul: config.soul || {},
-            behavior: config.behavior || {},
-          },
-        }),
+        credentials: 'include',
+        body: JSON.stringify(preview),
       });
       const data = await res.json();
-      if (data.data_uri) {
-        setAvatarURI(data.data_uri);
-      } else {
-        setMsg('Error: ' + (data.error || 'Unknown error'));
-      }
-    } catch (err) {
-      setMsg('Error: ' + err.message);
+      if (data.error) { setError(data.error); setSaving(false); return; }
+      route(`/agents/${data.id}`);
+    } catch (e) {
+      setError('Failed: ' + e.message);
+      setSaving(false);
     }
-    setGeneratingAvatar(false);
   };
-
-  const handleSave = () => {
-    // Show avatar modal before saving.
-    setShowAvatar(true);
-  };
-
-  const saveAgent = async (skipAvatar) => {
-    setShowAvatar(false);
-    setSaving(true);
-    try {
-      const agentId = config.identity?.name?.toLowerCase().replace(/\s+/g, '-') || 'new-agent';
-      const method = isNew ? 'POST' : 'PUT';
-      const url = isNew ? '/api/v2/agents' : `/api/v2/agents/${id}`;
-
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: agentId, config }),
-      });
-      const data = await res.json();
-      if (data.error) {
-        setMsg('Error: ' + data.error);
-      } else {
-        setMsg('Agent saved!');
-        if (isNew) {
-          setTimeout(() => route('/agents'), 1500);
-        }
-      }
-    } catch (err) {
-      setMsg('Error: ' + err.message);
-    }
-    setSaving(false);
-    setTimeout(() => setMsg(''), 5000);
-  };
-
-  const activeSchema = schemas.find(s => s.type === activeNode);
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
   return (
     <div>
-      <Breadcrumb items={[{ label: 'Agents', href: '/agents' }, { label: isNew ? 'Create' : (config.identity?.name || id) }]} />
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div>
-          <h1 style="margin-bottom:2px">{isNew ? 'Create Agent' : `Edit: ${config.identity?.name || id}`}</h1>
-          <p style="color:var(--text-muted);font-size:13px">
-            {isNew ? 'Pick a preset, describe what you need, or build from scratch.' : 'Click any node to edit.'}
-          </p>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center">
-          {msg && <span style={`font-size:13px;color:${msg.startsWith('Error') ? 'var(--error)' : 'var(--success)'}`}>{msg}</span>}
-          <button class="btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving...' : (isNew ? 'Save Agent' : 'Save Changes')}
-          </button>
-        </div>
-      </div>
+      <Breadcrumb items={[{ label: 'Agents', href: '/agents' }, { label: 'Create' }]} />
+      <h1 style="margin-bottom:4px">Create an agent</h1>
+      <p style="color:var(--text-muted);font-size:var(--text-sm);margin-bottom:24px">
+        Pick a preset or describe what you need.
+      </p>
 
-      {/* Creation path buttons — only for new agents */}
-      {isNew && (
-        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
-          <button class="btn-secondary" onClick={() => setShowPresets(true)}>
-            {'\u{1F3AE}'} Presets
-          </button>
-          <button class="btn-secondary" onClick={() => setShowMagic(true)}
-            style="background:linear-gradient(135deg,rgba(88,166,255,0.1),rgba(210,153,34,0.1));border-color:var(--primary)">
-            {'\u2728'} Magic — describe and generate
-          </button>
+      {error && (
+        <div style="color:var(--error);font-size:var(--text-sm);margin-bottom:12px;padding:8px 12px;background:color-mix(in srgb, var(--error) 10%, transparent);border-radius:8px">
+          {error}
         </div>
       )}
 
-      {/* Desktop/Mobile layout */}
-      {isMobile ? (
-        <MobileCreator
-          config={config}
-          schemas={schemas}
-          activeNode={activeNode}
-          setActiveNode={setActiveNode}
-          getCompletionState={getCompletionState}
-          updateSection={updateSection}
-        />
-      ) : (
-        <div style="display:flex;align-items:center;justify-content:center;min-height:600px;background:radial-gradient(ellipse at center,#253248 0%,#060a10 70%);border-radius:12px;padding:40px 48px;border:1px solid rgba(48,54,61,0.4)">
-          <BodyDiagram
-            activeNode={activeNode}
-            onNodeClick={setActiveNode}
-            getState={getCompletionState}
-          />
-        </div>
-      )}
-
-      {/* Config panel modal — opens when a node is clicked */}
-      {activeNode && activeSchema && !isMobile && (
-        <div class="modal-overlay" onClick={() => setActiveNode(null)} role="dialog" aria-modal="true" aria-labelledby="node-editor-title">
-          <div class="modal-content" onClick={e => e.stopPropagation()} style="width:720px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden">
-            {/* Fixed header with close button — outside scroll */}
-            <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid var(--border);margin-bottom:12px;flex-shrink:0">
-              <div>
-                <h2 id="node-editor-title" style="font-size:16px;margin-bottom:2px">{activeSchema.title}</h2>
-                <p style="color:var(--text-muted);font-size:12px">{activeSchema.subtitle}</p>
-              </div>
-              <button class="btn-small" onClick={() => setActiveNode(null)}>{'\u2715'}</button>
-            </div>
-            {/* Scrollable content */}
-            <div style="overflow-y:auto;flex:1">
-              <ConfigPanel
-                schema={activeSchema}
-                values={config[activeNode] || {}}
-                onChange={(values) => updateSection(activeNode, values)}
-                onClose={() => setActiveNode(null)}
-                inline={true}
-              />
-            </div>
+      {/* === Pick mode: presets + describe option === */}
+      {mode === 'pick' && (
+        <div class="panel-enter">
+          {/* Presets grid */}
+          <div style="font-size:var(--text-xs);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:10px;font-weight:600">
+            Presets
           </div>
-        </div>
-      )}
-
-      {/* === MODALS === */}
-
-      {/* Preset selector modal */}
-      {showPresets && (
-        <div class="modal-overlay" onClick={() => setShowPresets(false)} role="dialog" aria-modal="true" aria-labelledby="presets-title">
-          <div class="modal-content" onClick={e => e.stopPropagation()} style="width:640px">
-            <h2 id="presets-title">Choose a Preset</h2>
-            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
-              Start from a pre-configured agent template. You can customize everything after.
-            </p>
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px">
-              {presets.map(p => (
-                <div key={p.id} class="card clickable" onClick={() => applyPreset(p.id)}
-                  style="padding:16px;cursor:pointer;text-align:center">
-                  <div style="font-size:28px;margin-bottom:8px">
-                    {p.icon === 'search' ? '\u{1F50D}' : p.icon === 'code' ? '\u{1F4BB}' : p.icon === 'pen' ? '\u270D\uFE0F' : p.icon === 'tasks' ? '\u{1F3AF}' : p.icon === 'chart' ? '\u{1F4CA}' : '\u2B50'}
-                  </div>
-                  <div style="font-weight:600;font-size:14px">{p.name}</div>
-                  <div style="font-size:12px;color:var(--text-muted);margin-top:4px">{p.description}</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:28px">
+            {presets.map(p => (
+              <button key={p.id} class="card clickable" onClick={() => createFromPreset(p)} disabled={saving}
+                style="padding:20px;cursor:pointer;text-align:center;border:1px solid var(--border);background:var(--surface);width:100%">
+                <div style="font-size:28px;margin-bottom:8px">
+                  {presetIcons[p.icon] || '\u2B50'}
                 </div>
-              ))}
-            </div>
-            <div style="margin-top:16px;text-align:right">
-              <button class="btn-secondary" onClick={() => setShowPresets(false)}>Cancel</button>
-            </div>
+                <div style="font-weight:600;font-size:var(--text-base)">{p.name}</div>
+                <div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:4px;line-height:1.4">{p.description}</div>
+              </button>
+            ))}
           </div>
-        </div>
-      )}
 
-      {/* Magic generator modal */}
-      {showMagic && (
-        <div class="modal-overlay" onClick={() => setShowMagic(false)} role="dialog" aria-modal="true" aria-labelledby="magic-title">
-          <div class="modal-content" onClick={e => e.stopPropagation()} style="width:560px">
-            <h2 id="magic-title">{'\u2728'} Describe Your Agent</h2>
-            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">
-              Tell us what you need in a few sentences. We'll generate a complete agent configuration using AI.
-            </p>
+          {saving && <div style="color:var(--text-muted);font-size:var(--text-sm);margin-bottom:12px">Creating agent...</div>}
+
+          {/* Describe with AI */}
+          <div style="font-size:var(--text-xs);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:10px;font-weight:600">
+            Or describe what you need
+          </div>
+          <div class="chat-composer" style="max-width:560px">
             <textarea
-              value={magicDesc}
-              onInput={(e) => setMagicDesc(e.target.value)}
-              placeholder="e.g., I need an agent that helps me with daily research tasks. It should search the web, analyze findings, and build a knowledge graph. It should be thorough but concise, and always cite sources."
-              rows={5}
-              style="width:100%;margin-bottom:12px"
+              placeholder="A research assistant that helps me find and summarize academic papers..."
+              value={description}
+              onInput={e => setDescription(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && description.trim()) { e.preventDefault(); generate(); } }}
+              rows={3}
             />
-            <div style="display:flex;justify-content:space-between;align-items:center">
-              <span style="font-size:11px;color:var(--text-muted)">Estimated cost: ~$0.02 per generation</span>
-              <div style="display:flex;gap:8px">
-                <button class="btn-secondary" onClick={() => setShowMagic(false)}>Cancel</button>
-                <button class="btn-primary" onClick={generateFromDescription} disabled={generating || !magicDesc.trim()}>
-                  {generating ? 'Generating...' : 'Generate Agent'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Avatar modal — shown when Save is clicked */}
-      {showAvatar && (
-        <div class="modal-overlay" onClick={() => setShowAvatar(false)} role="dialog" aria-modal="true" aria-labelledby="avatar-title">
-          <div class="modal-content" onClick={e => e.stopPropagation()} style="width:480px;text-align:center">
-            <h2 id="avatar-title">Agent Avatar</h2>
-            <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px">
-              Generate an avatar for your agent, or skip to save without one.
-            </p>
-
-            {/* Avatar preview */}
-            <div style="width:120px;height:120px;border-radius:16px;overflow:hidden;background:var(--bg);border:2px solid var(--border);margin:0 auto 16px;display:flex;align-items:center;justify-content:center">
-              {avatarURI ? (
-                <img src={avatarURI} alt="Avatar" style="width:100%;height:100%;object-fit:cover" />
-              ) : (
-                <span style="font-size:48px;opacity:0.2">{'\u{1F916}'}</span>
-              )}
-            </div>
-
-            {/* Style picker */}
-            <div style="margin-bottom:16px">
-              <select value={avatarStyle} onChange={(e) => setAvatarStyle(e.target.value)} style="width:200px">
-                <option value="minimalist">Minimalist</option>
-                <option value="abstract">Abstract</option>
-                <option value="pixel">Pixel Art</option>
-                <option value="anime">Anime</option>
-                <option value="realistic">Realistic</option>
-              </select>
-            </div>
-
-            {/* Generate button */}
-            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:20px">
-              <button class="btn-secondary" onClick={() => generateAvatar('gemini')} disabled={generatingAvatar}>
-                Generate with Gemini Imagen
-              </button>
-            </div>
-            {generatingAvatar && <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Generating avatar...</p>}
-
-            {/* Action buttons */}
-            <div style="display:flex;gap:8px;justify-content:center;border-top:1px solid var(--border);padding-top:16px">
-              <button class="btn-secondary" onClick={() => setShowAvatar(false)}>Back</button>
-              <button class="btn-secondary" onClick={() => saveAgent(true)}>Skip Avatar</button>
-              <button class="btn-primary" onClick={() => saveAgent(false)} disabled={saving}>
-                {saving ? 'Saving...' : 'Save Agent'}
+            <div style="display:flex;justify-content:flex-end;padding-top:6px">
+              <button class="btn-primary" onClick={generate} disabled={generating || !description.trim()}>
+                {generating ? 'Generating...' : 'Create with AI'}
               </button>
             </div>
           </div>
         </div>
       )}
-    </div>
-  );
-}
 
-function MobileCreator({ config, schemas, activeNode, setActiveNode, getCompletionState, updateSection }) {
-  const nodeOrder = ['identity', 'soul', 'behavior', 'skills', 'tools', 'memory', 'heartbeat', 'channels', 'bootstrap'];
-  const stateColors = { complete: 'var(--success)', partial: 'var(--warning)', empty: 'var(--text-muted)' };
-  const stateLabels = { complete: 'Configured', partial: 'Partial', empty: 'Not set' };
-
-  return (
-    <div>
-      {nodeOrder.map(type => {
-        const schema = schemas.find(s => s.type === type);
-        if (!schema) return null;
-        const state = getCompletionState(type);
-        const isOpen = activeNode === type;
-
-        return (
-          <div key={type} class="card" style="margin-bottom:8px">
-            <div
-              style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:4px 0"
-              onClick={() => setActiveNode(isOpen ? null : type)}
-            >
-              <div>
-                <strong>{schema.title}</strong>
-                <span style="color:var(--text-muted);font-size:12px;margin-left:8px">{schema.subtitle}</span>
-              </div>
-              <span style={`width:10px;height:10px;border-radius:50%;background:${stateColors[state]}`}
-                title={stateLabels[state]} />
-            </div>
-            {isOpen && schema && (
-              <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
-                <ConfigPanel
-                  schema={schema}
-                  values={config[type] || {}}
-                  onChange={(values) => updateSection(type, values)}
-                  onClose={() => setActiveNode(null)}
-                  inline={true}
+      {/* === Preview mode: show generated config before saving === */}
+      {mode === 'preview' && preview && (
+        <div class="panel-enter" style="max-width:480px">
+          <div class="card" style="padding:20px;margin-bottom:16px">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+              <span style="font-size:32px">{preview.avatar || '\u2B50'}</span>
+              <div style="flex:1">
+                <input
+                  type="text"
+                  value={preview.name || ''}
+                  onInput={e => setPreview({ ...preview, name: e.target.value })}
+                  style="font-weight:600;font-size:var(--text-lg);background:transparent;border:none;color:var(--text);width:100%;padding:0"
+                  placeholder="Agent name"
                 />
+                <input
+                  type="text"
+                  value={preview.role || ''}
+                  onInput={e => setPreview({ ...preview, role: e.target.value })}
+                  style="font-size:var(--text-sm);color:var(--text-muted);background:transparent;border:none;width:100%;padding:0;margin-top:2px"
+                  placeholder="What does this agent do?"
+                />
+              </div>
+            </div>
+
+            <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+              <span class="badge badge-blue">{preview.model || 'strong'}</span>
+              <span class="badge" style="background:var(--surface-hover);color:var(--text-muted)">{preview.tool_profile || 'full'}</span>
+            </div>
+
+            {preview.examples && preview.examples.length > 0 && (
+              <div>
+                <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:6px">Suggested prompts</div>
+                <div style="display:flex;flex-direction:column;gap:4px">
+                  {preview.examples.map((ex, i) => (
+                    <div key={i} style="font-size:var(--text-xs);color:var(--text-muted);padding:4px 8px;background:var(--surface-hover);border-radius:4px">
+                      {ex}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
-        );
-      })}
+
+          <div style="display:flex;gap:8px">
+            <button class="btn-secondary" onClick={() => { setMode('pick'); setPreview(null); }}>
+              Start over
+            </button>
+            <button class="btn-primary" onClick={savePreview} disabled={saving || !preview.name}>
+              {saving ? 'Creating...' : 'Looks good, create it'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

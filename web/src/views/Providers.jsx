@@ -19,6 +19,8 @@ export function Providers() {
   const [toast, setToast] = useState(null); // { text, type: 'success'|'error'|'warning' }
   const [testing, setTesting] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [editingTPM, setEditingTPM] = useState(null); // { id, value }
+  const [savingTPM, setSavingTPM] = useState(null);
 
   const loadProviders = () => fetch('/api/providers').then(r => r.json()).then(setProviders).catch(() => {});
   const loadCombos = () => fetch('/api/combos').then(r => r.json()).then(setCombos).catch(() => {});
@@ -206,17 +208,50 @@ export function Providers() {
                   </div>
                   <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
                     <label style="font-size:12px;font-weight:500;white-space:nowrap">Rate Limit (TPM):</label>
-                    <input type="number" style="width:120px;font-size:12px;padding:4px 8px"
-                      defaultValue={p.config?.tokens_per_minute || defaultTPMForType(p.type)}
-                      onBlur={e => {
-                        const tpm = parseInt(e.target.value) || 0;
-                        fetch(`/api/providers/${p.id}/config`, {
-                          method: 'PATCH',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ tokens_per_minute: tpm }),
-                        }).then(() => loadProviders());
-                      }} />
-                    <span style="font-size:11px;color:var(--text-secondary)">{tpmHint(p.type)}</span>
+                    {editingTPM?.id === p.id ? (
+                      <>
+                        <input type="number" style="width:120px;font-size:12px;padding:4px 8px"
+                          value={editingTPM.value}
+                          onInput={e => setEditingTPM({ id: p.id, value: e.target.value })}
+                          onKeyDown={e => { if (e.key === 'Escape') setEditingTPM(null); }}
+                          autoFocus />
+                        <button class="btn-small" disabled={savingTPM === p.id} onClick={async () => {
+                          const tpm = parseInt(editingTPM.value) || 0;
+                          if (tpm <= 0) { showToast('TPM must be positive', 'error'); return; }
+                          setSavingTPM(p.id);
+                          try {
+                            const res = await fetch(`/api/providers/${p.id}/config`, {
+                              method: 'PATCH',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ tokens_per_minute: tpm }),
+                            });
+                            if (!res.ok) {
+                              const body = await res.json().catch(() => ({}));
+                              throw new Error(body.error || 'Save failed');
+                            }
+                            showToast(`Rate limit updated to ${tpm.toLocaleString()} TPM`, 'success');
+                            setEditingTPM(null);
+                            loadProviders();
+                          } catch (err) {
+                            showToast(err.message || 'Failed to save', 'error');
+                          } finally {
+                            setSavingTPM(null);
+                          }
+                        }}>{savingTPM === p.id ? 'Saving...' : 'Save'}</button>
+                        <button class="btn-small" onClick={() => setEditingTPM(null)}>Cancel</button>
+                      </>
+                    ) : (
+                      <>
+                        <span style="font-size:12px;font-variant-numeric:tabular-nums">
+                          {(p.config?.tokens_per_minute || defaultTPMForType(p.type)).toLocaleString()}
+                        </span>
+                        <button class="btn-small" onClick={() => setEditingTPM({
+                          id: p.id,
+                          value: String(p.config?.tokens_per_minute || defaultTPMForType(p.type))
+                        })}>Edit</button>
+                      </>
+                    )}
+                    <span style="font-size:11px;color:var(--text-secondary)">Default: {tpmHint(p.type)}</span>
                   </div>
                 </div>
               ))}

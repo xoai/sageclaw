@@ -49,12 +49,13 @@ type AgentConfig struct {
 
 // TeamInfo holds team context for system prompt injection.
 type TeamInfo struct {
-	TeamID      string
-	TeamName    string
-	Description string
-	Role        string // "lead" or "member"
-	LeadName    string // Display name of the lead agent
-	Members     []TeamMemberInfo
+	TeamID          string
+	TeamName        string
+	Description     string
+	Role            string // "lead" or "member"
+	LeadName        string // Display name of the lead agent
+	Members         []TeamMemberInfo
+	WorkflowEnabled bool // When true, lead uses _workflow_* tools instead of team_tasks.
 }
 
 // TeamMemberInfo describes a team member for prompt injection.

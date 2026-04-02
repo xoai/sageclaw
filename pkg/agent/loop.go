@@ -119,6 +119,9 @@ type Config struct {
 	TaskSummaryFunc       func(ctx context.Context) string // Returns active task summary for lead injection. Nil if not a lead.
 	MemberTaskContextFunc func(ctx context.Context) string // Returns per-turn task context for member agents. Nil if not a member.
 	DelegationAnalyzeFunc func(message string) string      // Returns formatted [Delegation Analysis] hint. Nil if not a lead or no members.
+	WorkflowToolHandler   func(ctx context.Context, sessionID, toolName, toolInput, userMessage string) (*canonical.ToolResult, error) // Handles _workflow_* tool calls. Nil = no workflow engine.
+	WorkflowToolDefs      []canonical.ToolDef // Internal workflow tool definitions injected for team leads.
+	WorkflowEnabled       bool                // Kill switch: false = fall back to tool-based orchestration.
 
 	// Voice configuration.
 	VoiceEnabled  bool   // If true, this loop can handle voice messages.
@@ -651,19 +654,52 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 				l.onEvent(Event{Type: EventToolCall, SessionID: sessionID, ToolCall: &tc, Iteration: iteration})
 			}
 
+			// Intercept internal workflow tool calls before reaching the registry.
+			// Pre-resolve workflow results, store by tool call ID.
+			workflowResults := map[string]*canonical.ToolResult{}
+			if l.config.WorkflowToolHandler != nil {
+				for _, tc := range toolCalls {
+					if !isWorkflowTool(tc.Name) {
+						continue
+					}
+					userMsg := lastUserMessage(history)
+					wr, err := l.config.WorkflowToolHandler(toolCtx, sessionID, tc.Name, string(tc.Input), userMsg)
+					if err != nil {
+						workflowResults[tc.ID] = &canonical.ToolResult{
+							ToolCallID: tc.ID,
+							Content:    fmt.Sprintf("Workflow error: %v", err),
+							IsError:    true,
+						}
+					} else {
+						wr.ToolCallID = tc.ID
+						workflowResults[tc.ID] = wr
+					}
+				}
+			}
+
+			// Filter out workflow calls from the list sent to registry/executor.
+			var registryCalls []canonical.ToolCall
+			for _, tc := range toolCalls {
+				if workflowResults[tc.ID] != nil {
+					continue
+				}
+				registryCalls = append(registryCalls, tc)
+			}
+
+			var registryResults []canonical.ToolResult
 			if l.streamingExecutor != nil {
 				// V2 path: streaming executor collected early results.
 				// Execute remaining tools in concurrent/exclusive batches.
 				consentFn := func(consentCtx context.Context, consentTC canonical.ToolCall) *canonical.ToolResult {
 					return l.checkConsent(consentCtx, sessionID, consentTC, iteration)
 				}
-				results = l.streamingExecutor.ExecuteRemaining(ctx, toolCtx, toolCalls, consentFn)
+				registryResults = l.streamingExecutor.ExecuteRemaining(ctx, toolCtx, registryCalls, consentFn)
 			} else {
 				// V1 path: sequential execution (unchanged).
-				for _, tc := range toolCalls {
+				for _, tc := range registryCalls {
 					// Check consent before execution.
 					if result := l.checkConsent(ctx, sessionID, tc, iteration); result != nil {
-						results = append(results, *result)
+						registryResults = append(registryResults, *result)
 						continue
 					}
 
@@ -678,7 +714,18 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 					} else {
 						result.ToolCallID = tc.ID
 					}
-					results = append(results, *result)
+					registryResults = append(registryResults, *result)
+				}
+			}
+
+			// Merge results in original toolCalls order to preserve 1:1 mapping.
+			regIdx := 0
+			for _, tc := range toolCalls {
+				if wr := workflowResults[tc.ID]; wr != nil {
+					results = append(results, *wr)
+				} else if regIdx < len(registryResults) {
+					results = append(results, registryResults[regIdx])
+					regIdx++
 				}
 			}
 
@@ -882,6 +929,10 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 	denyList := append([]string{}, l.config.ToolDeny...)
 	if l.config.TeamInfo != nil && l.config.TeamInfo.Role == "lead" {
 		denyList = append(denyList, "spawn")
+		// When workflow engine is active, leads use _workflow_* tools instead of team_tasks.
+		if l.config.WorkflowEnabled && l.config.WorkflowToolHandler != nil {
+			denyList = append(denyList, "team_tasks")
+		}
 	}
 	if l.config.TeamInfo == nil {
 		denyList = append(denyList, "team_tasks")
@@ -891,6 +942,12 @@ func (l *Loop) buildRequest(history []canonical.Message, injections []string) *c
 		denyList,
 		l.config.AllowedMCPServers,
 	)
+
+	// Inject workflow tool definitions for team leads when workflow engine is active.
+	if l.config.WorkflowEnabled && l.config.WorkflowToolDefs != nil &&
+		l.config.TeamInfo != nil && l.config.TeamInfo.Role == "lead" {
+		tools = append(tools, l.config.WorkflowToolDefs...)
+	}
 
 	// Deferred tool loading: when v2 pipeline is active, only send core tools
 	// with full schemas. Deferred tools get name+description stubs in the system
@@ -1673,5 +1730,10 @@ func (l *Loop) requestExecApproval(ctx context.Context, sessionID, command strin
 			return false, ctx.Err()
 		}
 	}
+}
+
+// isWorkflowTool returns true if the tool name is an internal workflow tool.
+func isWorkflowTool(name string) bool {
+	return strings.HasPrefix(name, "_workflow_")
 }
 

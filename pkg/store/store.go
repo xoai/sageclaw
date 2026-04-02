@@ -172,6 +172,17 @@ type SettingsStore interface {
 	SetSetting(ctx context.Context, key, value string) error
 }
 
+// WorkflowStore manages deterministic team workflows.
+type WorkflowStore interface {
+	CreateWorkflow(ctx context.Context, w TeamWorkflow) (string, error)
+	GetWorkflow(ctx context.Context, id string) (*TeamWorkflow, error)
+	UpdateWorkflowState(ctx context.Context, id, state string, version int, fields map[string]any) error
+	GetActiveWorkflow(ctx context.Context, teamID, sessionID string) (*TeamWorkflow, error)
+	ListStaleWorkflows(ctx context.Context, timeout time.Duration) ([]TeamWorkflow, error)
+	ListNonTerminalWorkflows(ctx context.Context) ([]TeamWorkflow, error)
+	CancelWorkflow(ctx context.Context, id string) error
+}
+
 // Store composes all store interfaces.
 type Store interface {
 	SessionStore
@@ -185,6 +196,7 @@ type Store interface {
 	ModelStore
 	PricingStore
 	SettingsStore
+	WorkflowStore
 	DB() *sql.DB
 	Close() error
 }

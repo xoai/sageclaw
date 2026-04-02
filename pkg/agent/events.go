@@ -32,6 +32,11 @@ const (
 	EventTeamTaskUnblocked EventType = "team.task.unblocked"
 	EventTeamTaskReview    EventType = "team.task.review"
 
+	// Workflow engine events.
+	EventWorkflowStarted      EventType = "workflow.started"
+	EventWorkflowStateChanged EventType = "workflow.state_changed"
+	EventWorkflowCompleted    EventType = "workflow.completed"
+
 	// Subagent events.
 	EventSubagentCompleted EventType = "subagent.completed"
 )

@@ -12,7 +12,9 @@ import { h } from 'preact';
 export function SessionPanel({ sessions, loading, activeId, onSelect, onNewChat }) {
   const timeAgo = (dateStr) => {
     if (!dateStr) return '';
-    const diff = Date.now() - new Date(dateStr).getTime();
+    // SQLite timestamps are UTC but lack the Z suffix — append it so JS parses correctly.
+    const utcStr = dateStr.endsWith('Z') ? dateStr : dateStr + 'Z';
+    const diff = Date.now() - new Date(utcStr).getTime();
     const mins = Math.floor(diff / 60000);
     if (mins < 1) return 'now';
     if (mins < 60) return `${mins}m`;
@@ -52,7 +54,10 @@ export function SessionPanel({ sessions, loading, activeId, onSelect, onNewChat 
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(s); } }}
           >
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-              <span class="session-item-name">{s.agent_name || s.agent_id}</span>
+              <span class="session-item-name" style={s.metadata?.has_unread === 'true' ? 'font-weight:700' : ''}>
+                {s.metadata?.has_unread === 'true' && <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--primary);margin-right:6px;vertical-align:middle" />}
+                {s.agent_name || s.agent_id}
+              </span>
               <span class="session-item-time">{timeAgo(s.updated_at)}</span>
             </div>
             <div class="session-item-preview">
