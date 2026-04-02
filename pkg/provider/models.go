@@ -45,7 +45,7 @@ var KnownModels = []ModelInfo{
 	{ID: "gemini/gemini-2.5-pro", Provider: "gemini", ModelID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", Tier: "strong", InputCost: 1.25, OutputCost: 10.0, CacheCost: 0.315, ContextWindow: 1000000},
 	{ID: "gemini/gemini-2.5-flash", Provider: "gemini", ModelID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", Tier: "fast", InputCost: 0.15, OutputCost: 0.6, CacheCost: 0.0375, ContextWindow: 1000000},
 	{ID: "gemini/gemini-2.0-flash", Provider: "gemini", ModelID: "gemini-2.0-flash", Name: "Gemini 2.0 Flash", Tier: "fast", InputCost: 0.1, OutputCost: 0.4, CacheCost: 0.025, ContextWindow: 1000000},
-	{ID: "gemini/gemini-2.0-flash-lite", Provider: "gemini", ModelID: "gemini-2.0-flash-lite", Name: "Gemini 2.0 Flash Lite", Tier: "fast", InputCost: 0.075, OutputCost: 0.3, CacheCost: 0.01875, ContextWindow: 1000000},
+	{ID: "gemini/gemini-2.5-flash-lite", Provider: "gemini", ModelID: "gemini-2.5-flash-lite", Name: "Gemini 2.5 Flash Lite", Tier: "fast", InputCost: 0.1, OutputCost: 0.4, CacheCost: 0.025, ContextWindow: 1000000},
 
 	// --- OpenRouter (popular models via OpenRouter) ---
 	{ID: "openrouter/anthropic/claude-sonnet-4", Provider: "openrouter", ModelID: "anthropic/claude-sonnet-4-20250514", Name: "Claude Sonnet 4 (via OpenRouter)", Tier: "strong", InputCost: 3.0, OutputCost: 15.0, ContextWindow: 200000},

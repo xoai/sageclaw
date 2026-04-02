@@ -166,6 +166,12 @@ type PricingStore interface {
 	BulkUpdateModelPricing(ctx context.Context, updates []ModelPricingBulk) error
 }
 
+// SettingsStore manages key-value settings.
+type SettingsStore interface {
+	GetSetting(ctx context.Context, key string) (string, error)
+	SetSetting(ctx context.Context, key, value string) error
+}
+
 // Store composes all store interfaces.
 type Store interface {
 	SessionStore
@@ -178,6 +184,7 @@ type Store interface {
 	MCPRegistryStore
 	ModelStore
 	PricingStore
+	SettingsStore
 	DB() *sql.DB
 	Close() error
 }

@@ -5,6 +5,7 @@ import { Channels } from './Channels';
 import Cron from './Cron';
 import Tunnel from './Tunnel';
 import Tools from './Tools';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 const TABS = [
   { id: 'general', label: 'General' },
@@ -30,6 +31,7 @@ export function Settings() {
 
   return (
     <div>
+      <Breadcrumb items={[{ label: 'Settings' }]} />
       <h1>Settings</h1>
       <div class="settings-layout">
         <div class="settings-tabs" role="tablist" aria-orientation="vertical">
@@ -76,6 +78,10 @@ export function Settings() {
 
 function GeneralTab() {
   const [theme, setTheme] = useState(localStorage.getItem('sageclaw-theme') || 'dark');
+  const [utilityModel, setUtilityModel] = useState('auto');
+  const [models, setModels] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState(null);
 
   const changeTheme = (next) => {
     setTheme(next);
@@ -83,8 +89,41 @@ function GeneralTab() {
     document.documentElement.setAttribute('data-theme', next);
   };
 
+  useEffect(() => {
+    fetch('/api/settings/utility-model', { credentials: 'include' })
+      .then(r => r.json()).then(d => { if (d.model) setUtilityModel(d.model); }).catch(() => {});
+    fetch('/api/providers/models', { credentials: 'include' })
+      .then(r => r.json()).then(d => {
+        const list = Array.isArray(d) ? d : (d && Array.isArray(d.models) ? d.models : []);
+        if (list.length > 0) {
+          const available = list.filter(m => m.available);
+          setModels(available.length > 0 ? available : list);
+        }
+      }).catch(() => {});
+  }, []);
+
+  const saveUtilityModel = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/settings/utility-model', {
+        method: 'PUT', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: utilityModel }),
+      });
+      if (res.ok) {
+        setToast({ msg: 'Saved. Restart server to apply.', type: 'success' });
+      } else {
+        setToast({ msg: 'Failed to save', type: 'error' });
+      }
+    } catch { setToast({ msg: 'Failed to save', type: 'error' }); }
+    setSaving(false);
+    setTimeout(() => setToast(null), 3000);
+  };
+
   return (
     <div>
+      {toast && <div class={`toast toast-${toast.type}`}>{toast.msg}</div>}
+
       <h3 style="margin-bottom:16px">Appearance</h3>
       <div class="form-group">
         <label>Theme</label>
@@ -92,6 +131,25 @@ function GeneralTab() {
           <button class={theme === 'dark' ? 'btn-primary' : 'btn-secondary'} onClick={() => changeTheme('dark')}>Dark</button>
           <button class={theme === 'light' ? 'btn-primary' : 'btn-secondary'} onClick={() => changeTheme('light')}>Light</button>
         </div>
+      </div>
+
+      <h3 style="margin-top:24px;margin-bottom:16px">Background Model</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+        Used for context summaries and micro-compact. Leave on Auto to use the cheapest available model.
+      </p>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select value={utilityModel} onChange={e => setUtilityModel(e.target.value)}
+          style="flex:1;max-width:320px">
+          <option value="auto">Auto (recommended)</option>
+          {models.map(m => (
+            <option key={m.model_id || m.id} value={m.model_id || m.id}>
+              {m.name || m.model_id || m.id} — {m.tier || 'unknown'}
+            </option>
+          ))}
+        </select>
+        <button class="btn-primary" style="padding:6px 16px;font-size:13px" onClick={saveUtilityModel} disabled={saving}>
+          {saving ? 'Saving...' : 'Save'}
+        </button>
       </div>
 
       <h3 style="margin-top:24px;margin-bottom:16px">About</h3>

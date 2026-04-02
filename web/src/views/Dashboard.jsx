@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import { rpc, subscribeEvents } from '../api';
 import { EventCard } from '../components/EventCard';
 import { TabBar } from '../components/TabBar';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -22,6 +23,7 @@ export default function Dashboard() {
 
   return (
     <div>
+      <Breadcrumb items={[{ label: 'Dashboard' }]} />
       <h1 style="margin-bottom:2px">Dashboard</h1>
       <p class="page-subtitle" style="margin-bottom:16px">Health, activity, and agent metrics</p>
       <TabBar tabs={TABS} active={tab} onChange={changeTab} />

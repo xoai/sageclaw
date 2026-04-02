@@ -77,6 +77,7 @@ type Server struct {
 	pendingTOTP    map[string]pendingTOTPEntry // nonce → entry
 	loopPool       *agent.LoopPool
 	teamReloadFunc func() // Called after team create/update/delete to hot-reload team config.
+	workspace      string // Workspace root for file uploads.
 }
 
 // wsConn is a minimal WebSocket connection using the standard upgrade.
@@ -97,6 +98,11 @@ type Config struct {
 
 // ServerOption configures optional Server features.
 type ServerOption func(*Server)
+
+// WithWorkspace sets the workspace root for file uploads.
+func WithWorkspace(path string) ServerOption {
+	return func(s *Server) { s.workspace = path }
+}
 
 // WithGraphEngine adds graph capabilities to the server.
 func WithGraphEngine(g memory.GraphEngine) ServerOption {
@@ -319,6 +325,7 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("POST /api/agents", srv.authGuard(srv.handleAgentsCreate))
 	mux.HandleFunc("PUT /api/agents/", srv.authGuard(srv.handleAgentsUpdate))
 	mux.HandleFunc("DELETE /api/agents/", srv.authGuard(srv.handleAgentsDelete))
+	mux.HandleFunc("GET /api/agents/{id}/examples", srv.authGuard(srv.handleAgentExamples))
 
 	// Providers (authenticated).
 	mux.HandleFunc("GET /api/providers", srv.authGuard(srv.handleProvidersList))
@@ -328,6 +335,9 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("GET /api/providers/models", srv.authGuard(srv.handleProvidersModels))
 	mux.HandleFunc("GET /api/providers/models/live", srv.authGuard(srv.handleProvidersModelsLive))
 	mux.HandleFunc("POST /api/providers/models/refresh", srv.authGuard(srv.handleProvidersModelsRefresh))
+
+	// File upload (authenticated).
+	mux.HandleFunc("POST /api/upload", srv.authGuard(srv.handleFileUpload))
 
 	// Combos (authenticated).
 	mux.HandleFunc("GET /api/combos", srv.authGuard(srv.handleCombosList))
@@ -357,6 +367,8 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("PUT /api/settings/password", srv.authGuard(srv.handleSettingsPassword))
 	mux.HandleFunc("GET /api/settings/export", srv.authGuard(srv.handleSettingsExport))
 	mux.HandleFunc("POST /api/settings/import", srv.authGuard(srv.handleSettingsImport))
+	mux.HandleFunc("GET /api/settings/utility-model", srv.authGuard(srv.handleGetUtilityModel))
+	mux.HandleFunc("PUT /api/settings/utility-model", srv.authGuard(srv.handleSetUtilityModel))
 
 	// Cron (authenticated).
 	mux.HandleFunc("GET /api/cron", srv.authGuard(srv.handleCronList))
@@ -450,6 +462,7 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("GET /api/v2/agents/presets", srv.authGuard(srv.handlePresetsList))
 	mux.HandleFunc("POST /api/v2/agents/presets/", srv.authGuard(srv.handlePresetsApply))
 	mux.HandleFunc("POST /api/v2/agents/generate", srv.authGuard(srv.handleAgentGenerate))
+	mux.HandleFunc("POST /api/v2/agents/quick-create", srv.authGuard(srv.handleAgentQuickCreate))
 	mux.HandleFunc("POST /api/v2/agents/avatar", srv.authGuard(srv.handleAvatarGenerate))
 
 	// Connections v2 — multi-channel (authenticated).

@@ -200,6 +200,8 @@ Environment:
   OLLAMA_BASE_URL       Ollama base URL (default: http://localhost:11434/v1)
   SAGECLAW_DB_PATH      Database file path
   SAGECLAW_WORKSPACE    Workspace root
+  SAGECLAW_LANE_MAIN    Max concurrent agent runs (default: 10)
+  SAGECLAW_LANE_SUBAGENT Max concurrent subagent runs (default: 10)
   SAGECLAW_SKILLS_DIR   Skills directory (default: ./skills)
   SAGECLAW_RPC_ADDR     RPC server address (default: :9090)
 
@@ -1011,6 +1013,15 @@ Key behaviors:
 		log.Println("context: v2 pipeline enabled for all agents (--context-v2)")
 	}
 
+	// Load utility model setting and inject into all agent configs.
+	if utilModel, _ := appStore.GetSetting(context.Background(), "utility_model"); utilModel != "" && utilModel != "auto" {
+		for id, ac := range agentConfigs {
+			ac.UtilityModel = utilModel
+			agentConfigs[id] = ac
+		}
+		log.Printf("utility model override: %s", utilModel)
+	}
+
 	// Always create LoopPool so hot-reload from dashboard works.
 	// When no providers exist yet, defaultProvider is nil — the router handles resolution.
 	loopPool = agent.NewLoopPool(agentConfigs, defaultProvider, toolReg, preCtx, postTool,
@@ -1617,6 +1628,7 @@ Key behaviors:
 		rpc.WithAudioBasePath(audioStoragePath),
 		rpc.WithLoopPool(loopPool),
 		rpc.WithTeamReload(reloadTeams),
+		rpc.WithWorkspace(f.workspace),
 	)
 	// Wire SSE broadcast now that rpcServer exists.
 	sseBroadcast = rpcServer.EventHandler()

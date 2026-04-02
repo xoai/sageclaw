@@ -2,10 +2,12 @@ package rpc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/xoai/sageclaw/pkg/agentcfg"
 	"gopkg.in/yaml.v3"
@@ -32,6 +34,7 @@ func (s *Server) handleAgentsListV2(w http.ResponseWriter, r *http.Request) {
 			"model":    cfg.Identity.Model,
 			"avatar":   cfg.Identity.Avatar,
 			"tags":     cfg.Identity.Tags,
+			"examples": agentcfg.ResolveExamples(cfg),
 			"status":   status,
 			"source":   cfg.Source,
 			"has_soul": cfg.Soul != "",
@@ -79,6 +82,127 @@ func (s *Server) handleAgentGetFull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, configToResponse(cfg))
+}
+
+// handleAgentExamples returns example prompts for a specific agent.
+// Falls back to profile-based defaults if no custom examples are configured.
+func (s *Server) handleAgentExamples(w http.ResponseWriter, r *http.Request) {
+	// Path: /api/agents/{id}/examples
+	id := extractPathParam(r.URL.Path, "/api/agents/")
+	id = strings.TrimSuffix(id, "/examples")
+	if !validateAgentID(id) {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid agent ID"})
+		return
+	}
+
+	dir := filepath.Join(s.agentsDir, id)
+	cfg, err := agentcfg.LoadAgent(dir)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "agent not found"})
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"agent_id": id,
+		"examples": agentcfg.ResolveExamples(cfg),
+	})
+}
+
+// handleAgentQuickCreate creates an agent from a simplified config
+// (as returned by the generate or preset endpoints).
+// Accepts: { name, role, avatar, model, tool_profile, examples }
+func (s *Server) handleAgentQuickCreate(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		Name        string   `json:"name"`
+		Role        string   `json:"role"`
+		Avatar      string   `json:"avatar"`
+		Model       string   `json:"model"`
+		ToolProfile string   `json:"tool_profile"`
+		Examples    []string `json:"examples"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid request"})
+		return
+	}
+	if p.Name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "name required"})
+		return
+	}
+
+	// Generate a filesystem-safe ID from the name.
+	id := toAgentID(p.Name)
+	if !validateAgentID(id) {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "could not generate valid ID from name"})
+		return
+	}
+
+	dir := filepath.Join(s.agentsDir, id)
+	if _, err := os.Stat(filepath.Join(dir, "identity.yaml")); err == nil {
+		// Append timestamp suffix to avoid collision.
+		id = id + "-" + fmt.Sprintf("%d", time.Now().UnixMilli()%100000)
+		dir = filepath.Join(s.agentsDir, id)
+	}
+
+	// Build config from simplified fields.
+	cfg := agentcfg.Defaults(id)
+	cfg.Identity.Name = p.Name
+	cfg.Identity.Role = p.Role
+	cfg.Identity.Avatar = p.Avatar
+	if cfg.Identity.Avatar == "" {
+		cfg.Identity.Avatar = agentcfg.AutoAvatar(p.Name, p.Role)
+	}
+	if p.Model != "" {
+		cfg.Identity.Model = p.Model
+	}
+	if len(p.Examples) > 0 {
+		cfg.Identity.Examples = p.Examples
+	}
+	if p.ToolProfile != "" {
+		cfg.Tools.Profile = p.ToolProfile
+	}
+
+	if err := agentcfg.SaveAgent(&cfg, dir); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"id":     id,
+		"name":   cfg.Identity.Name,
+		"status": "created",
+	})
+}
+
+// toAgentID converts a display name to a filesystem-safe agent ID.
+func toAgentID(name string) string {
+	id := strings.ToLower(name)
+	id = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		if r == ' ' || r == '_' {
+			return '-'
+		}
+		return -1
+	}, id)
+	// Collapse multiple dashes.
+	for strings.Contains(id, "--") {
+		id = strings.ReplaceAll(id, "--", "-")
+	}
+	id = strings.Trim(id, "-")
+	if id == "" {
+		id = "agent"
+	}
+	if len(id) > 50 {
+		id = id[:50]
+	}
+	return id
 }
 
 // handleAgentCreateV2 creates a new agent from a full config.
@@ -396,6 +520,9 @@ func configFromMap(id string, m map[string]any) *agentcfg.AgentConfig {
 	}
 	if cfg.Identity.MaxTokens == 0 {
 		cfg.Identity.MaxTokens = 8192
+	}
+	if cfg.Identity.Avatar == "" {
+		cfg.Identity.Avatar = agentcfg.AutoAvatar(cfg.Identity.Name, cfg.Identity.Role)
 	}
 	cfg.Source = "file"
 

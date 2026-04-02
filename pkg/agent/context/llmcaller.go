@@ -3,6 +3,7 @@ package context
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -14,8 +15,9 @@ import (
 type LLMCaller func(ctx context.Context, systemPrompt string, userContent string, timeout time.Duration) (string, error)
 
 // NewLLMCaller creates an LLMCaller that resolves the fast-tier model from
-// the router. Resolution order: combo tail → TierFast → main model fallback.
-func NewLLMCaller(router *provider.Router, mainModel string) LLMCaller {
+// the router. If utilityOverride is set (non-empty, not "auto"), it uses that
+// model directly. Resolution order for auto: combo tail → TierFast → main model.
+func NewLLMCaller(router *provider.Router, mainModel string, utilityOverride string) LLMCaller {
 	if router == nil {
 		return nil
 	}
@@ -24,8 +26,20 @@ func NewLLMCaller(router *provider.Router, mainModel string) LLMCaller {
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		// Resolve provider + model: prefer fast tier.
-		prov, model := resolveFastProvider(router, mainModel)
+		// Resolve provider + model.
+		var prov provider.Provider
+		var model string
+
+		if utilityOverride != "" && utilityOverride != "auto" {
+			prov, model = resolveOverrideModel(router, utilityOverride)
+			if prov == nil {
+				log.Printf("[context-pipeline] utility model override %q not available, falling back to auto", utilityOverride)
+				prov, model = resolveFastProvider(router, mainModel)
+			}
+		} else {
+			prov, model = resolveFastProvider(router, mainModel)
+		}
+
 		if prov == nil {
 			return "", fmt.Errorf("no provider available for utility call")
 		}
@@ -54,6 +68,23 @@ func NewLLMCaller(router *provider.Router, mainModel string) LLMCaller {
 		}
 		return "", fmt.Errorf("utility LLM call: empty response")
 	}
+}
+
+// resolveOverrideModel finds the provider for a specific model ID.
+func resolveOverrideModel(router *provider.Router, modelID string) (provider.Provider, string) {
+	// Look up in known models to find the provider name.
+	if info := provider.FindModel(modelID); info != nil {
+		if p, ok := router.GetProvider(info.Provider); ok {
+			return p, modelID
+		}
+	}
+
+	// For unknown models (e.g., Ollama custom), try the ollama provider.
+	if p, ok := router.GetProvider("ollama"); ok {
+		return p, modelID
+	}
+
+	return nil, ""
 }
 
 // resolveFastProvider resolves the cheapest available provider+model.

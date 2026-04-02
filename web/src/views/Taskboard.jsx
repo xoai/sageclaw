@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { route } from 'preact-router';
 import { subscribeEvents } from '../api';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 // --- Helpers ---
 
@@ -801,9 +802,9 @@ export function Taskboard({ id: teamId }) {
 
   return (
     <div>
+      <Breadcrumb items={[{ label: 'Agents', href: '/agents?tab=teams' }, { label: team.name }]} />
       {/* Header */}
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
-        <button class="btn-small" onClick={() => route('/agents?tab=teams')}>&larr; Teams</button>
         <h1 style="margin:0;font-size:20px">{team.name}</h1>
         {team.description && (
           <span style="font-size:13px;color:var(--text-muted)">{team.description}</span>

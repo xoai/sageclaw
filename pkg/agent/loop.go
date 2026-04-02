@@ -107,6 +107,7 @@ type Config struct {
 	ContextMicroCompactAge int     // Iterations before micro-compacting (0 = default 5).
 	ContextCollapseThreshold float64 // Budget usage ratio for collapse (0 = default 0.7).
 	ContextOverflowMaxBytes  int64   // Per-session overflow cap in bytes (0 = default 50MB).
+	UtilityModel             string  // Override model for background tasks (micro-compact, summaries). "" or "auto" = auto-resolve.
 
 	// Provider-specific features.
 	ThinkingLevel string // Extended thinking: "low", "medium", "high".
@@ -374,7 +375,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		l.contextPipeline = agentctx.NewContextPipeline(cfg)
 		// Set up fast-tier LLM caller for micro-compact and summaries.
 		if l.router != nil {
-			l.contextPipeline.SetLLMCaller(agentctx.NewLLMCaller(l.router, l.config.Model))
+			l.contextPipeline.SetLLMCaller(agentctx.NewLLMCaller(l.router, l.config.Model, l.config.UtilityModel))
 		}
 		log.Printf("[%s] context pipeline v2 activated", sessionID)
 	}

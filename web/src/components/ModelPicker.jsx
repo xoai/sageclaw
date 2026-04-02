@@ -63,7 +63,7 @@ export default function ModelPicker({ value, onChange, models, combos, connected
       const c = (combos || []).find(c => c.id === value.slice(6));
       return c ? `combo:${c.name}` : value;
     }
-    const m = (models || []).find(m => m.model_id === value || m.id === value);
+    const m = (models || []).find(m => m.model_id === value || m.id === value || (m.provider + '/' + m.model_id) === value);
     return m ? `${m.provider}/${m.model_id}` : value;
   };
 
@@ -135,8 +135,8 @@ export default function ModelPicker({ value, onChange, models, combos, connected
               </div>
               {provModels.map(m => (
                 <div key={m.id}
-                  class={`model-picker-item ${value === m.model_id ? 'selected' : ''} ${!m.available ? 'unavailable' : ''}`}
-                  onClick={() => select(m.model_id)}>
+                  class={`model-picker-item ${(value === m.model_id || value === m.provider + '/' + m.model_id) ? 'selected' : ''} ${!m.available ? 'unavailable' : ''}`}
+                  onClick={() => select(m.provider + '/' + m.model_id)}>
                   <span class="model-picker-name">{m.provider}/{m.model_id}</span>
                   <span class="model-picker-meta">
                     {m.tier && <span class="model-picker-tier">{m.tier}</span>}

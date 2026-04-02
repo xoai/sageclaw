@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -67,8 +69,23 @@ type LaneLimits struct {
 }
 
 // DefaultLaneLimits returns the default concurrency limits.
+// Reads env vars for overrides (like goclaw's GOCLAW_LANE_* pattern).
 func DefaultLaneLimits() LaneLimits {
-	return LaneLimits{Main: 1, Subagent: 2, Delegate: 3, Cron: 1}
+	return LaneLimits{
+		Main:     envIntOrDefault("SAGECLAW_LANE_MAIN", 10),
+		Subagent: envIntOrDefault("SAGECLAW_LANE_SUBAGENT", 10),
+		Delegate: envIntOrDefault("SAGECLAW_LANE_DELEGATE", 10),
+		Cron:     envIntOrDefault("SAGECLAW_LANE_CRON", 5),
+	}
+}
+
+func envIntOrDefault(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultVal
 }
 
 // NewLaneScheduler creates a scheduler with per-lane concurrency.

@@ -4,6 +4,7 @@ import { route } from 'preact-router';
 import { Label } from '../components/InfoTip';
 import ConfigPanel from '../components/ConfigPanel';
 import ModelPicker from '../components/ModelPicker';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 export default function AgentEditor({ id }) {
   const [agent, setAgent] = useState(null);
@@ -111,9 +112,7 @@ export default function AgentEditor({ id }) {
 
   return (
     <div>
-      <div style="margin-bottom:16px">
-        <a href="/agents" style="font-size:13px;color:var(--text-muted)">← Agents</a>
-      </div>
+      <Breadcrumb items={[{ label: 'Agents', href: '/agents' }, { label: agent?.identity?.name || id }]} />
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <h1 style="margin-bottom:0">{isNew ? 'New Agent' : `Edit: ${agent.identity?.name || id}`}</h1>

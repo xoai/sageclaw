@@ -187,6 +187,31 @@ func (s *Server) handleSettingsPassword(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]string{"status": "password changed"})
 }
 
+func (s *Server) handleGetUtilityModel(w http.ResponseWriter, r *http.Request) {
+	val, _ := s.store.GetSetting(r.Context(), "utility_model")
+	if val == "" {
+		val = "auto"
+	}
+	writeJSON(w, map[string]string{"model": val})
+}
+
+func (s *Server) handleSetUtilityModel(w http.ResponseWriter, r *http.Request) {
+	var params struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid request"})
+		return
+	}
+	if err := s.store.SetSetting(r.Context(), "utility_model", params.Model); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]string{"status": "saved"})
+}
+
 func (s *Server) handleSettingsExport(w http.ResponseWriter, r *http.Request) {
 	// Export agents as JSON.
 	rows, err := s.store.DB().QueryContext(r.Context(),

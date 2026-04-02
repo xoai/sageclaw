@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { SkillsContent } from './Skills';
 import MCPServers from './MCPServers';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 export function Marketplace() {
   const params = new URLSearchParams(window.location.search);
@@ -230,18 +231,11 @@ export function Marketplace() {
 
   return (
     <div>
-      {/* Breadcrumb */}
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;font-size:12px;color:var(--text-muted)">
-        <a href="/" style="color:var(--text-muted);text-decoration:none" onClick={e => { e.preventDefault(); history.pushState(null, '', '/'); window.dispatchEvent(new PopStateEvent('popstate')); }}>Home</a>
-        <span>/</span>
-        <span style="color:var(--text)">Marketplace</span>
-        {category && categories.length > 0 && (
-          <>
-            <span>/</span>
-            <span style="color:var(--text)">{categories.find(c => c.id === category)?.name || category}</span>
-          </>
-        )}
-      </div>
+      <Breadcrumb items={
+        category && categories.length > 0
+          ? [{ label: 'Marketplace', href: '/marketplace' }, { label: categories.find(c => c.id === category)?.name || category }]
+          : [{ label: 'Marketplace' }]
+      } />
 
       <h1 style="margin-bottom:16px">Marketplace</h1>
 

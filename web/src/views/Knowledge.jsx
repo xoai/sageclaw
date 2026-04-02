@@ -1,6 +1,7 @@
 import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import { TabBar } from '../components/TabBar';
+import { Breadcrumb } from '../components/Breadcrumb';
 import { Memory } from './Memory';
 import Graph from './Graph';
 
@@ -22,6 +23,7 @@ export default function Knowledge() {
 
   return (
     <div>
+      <Breadcrumb items={[{ label: 'Knowledge' }]} />
       <h1>Knowledge</h1>
       <TabBar tabs={TABS} active={tab} onChange={changeTab} />
       <div class="tab-content-enter" key={tab}>

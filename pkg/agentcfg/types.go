@@ -77,6 +77,7 @@ type Identity struct {
 	ThinkingLevel string   `json:"thinking_level,omitempty" yaml:"thinking_level"` // "low", "medium", "high" — enables extended thinking on supported models.
 	Avatar        string   `json:"avatar" yaml:"avatar"`                   // Emoji or URL
 	Tags          []string `json:"tags" yaml:"tags"`
+	Examples      []string `json:"examples,omitempty" yaml:"examples"`     // Example prompts for homepage cards
 	Status        string   `json:"status" yaml:"status"`                   // "active" (default), "inactive"
 }
 

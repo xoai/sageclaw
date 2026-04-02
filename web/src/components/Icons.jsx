@@ -51,6 +51,53 @@ export const IconSettings = icon([
   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1.08 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.77 1.02 1.51 1.08H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1.08z" />,
 ]);
 
+/** Paperclip / attach */
+export const IconPaperclip = icon([
+  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />,
+]);
+
+/** Arrow up / send */
+export const IconArrowUp = icon([
+  <line x1="12" y1="19" x2="12" y2="5" />,
+  <polyline points="5 12 12 5 19 12" />,
+]);
+
+/** Store / marketplace */
+export const IconStore = icon([
+  <path d="M3 9l1-4h16l1 4" />,
+  <path d="M3 9v10a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V9" />,
+  <path d="M3 9h18" />,
+  <path d="M9 21V12h6v9" />,
+]);
+
+/** Sparkle / magic */
+export const IconSparkle = icon([
+  <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" />,
+]);
+
+/** Chevron left / back */
+export const IconChevronLeft = icon([
+  <polyline points="15 18 9 12 15 6" />,
+]);
+
+/** X / close */
+export const IconX = icon([
+  <line x1="18" y1="6" x2="6" y2="18" />,
+  <line x1="6" y1="6" x2="18" y2="18" />,
+]);
+
+/** Loader / hourglass */
+export const IconLoader = icon([
+  <line x1="12" y1="2" x2="12" y2="6" />,
+  <line x1="12" y1="18" x2="12" y2="22" />,
+  <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />,
+  <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />,
+  <line x1="2" y1="12" x2="6" y2="12" />,
+  <line x1="18" y1="12" x2="22" y2="12" />,
+  <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />,
+  <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />,
+]);
+
 /** Status dot — small circle indicator */
 export function StatusDot({ ok, style }) {
   return (

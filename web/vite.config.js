@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  plugins: [preact()],
+  plugins: [preact(), tailwindcss()],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
@@ -12,6 +13,7 @@ export default defineConfig({
     proxy: {
       '/rpc': 'http://localhost:9090',
       '/events': 'http://localhost:9090',
+      '/api': 'http://localhost:9090',
     },
   },
 });

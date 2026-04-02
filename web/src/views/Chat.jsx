@@ -1,7 +1,11 @@
 import { h } from 'preact';
-import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'preact/hooks';
 import { SessionPanel } from '../components/SessionPanel';
 import { ToolTimeline } from '../components/ToolTimeline';
+import { ExampleCards } from '../components/ExampleCards';
+import { MagicCreate } from '../components/MagicCreate';
+import { Breadcrumb } from '../components/Breadcrumb';
+import { IconPaperclip, IconArrowUp, IconStore, IconSparkle, IconChevronLeft, IconX, IconLoader } from '../components/Icons';
 import snarkdown from 'snarkdown';
 import DOMPurify from 'dompurify';
 
@@ -52,7 +56,7 @@ function extractAudio(content) {
 
 export function Chat() {
   // Panel state: what the right panel shows.
-  // 'empty' | 'pick-agent' | 'chat'
+  // 'empty' | 'pick-agent' | 'chat' | 'magic-create'
   const [rightPanel, setRightPanel] = useState('empty');
 
   // Mobile: which panel is visible.
@@ -65,6 +69,7 @@ export function Chat() {
   // Agent picker state
   const [agents, setAgents] = useState([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
+  const [homepageAgent, setHomepageAgent] = useState(null); // Selected agent on homepage
 
   // Chat state
   const [messages, setMessages] = useState([]);
@@ -79,9 +84,14 @@ export function Chat() {
   const [noProvider, setNoProvider] = useState(false);
   const [toolSteps, setToolSteps] = useState([]);
   const [toolCollapsed, setToolCollapsed] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState([]);  // [{file, name, size, preview?}]
   const bottomRef = useRef(null);
+  const messagesContainerRef = useRef(null);
   const timerRef = useRef(null);
   const sseRef = useRef(null);
+  const initialScrollDone = useRef(false);
+  const pendingSend = useRef(false); // Auto-send after homepage → chat transition
+  const chatTextareaRef = useRef(null);
 
   const loadSessions = useCallback(async () => {
     setListLoading(true);
@@ -115,9 +125,25 @@ export function Chat() {
     return match ? match.id : null;
   }, []);
 
-  // Init: load sessions, check providers, handle ?session= param.
+  // Load agents eagerly so examples are available in homepage mode.
+  const loadAgents = useCallback(async () => {
+    try {
+      const res = await fetch('/api/v2/agents', { credentials: 'include' });
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        const webAgents = data.filter(a => {
+          const serve = a.channels_serve;
+          return !serve || serve.length === 0 || serve.includes('web');
+        });
+        setAgents(webAgents);
+      }
+    } catch {}
+  }, []);
+
+  // Init: load sessions, agents, check providers, handle ?session= param.
   useEffect(() => {
     loadSessions();
+    loadAgents();
     fetch('/api/health').then(r => r.json()).then(h => {
       if (h.providers) {
         const hasProvider = Object.values(h.providers).some(s => s === 'connected');
@@ -125,32 +151,102 @@ export function Chat() {
       }
     }).catch(() => {});
 
-    // Check for ?session= query param (from redirect).
+    // Check for ?session= or ?agent= query param (from redirect).
     const params = new URLSearchParams(window.location.search);
     const sessionParam = params.get('session');
+    const agentParam = params.get('agent');
     if (sessionParam) {
       callRPC('sessions.get', { id: sessionParam }).then(async ({ data: sess }) => {
         if (sess) {
           openSessionById(sessionParam, sess.agent_id, sess.agent_name || sess.agent_id);
         }
       }).catch(() => {});
+    } else if (agentParam) {
+      // Auto-start chat with specified agent (from onboarding redirect).
+      fetch('/api/v2/agents', { credentials: 'include' }).then(r => r.json()).then(data => {
+        if (Array.isArray(data)) {
+          const webAgents = data.filter(a => {
+            const serve = a.channels_serve;
+            return !serve || serve.length === 0 || serve.includes('web');
+          });
+          setAgents(webAgents);
+          const match = webAgents.find(a => a.id === agentParam);
+          startNewChat(match || { id: agentParam, name: agentParam });
+        }
+      }).catch(() => {});
     }
+
+    // Listen for navigation to "/" (e.g. clicking "Home" in breadcrumb) — reset to empty state.
+    const handleNavHome = () => {
+      const path = window.location.pathname;
+      const search = window.location.search;
+      if (path === '/' && !search) {
+        goHome();
+      }
+    };
+    window.addEventListener('popstate', handleNavHome);
+
+    // Global keyboard shortcuts.
+    const handleGlobalKeys = (e) => {
+      // Escape: dismiss overlays, go back to empty/list
+      if (e.key === 'Escape') {
+        if (rightPanel === 'magic-create') { setRightPanel('empty'); setMobileView('list'); }
+        else if (rightPanel === 'pick-agent') { setRightPanel('empty'); setMobileView('list'); }
+      }
+      // Cmd/Ctrl+Shift+O: new chat (agent picker)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'O') {
+        e.preventDefault();
+        showAgentPicker();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeys);
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
       if (sseRef.current) sseRef.current.close();
+      window.removeEventListener('popstate', handleNavHome);
+      window.removeEventListener('keydown', handleGlobalKeys);
+      // Clean up file preview object URLs.
+      attachedFiles.forEach(af => { if (af.preview) URL.revokeObjectURL(af.preview); });
     };
-  }, []);
+  }, [rightPanel]);
 
+  // Auto-send when transitioning from homepage to chat with pending input.
   useEffect(() => {
-    if (rightPanel === 'chat') {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (rightPanel === 'chat' && pendingSend.current && input.trim()) {
+      pendingSend.current = false;
+      send();
     }
-  }, [messages, streaming, rightPanel]);
+  }, [rightPanel]);
+
+  // Initial scroll: jump to bottom before paint (no visible jump).
+  useLayoutEffect(() => {
+    if (rightPanel === 'chat' && messages.length > 0 && !initialScrollDone.current) {
+      const container = messagesContainerRef.current;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+        initialScrollDone.current = true;
+      }
+    }
+  }, [rightPanel, messages.length]);
+
+  // Subsequent messages: auto-scroll if user is near bottom.
+  // Use instant scroll during streaming (smooth can't keep up with rapid updates).
+  useEffect(() => {
+    if (rightPanel !== 'chat' || !initialScrollDone.current) return;
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300;
+    if (nearBottom) {
+      const behavior = streaming ? 'instant' : 'smooth';
+      bottomRef.current?.scrollIntoView({ behavior });
+    }
+  }, [messages, streaming, toolSteps]);
 
   // --- Session Actions ---
 
   const openSessionById = async (id, agentId, agentName) => {
+    initialScrollDone.current = false; // Reset for new session.
     setSelectedSession(id);
     setSelectedAgent(agentId);
     setSelectedAgentName(agentName);
@@ -170,21 +266,13 @@ export function Chat() {
   };
 
   const showAgentPicker = async () => {
-    setAgentsLoading(true);
     setRightPanel('pick-agent');
     setMobileView('conversation');
-    try {
-      const res = await fetch('/api/v2/agents', { credentials: 'include' });
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        const webAgents = data.filter(a => {
-          const serve = a.channels_serve;
-          return !serve || serve.length === 0 || serve.includes('web');
-        });
-        setAgents(webAgents);
-      }
-    } catch {}
-    setAgentsLoading(false);
+    if (agents.length === 0) {
+      setAgentsLoading(true);
+      await loadAgents();
+      setAgentsLoading(false);
+    }
   };
 
   const chatIdRef = useRef('web-client');
@@ -196,8 +284,8 @@ export function Chat() {
     setSelectedAgent(agent.id);
     setSelectedAgentName(agent.name || agent.id);
     setMessages([]);
-    setInput('');
-    setSending(false);
+    if (!pendingSend.current) setInput(''); // Preserve input for auto-send from homepage
+    setSending(false); sendingRef.current = false;
     setStreaming('');
     setRightPanel('chat');
     setMobileView('conversation');
@@ -207,14 +295,94 @@ export function Chat() {
     setMobileView('list');
   };
 
+  const goHome = () => {
+    setRightPanel('empty');
+    setSelectedSession(null);
+    setMobileView('list');
+  };
+
+  // --- File Upload ---
+
+  const fileInputRef = useRef(null);
+
+  const handleFileSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    addFiles(files);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const addFiles = (files) => {
+    const maxSize = 30 * 1024 * 1024;
+    const allowed = ['.txt','.md','.csv','.json','.yaml','.yml','.xml','.toml',
+      '.html','.css','.js','.ts','.jsx','.tsx','.go','.py','.rs','.java','.sh',
+      '.pdf','.png','.jpg','.jpeg','.gif','.webp'];
+    const newFiles = files.filter(f => {
+      const ext = '.' + f.name.split('.').pop().toLowerCase();
+      return f.size <= maxSize && allowed.includes(ext);
+    }).map(f => ({
+      file: f,
+      name: f.name,
+      size: f.size,
+      preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : null,
+    }));
+    setAttachedFiles(prev => [...prev, ...newFiles]);
+  };
+
+  const removeFile = (idx) => {
+    setAttachedFiles(prev => {
+      const next = [...prev];
+      if (next[idx]?.preview) URL.revokeObjectURL(next[idx].preview);
+      next.splice(idx, 1);
+      return next;
+    });
+  };
+
+  const uploadFiles = async (sessionId) => {
+    const uploaded = [];
+    for (const af of attachedFiles) {
+      const form = new FormData();
+      form.append('file', af.file);
+      form.append('session_id', sessionId || 'unsorted');
+      try {
+        const resp = await fetch('/api/upload', { method: 'POST', credentials: 'include', body: form });
+        if (resp.ok) {
+          const data = await resp.json();
+          uploaded.push(data);
+        }
+      } catch {
+        // Upload failed — silently skip this file.
+      }
+    }
+    return uploaded;
+  };
+
   // --- Chat Actions ---
+
+  const sendingRef = useRef(false); // Guard against async double-submit
 
   const send = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text && attachedFiles.length === 0) return;
+    if (sending || sendingRef.current) return;
+    sendingRef.current = true;
+
+    // Upload files first if any attached.
+    let fileRefs = [];
+    if (attachedFiles.length > 0) {
+      fileRefs = await uploadFiles(selectedSession || chatIdRef.current);
+      setAttachedFiles([]);
+    }
+
+    // Build message text with file references.
+    let fullText = text;
+    if (fileRefs.length > 0) {
+      const refs = fileRefs.map(f => `[Attached file: ${f.name} (${f.size} bytes) at ${f.path}]`).join('\n');
+      fullText = fullText ? fullText + '\n\n' + refs : refs;
+    }
 
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text }]);
+    if (chatTextareaRef.current) chatTextareaRef.current.style.height = 'auto'; // Reset textarea height
+    setMessages(prev => [...prev, { role: 'user', text: fullText }]);
     setSending(true);
     setStreaming('');
     setToolSteps([]);
@@ -266,7 +434,7 @@ export function Chat() {
         if (event.type === 'consent.needed' && event.consent) {
           gotChunks = true;
           // Consent modal handled by Layout.jsx globally.
-          setStreaming('Waiting for permission...');
+          setStreaming('Needs your approval to continue...');
         }
 
         if (event.type === 'consent.result') {
@@ -287,7 +455,7 @@ export function Chat() {
           if (gotChunks && streamText) {
             setStreaming('');
             setMessages(prev => [...prev, { role: 'assistant', text: streamText }]);
-            setSending(false);
+            setSending(false); sendingRef.current = false;
           } else {
             startPoll();
           }
@@ -303,12 +471,12 @@ export function Chat() {
       if (!completed && !gotChunks) startPoll();
     };
 
-    const { error } = await callRPC('chat.send', { text, agent_id: selectedAgent || undefined, chat_id: chatIdRef.current });
+    const { error } = await callRPC('chat.send', { text: fullText, agent_id: selectedAgent || undefined, chat_id: chatIdRef.current });
     if (error) {
       es.close();
       sseRef.current = null;
-      setMessages(prev => [...prev, { role: 'assistant', text: `Error: ${error}` }]);
-      setSending(false);
+      setMessages(prev => [...prev, { role: 'assistant', text: `Something went wrong: ${error}. Try sending your message again.` }]);
+      setSending(false); sendingRef.current = false;
       setStreaming('');
       return;
     }
@@ -331,9 +499,9 @@ export function Chat() {
         if (attempts > 40) {
           setMessages(prev => [...prev, {
             role: 'assistant',
-            text: 'Timed out. The agent may still be processing.'
+            text: 'This is taking longer than expected. The agent may still be working \u2014 try refreshing in a moment.'
           }]);
-          setSending(false);
+          setSending(false); sendingRef.current = false;
           setStreaming('');
           return;
         }
@@ -349,7 +517,7 @@ export function Chat() {
         const msgs = await loadMessages(sid);
         if (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
           setMessages(msgs);
-          setSending(false);
+          setSending(false); sendingRef.current = false;
           setStreaming('');
           loadSessions();
           return;
@@ -371,9 +539,19 @@ export function Chat() {
 
   // Consent response handled by Layout.jsx globally.
 
+  // Time-based greeting for homepage delight.
+  const getGreeting = () => {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 17) return 'Good afternoon';
+    return 'Good evening';
+  };
+
   // ==================== RENDER ====================
 
   return (
+    <div class="chat-page">
+      <Breadcrumb items={[{ label: 'Chat' }]} />
     <div class="chat-split">
       {/* Left: Session Panel */}
       <div class={`chat-split-left ${mobileView === 'list' ? 'mobile-show' : 'mobile-hide'}`}>
@@ -389,36 +567,115 @@ export function Chat() {
       {/* Right: Conversation or Agent Picker or Empty */}
       <div class={`chat-split-right ${mobileView === 'conversation' ? 'mobile-show' : 'mobile-hide'}`}>
 
-        {/* Empty state */}
+        {/* Homepage — hero layout with composer as centerpiece */}
         {rightPanel === 'empty' && (
-          <div class="chat-empty">
-            <div style="max-width:320px">
-              <div style="font-size:32px;margin-bottom:16px;opacity:0.3">{'\u2759'}</div>
-              <h2 style="font-size:18px;font-weight:600;margin-bottom:8px">Chat with your agents</h2>
-              <p style="color:var(--text-muted);font-size:13px;line-height:1.6;margin-bottom:24px">
-                Ask questions, run tasks, or explore ideas. Pick an agent
-                and start typing — your conversation history stays here.
-              </p>
-              <button class="btn-primary" onClick={showAgentPicker}>+ New Chat</button>
-              {webSessions.length > 0 && (
-                <p style="color:var(--text-muted);font-size:12px;margin-top:12px">
-                  or select a recent session from the left
-                </p>
+          <div class="chat-home">
+            <div class="chat-home-spacer" />
+
+            <div class="chat-home-content">
+              {/* Greeting */}
+              {agents.length > 0 && (() => {
+                const defaultAgent = agents.find(a => a.id === 'default') || agents[0];
+                const currentHomepageAgent = homepageAgent || defaultAgent;
+                const examples = currentHomepageAgent.examples || [];
+                return (
+                  <div class="panel-enter">
+                    <div class="chat-home-greeting">
+                      <span class="chat-home-avatar" style="font-size:28px">{currentHomepageAgent.avatar || '\u2B50'}</span>
+                      <h1 class="chat-home-title">{getGreeting()}</h1>
+                    </div>
+
+                    {/* Hero composer */}
+                    <div class="chat-composer chat-composer-hero" role="form" aria-label="New message">
+                      <textarea
+                        placeholder={`Ask ${currentHomepageAgent.name || 'anything'}...`}
+                        aria-label={`Message ${currentHomepageAgent.name || currentHomepageAgent.id}`}
+                        value={input}
+                        onInput={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey && input.trim()) {
+                            e.preventDefault();
+                            pendingSend.current = true;
+                            startNewChat(currentHomepageAgent);
+                          }
+                        }}
+                        rows={2}
+                      />
+                      <div class="chat-composer-toolbar">
+                        <div class="chat-composer-actions">
+                          <select
+                            class="chat-agent-select"
+                            value={currentHomepageAgent.id}
+                            aria-label="Select agent"
+                            onChange={(e) => {
+                              const a = agents.find(ag => ag.id === e.target.value);
+                              if (a) setHomepageAgent(a);
+                            }}
+                          >
+                            {agents.map(a => (
+                              <option key={a.id} value={a.id}>{a.avatar ? a.avatar + ' ' : ''}{a.name || a.id}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <button class="chat-send-btn" onClick={() => {
+                          if (input.trim()) {
+                            pendingSend.current = true;
+                            startNewChat(currentHomepageAgent);
+                          }
+                        }} disabled={!input.trim()} title="Send" aria-label="Send message">
+                          <IconArrowUp width={18} height={18} />
+                        </button>
+                      </div>
+                    </div>
+                    <div class="kbd-hint">
+                      <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> new line
+                    </div>
+
+                    {/* Example cards with generous top spacing */}
+                    {examples.length > 0 && (
+                      <div style="margin-top:24px">
+                        <ExampleCards
+                          examples={examples}
+                          onSelect={(text) => {
+                            startNewChat(currentHomepageAgent);
+                            setInput(text);
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Fallback when no agents loaded yet */}
+              {agents.length === 0 && !agentsLoading && (
+                <div style="text-align:center">
+                  <h1 class="chat-home-title">Welcome to SageClaw</h1>
+                  <p class="chat-home-subtitle" style="margin-bottom:24px">Create your first agent to start chatting.</p>
+                  <div style="display:flex;gap:8px;justify-content:center">
+                    <button class="btn-primary" onClick={() => { setRightPanel('magic-create'); setMobileView('conversation'); }}>
+                      Create an agent
+                    </button>
+                  </div>
+                </div>
               )}
+              {agentsLoading && <div class="empty" style="padding:24px">Loading agents...</div>}
             </div>
+
+            <div class="chat-home-spacer" />
           </div>
         )}
 
         {/* Agent Picker */}
         {rightPanel === 'pick-agent' && (
-          <div style="padding:4px" onKeyDown={(e) => { if (e.key === 'Escape') backToList(); }}>
+          <div class="panel-enter" style="padding:4px;flex:1;overflow-y:auto;min-height:0" onKeyDown={(e) => { if (e.key === 'Escape') backToList(); }}>
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
               <button class="btn-secondary chat-back-btn" onClick={backToList} style="padding:6px 12px">
-                {'\u2190'}
+                <IconChevronLeft width={16} height={16} />
               </button>
               <div>
-                <h2 style="font-size:18px;font-weight:600;margin-bottom:2px">New Chat</h2>
-                <p style="color:var(--text-muted);font-size:13px">Choose an agent to chat with.</p>
+                <h2 style="font-size:var(--text-lg);font-weight:600;margin-bottom:2px">New conversation</h2>
+                <p style="color:var(--text-muted);font-size:var(--text-sm)">Pick who you'd like to talk to.</p>
               </div>
             </div>
 
@@ -426,8 +683,8 @@ export function Chat() {
               <div class="empty" role="status">Loading agents...</div>
             ) : agents.length === 0 ? (
               <div class="card" style="padding:24px;text-align:center">
-                <p style="color:var(--text-muted);margin-bottom:12px">No agents configured.</p>
-                <a href="/agents/create" class="btn-primary" style="text-decoration:none">Create an Agent</a>
+                <p style="color:var(--text-muted);margin-bottom:12px">No agents yet. Create one to get started.</p>
+                <a href="/agents/create" class="btn-primary" style="text-decoration:none">Create your first agent</a>
               </div>
             ) : (
               <div style="display:flex;flex-direction:column;gap:8px">
@@ -442,9 +699,9 @@ export function Chat() {
                         {(a.name || a.id || '?').charAt(0).toUpperCase()}
                       </span>
                     )}
-                    <div style="flex:1">
-                      <div style="font-weight:600;font-size:14px">{a.name || a.id}</div>
-                      <div style="font-size:12px;color:var(--text-muted)">{a.role || 'No role defined'}</div>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-weight:600;font-size:var(--text-base);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{a.name || a.id}</div>
+                      <div style="font-size:var(--text-xs);color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{a.role || 'General assistant'}</div>
                     </div>
                     <span class="badge badge-blue">{a.model || 'strong'}</span>
                   </div>
@@ -454,58 +711,102 @@ export function Chat() {
           </div>
         )}
 
+        {/* Magic Create */}
+        {rightPanel === 'magic-create' && (
+          <div class="chat-empty">
+            <MagicCreate
+              onCreated={(agent) => {
+                // Reload agents to include the new one, then start chat.
+                loadAgents().then(() => {
+                  startNewChat(agent);
+                });
+              }}
+              onCancel={() => { setRightPanel('empty'); setMobileView('list'); }}
+            />
+          </div>
+        )}
+
         {/* Chat View */}
         {rightPanel === 'chat' && (
-          <div class="chat-container">
+          <div class="chat-container panel-enter">
             <div class="chat-header">
-              <button class="btn-secondary chat-back-btn" onClick={backToList} style="padding:6px 12px;flex-shrink:0" aria-label="Back to chat list">
-                {'\u2190'}
+              <button class="btn-secondary" onClick={goHome} style="padding:6px 12px;flex-shrink:0" aria-label="Back to home">
+                <IconChevronLeft width={16} height={16} />
               </button>
-              <div style="flex:1;min-width:0">
-                <span style="font-weight:600;font-size:15px">{selectedAgentName}</span>
+              <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                <span style="font-weight:600;font-size:var(--text-base)">{selectedAgentName}</span>
               </div>
             </div>
 
             {noProvider && (
               <div class="card" style="padding:12px;margin-bottom:12px;border-color:var(--warning)">
-                <strong style="color:var(--warning)">No providers connected.</strong>
+                <strong style="color:var(--warning)">No AI provider connected.</strong>
                 <span style="color:var(--text-muted);margin-left:8px">
-                  Add a provider in <a href="/settings?tab=ai-models">AI Models</a> settings.
+                  <a href="/settings?tab=ai-models">Add your API key</a> to start chatting.
                 </span>
               </div>
             )}
 
-            <div class="chat-messages" aria-live="polite" aria-relevant="additions">
-              {messages.length === 0 && !sending && (
-                <div class="empty" style="padding:48px 24px">
-                  <div style="font-size:15px;margin-bottom:4px">Chatting with <strong>{selectedAgentName}</strong></div>
-                  <div style="font-size:13px;color:var(--text-muted)">Type a message below to get started.</div>
-                </div>
-              )}
-              {messages.map((msg, i) => (
-                <div key={i} class={`message ${msg.role}`}>
-                  {msg.role !== 'user' && <div class="message-role">{msg.role}</div>}
-                  {msg.audio && (
-                    <div style="margin-bottom:4px">
-                      <audio controls preload="none" style="max-width:100%;height:36px"
-                        src={`/api/audio/${msg.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
-                      </audio>
-                      {msg.audio.duration_ms > 0 && (
-                        <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
-                          {Math.round(msg.audio.duration_ms / 1000)}s
-                        </span>
+            <div class="chat-messages" ref={messagesContainerRef} aria-live="polite" aria-relevant="additions"
+              onDragOver={e => { e.preventDefault(); e.stopPropagation(); }}
+              onDrop={e => { e.preventDefault(); e.stopPropagation(); addFiles(Array.from(e.dataTransfer.files)); }}>
+              {messages.length === 0 && !sending && (() => {
+                const currentAgent = agents.find(a => a.id === selectedAgent);
+                const examples = currentAgent?.examples || [];
+                return (
+                  <div class="chat-conv-empty">
+                    <div class="chat-conv-empty-inner">
+                      {currentAgent?.avatar && <span class="chat-home-avatar" style="font-size:32px;display:block;margin-bottom:8px">{currentAgent.avatar}</span>}
+                      <div style="font-size:var(--text-lg);font-weight:600;margin-bottom:4px">{selectedAgentName}</div>
+                      <div style="font-size:var(--text-sm);color:var(--text-muted);max-width:36ch;margin:0 auto">{currentAgent?.role || 'Ready when you are.'}</div>
+                      {examples.length > 0 && (
+                        <div style="max-width:520px;width:100%;margin-top:24px">
+                          <ExampleCards examples={examples} onSelect={(text) => setInput(text)} />
+                        </div>
                       )}
                     </div>
-                  )}
-                  {msg.text && msg.role === 'assistant'
-                    ? <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
-                    : msg.text && <div class="message-text">{msg.text}</div>
-                  }
-                </div>
-              ))}
+                  </div>
+                );
+              })()}
+              {messages.map((msg, i) => {
+                // Show tool timeline just before the final assistant message — same position whether collapsed or expanded.
+                const showTimelineBefore = toolSteps.length > 0
+                  && i === messages.length - 1 && msg.role === 'assistant';
+                return (
+                  <div key={i}>
+                    {showTimelineBefore && (
+                      <div class="message assistant">
+                        <ToolTimeline
+                          steps={toolSteps}
+                          collapsed={toolCollapsed}
+                          onToggle={() => setToolCollapsed(c => !c)}
+                        />
+                      </div>
+                    )}
+                    <div class={`message ${msg.role}`}>
+                      {msg.audio && (
+                        <div style="margin-bottom:4px">
+                          <audio controls preload="none" style="max-width:100%;height:36px"
+                            src={`/api/audio/${msg.audio.file_path.split('/').map(encodeURIComponent).join('/')}`}>
+                          </audio>
+                          {msg.audio.duration_ms > 0 && (
+                            <span style="font-size:11px;color:var(--text-muted);margin-left:8px">
+                              {Math.round(msg.audio.duration_ms / 1000)}s
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {msg.text && msg.role === 'assistant'
+                        ? <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
+                        : msg.text && <div class="message-text">{msg.text}</div>
+                      }
+                    </div>
+                  </div>
+                );
+              })}
 
-              {/* Tool timeline — shown during and after tool execution */}
-              {toolSteps.length > 0 && (
+              {/* Tool timeline — shown at bottom only during active streaming (no final message yet) */}
+              {toolSteps.length > 0 && (messages.length === 0 || messages[messages.length - 1].role !== 'assistant') && (
                 <div class="message assistant">
                   <ToolTimeline
                     steps={toolSteps}
@@ -517,14 +818,12 @@ export function Chat() {
 
               {streaming && (
                 <div class="message assistant">
-                  <div class="message-role">assistant</div>
                   <div class="message-text markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streaming) + '<span class="cursor-blink">|</span>' }} />
                 </div>
               )}
 
               {sending && !streaming && toolSteps.length === 0 && (
                 <div class="message assistant">
-                  <div class="message-role">assistant</div>
                   <div class="message-text" style="color:var(--text-muted)">
                     <span class="thinking-dots">Thinking</span>
                   </div>
@@ -536,23 +835,59 @@ export function Chat() {
 
             {/* Consent handled by Layout.jsx global banner */}
 
-            <div class="chat-input-row">
+            {/* Chat composer */}
+            <div class="chat-composer" role="form" aria-label="Send message">
               <input
-                type="text"
-                class="chat-input"
-                placeholder="Type a message..."
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept=".txt,.md,.csv,.json,.yaml,.yml,.xml,.toml,.html,.css,.js,.ts,.jsx,.tsx,.go,.py,.rs,.java,.sh,.pdf,.png,.jpg,.jpeg,.gif,.webp"
+                style="display:none"
+                onChange={handleFileSelect}
+              />
+
+              {/* Attached file chips */}
+              {attachedFiles.length > 0 && (
+                <div style="display:flex;gap:6px;padding-bottom:8px;flex-wrap:wrap">
+                  {attachedFiles.map((af, i) => (
+                    <span key={i} style="display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:3px 10px;font-size:12px;color:var(--text-muted)">
+                      {af.preview && <img src={af.preview} alt="" style="width:16px;height:16px;border-radius:2px;object-fit:cover" />}
+                      {af.name} ({(af.size / 1024).toFixed(0)}KB)
+                      <button onClick={() => removeFile(i)} style="background:none;border:none;color:var(--error);cursor:pointer;padding:0;display:flex" aria-label="Remove file"><IconX width={14} height={14} /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <textarea
+                ref={chatTextareaRef}
+                placeholder={`Message ${selectedAgentName}...`}
                 value={input}
-                onInput={e => setInput(e.target.value)}
+                onInput={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
                 onKeyDown={handleKeyDown}
                 disabled={sending}
+                rows={1}
+                aria-label={`Message ${selectedAgentName}`}
               />
-              <button class="btn-primary" onClick={send} disabled={sending}>
-                {sending ? '...' : 'Send'}
-              </button>
+
+              <div class="chat-composer-toolbar">
+                <div class="chat-composer-actions">
+                  <button class="chat-icon-btn" title="Attach file" onClick={() => fileInputRef.current?.click()} disabled={sending}>
+                    <IconPaperclip width={16} height={16} />
+                  </button>
+                  <a href="/marketplace" class="chat-icon-btn" title="Marketplace" style="text-decoration:none">
+                    <IconStore width={16} height={16} />
+                  </a>
+                </div>
+                <button class="chat-send-btn" onClick={send} disabled={sending || (!input.trim() && attachedFiles.length === 0)} title="Send" aria-label="Send message">
+                  {sending ? <IconLoader width={16} height={16} class="spin" /> : <IconArrowUp width={18} height={18} />}
+                </button>
+              </div>
             </div>
           </div>
         )}
       </div>
+    </div>
     </div>
   );
 }

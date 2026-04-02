@@ -64,8 +64,9 @@ export function App() {
     <Layout>
       <Router>
         {/* ── Primary routes ── */}
-        <Dashboard path="/" />
+        <Chat path="/" />
         <Chat path="/chat" />
+        <Dashboard path="/dashboard" />
         <Agents path="/agents" />
         <AgentCreator path="/agents/create" />
         <AgentCreator path="/agents/:id/edit" />
@@ -97,10 +98,10 @@ export function App() {
         <Redir path="/tunnel" to="/settings?tab=external-access" />
 
         {/* M4: Dashboard consolidation */}
-        <Redir path="/activity" to="/?tab=activity" />
-        <Redir path="/audit" to="/?tab=activity" />
-        <Redir path="/budget" to="/?tab=budget" />
-        <Redir path="/health" to="/" />
+        <Redir path="/activity" to="/dashboard?tab=activity" />
+        <Redir path="/audit" to="/dashboard?tab=activity" />
+        <Redir path="/budget" to="/dashboard?tab=budget" />
+        <Redir path="/health" to="/dashboard" />
       </Router>
     </Layout>
   );

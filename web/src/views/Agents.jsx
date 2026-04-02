@@ -3,6 +3,7 @@ import { useState, useEffect } from 'preact/hooks';
 import { route } from 'preact-router';
 import { Label } from '../components/InfoTip';
 import { TabBar } from '../components/TabBar';
+import { Breadcrumb } from '../components/Breadcrumb';
 import { Teams } from './Teams';
 import Delegation from './Delegation';
 
@@ -23,6 +24,7 @@ export function Agents() {
 
   return (
     <div>
+      <Breadcrumb items={[{ label: 'Agents' }]} />
       <h1>Agents</h1>
       <TabBar tabs={TABS} active={topTab} onChange={changeTopTab} />
       <div class="tab-content-enter" key={topTab}>

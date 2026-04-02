@@ -28,8 +28,8 @@ export default function StepAgent({ progress, onComplete, onBack }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    fetch('/api/v2/agents/presets').then(r => r.json()).then(setPresets).catch(() => {});
-    fetch('/api/v2/agents').then(r => r.json()).then(agents => {
+    fetch('/api/v2/agents/presets', { credentials: 'include' }).then(r => r.json()).then(setPresets).catch(() => {});
+    fetch('/api/v2/agents', { credentials: 'include' }).then(r => r.json()).then(agents => {
       if (Array.isArray(agents)) setExistingAgents(agents);
     }).catch(() => {});
   }, []);
@@ -75,6 +75,7 @@ export default function StepAgent({ progress, onComplete, onBack }) {
       const res = await fetch('/api/v2/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(body),
       });
       const data = await res.json();
@@ -96,7 +97,7 @@ export default function StepAgent({ progress, onComplete, onBack }) {
     setError('');
     try {
       // Step 1: Fetch the preset config template.
-      const configRes = await fetch(`/api/v2/agents/presets/${preset.id}`, { method: 'POST' });
+      const configRes = await fetch(`/api/v2/agents/presets/${preset.id}`, { method: 'POST', credentials: 'include' });
       const config = await configRes.json();
       if (config.error) { setError(config.error); setLoading(false); return; }
 
@@ -117,12 +118,38 @@ export default function StepAgent({ progress, onComplete, onBack }) {
       const createRes = await fetch('/api/v2/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(body),
       });
       const createData = await createRes.json();
       if (createData.error) { setError(createData.error); setLoading(false); return; }
 
       onComplete({ agentId, agentName });
+    } catch (e) {
+      setError('Failed: ' + e.message);
+    }
+    setLoading(false);
+  };
+
+  const quickCreatePreset = async (preset) => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/v2/agents/quick-create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          name: preset.name,
+          role: preset.role,
+          avatar: preset.avatar,
+          model: 'strong',
+          tool_profile: preset.profile || 'full',
+        }),
+      });
+      const data = await res.json();
+      if (data.error) { setError(data.error); setLoading(false); return; }
+      onComplete({ agentId: data.id, agentName: preset.name });
     } catch (e) {
       setError('Failed: ' + e.message);
     }
@@ -137,25 +164,36 @@ export default function StepAgent({ progress, onComplete, onBack }) {
       const res = await fetch('/api/v2/agents/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: genPrompt }),
+        credentials: 'include',
+        body: JSON.stringify({ description: genPrompt }),
       });
       const data = await res.json();
-      if (data.error) { setError(data.error); setGenLoading(false); return; }
-      setGenResult(data);
+      if (data.error && !data.config) { setError(data.error); setGenLoading(false); return; }
+      setGenResult(data.config || data);
     } catch (e) {
       setError('Generation failed: ' + e.message);
     }
     setGenLoading(false);
   };
 
-  const useGenerated = () => {
+  const useGenerated = async () => {
     if (!genResult) return;
-    createAgent({
-      id: genResult.id || autoId(genResult.identity?.name || 'agent'),
-      name: genResult.identity?.name || 'Generated Agent',
-      role: genResult.identity?.role || 'AI assistant',
-      model: genResult.identity?.model || 'strong',
-    });
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/v2/agents/quick-create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(genResult),
+      });
+      const data = await res.json();
+      if (data.error) { setError(data.error); setLoading(false); return; }
+      onComplete({ agentId: data.id, agentName: genResult.name || 'Agent' });
+    } catch (e) {
+      setError('Failed: ' + e.message);
+    }
+    setLoading(false);
   };
 
   // Select existing agent.
@@ -197,20 +235,31 @@ export default function StepAgent({ progress, onComplete, onBack }) {
             </div>
           )}
 
-          {/* Create new section */}
-          {existingAgents.length > 0 && (
-            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-top:8px;margin-bottom:2px">
-              Or Create New
-            </div>
-          )}
-          {presets.length > 0 && (
-            <div class="card clickable" style="padding:14px;margin-bottom:0" onClick={() => setMode('preset')}>
-              <div style="font-weight:600;font-size:14px">Choose a Preset</div>
-              <div style="font-size:12px;color:var(--text-muted)">Start from a pre-built agent template</div>
-            </div>
-          )}
+          {/* Quick presets — one-click creation */}
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-top:8px;margin-bottom:2px">
+            {existingAgents.length > 0 ? 'Quick Create' : 'Quick Start'}
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            {[
+              { name: 'Research', avatar: '\uD83D\uDD0D', role: 'Research and analysis assistant', profile: 'full' },
+              { name: 'Writing', avatar: '\u270D\uFE0F', role: 'Content creation assistant', profile: 'full' },
+              { name: 'Coding', avatar: '\uD83D\uDCBB', role: 'Software development assistant', profile: 'coding' },
+              { name: 'General', avatar: '\u2B50', role: 'General-purpose assistant', profile: 'full' },
+            ].map(p => (
+              <div key={p.name} class="card clickable" style="padding:12px;margin-bottom:0;text-align:center;cursor:pointer"
+                onClick={() => quickCreatePreset(p)}>
+                <div style="font-size:24px;margin-bottom:4px">{p.avatar}</div>
+                <div style="font-weight:600;font-size:13px">{p.name}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Other creation modes */}
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-top:8px;margin-bottom:2px">
+            Or Customize
+          </div>
           <div class="card clickable" style="padding:14px;margin-bottom:0" onClick={() => setMode('generate')}>
-            <div style="font-weight:600;font-size:14px">Describe & Generate</div>
+            <div style="font-weight:600;font-size:14px">Create with AI</div>
             <div style="font-size:12px;color:var(--text-muted)">Describe your agent and let AI create it</div>
           </div>
           <div class="card clickable" style="padding:14px;margin-bottom:0" onClick={() => setMode('blank')}>
@@ -283,10 +332,16 @@ export default function StepAgent({ progress, onComplete, onBack }) {
         ) : (
           <div>
             <div class="card" style="padding:12px;margin-bottom:16px;border-color:var(--primary)">
-              <div style="font-weight:600;font-size:14px;margin-bottom:4px">{genResult.identity?.name || 'Agent'}</div>
-              <div style="font-size:12px;color:var(--text-muted)">{genResult.identity?.role || ''}</div>
-              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-                Model: {genResult.identity?.model || 'strong'}
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                <span style="font-size:24px">{genResult.avatar || '\u2B50'}</span>
+                <div>
+                  <div style="font-weight:600;font-size:14px">{genResult.name || 'Agent'}</div>
+                  <div style="font-size:12px;color:var(--text-muted)">{genResult.role || ''}</div>
+                </div>
+              </div>
+              <div style="display:flex;gap:6px">
+                <span class="badge badge-blue">{genResult.model || 'strong'}</span>
+                <span class="badge badge-neutral">{genResult.tool_profile || 'full'}</span>
               </div>
             </div>
             {error && <div style="color:var(--error);font-size:13px;margin-bottom:12px">{error}</div>}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/xoai/sageclaw/pkg/agentcfg"
 	"github.com/xoai/sageclaw/pkg/agentcfg/schemas"
 	"github.com/xoai/sageclaw/pkg/canonical"
 )
@@ -87,6 +88,7 @@ func (s *Server) handlePresetsApply(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgentGenerate uses LLM to generate agent config from a description.
+// Enhanced with field-level validation, examples generation, and preset fallback.
 func (s *Server) handleAgentGenerate(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		Description string `json:"description"`
@@ -98,40 +100,34 @@ func (s *Server) handleAgentGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the generation prompt.
-	toolList := []string{"read_file", "write_file", "list_directory", "execute_command",
-		"web_search", "web_fetch", "memory_search", "memory_store", "memory_delete",
-		"memory_link", "memory_graph", "cron_create", "cron_list", "cron_delete",
-		"delegate", "delegation_status", "team_create_task", "team_assign_task",
-		"team_claim_task", "team_complete_task", "team_list_tasks", "team_send",
-		"team_inbox", "handoff", "evaluate", "spawn", "audit_search", "audit_stats",
-		"credential_store", "credential_get"}
+	systemPrompt := `You are a SageClaw agent configuration generator. Given a user's description, generate a JSON agent config.
 
-	systemPrompt := `You are a SageClaw agent configuration generator. Given a user's description of what they want their agent to do, generate a complete agent configuration as JSON.
-
-The output MUST be valid JSON matching this exact structure — no markdown, no explanation, just the JSON object:
+The output MUST be valid JSON — no markdown, no explanation, just the JSON object:
 {
-  "identity": { "name": "string", "role": "string", "creature": "AI Assistant|Digital Companion|Research Familiar|Code Golem|Knowledge Oracle|Task Automaton", "model": "strong|fast|local", "max_tokens": "4096|8192|16384", "status": "active", "emoji": "single emoji", "purpose": "one paragraph" },
-  "soul": { "tone": "Professional|Casual|Friendly|Formal|Witty|Warm|Direct|Empathetic", "humor": "None|Subtle|Natural|Frequent", "emoji_usage": "Never|Sparingly|Moderate|Frequently", "response_length": "Concise|Moderate|Detailed|Comprehensive", "formality": "Very Formal|Professional|Casual|Very Casual", "opinions": true/false, "core_values": ["from: Accuracy,Transparency,Efficiency,Creativity,Empathy,Privacy,Thoroughness,Resourcefulness,Honesty,Curiosity"], "boundaries": ["from: Won't share user data,Won't make purchases,Won't send external messages without asking,Won't modify system files,Asks before external actions"], "expertise": "string", "core_truths": "string" },
-  "behavior": { "no_parrot": true/false, "no_pad": true/false, "answer_first": true/false, "match_energy": true/false, "short_ok": true/false, "decision_style": "Cautious|Balanced|Bold|Autonomous", "error_handling": "Stop and ask|Retry once then ask|Try alternative|Report and continue", "custom_rules": "string" },
-  "skills": { "professional_skills": ["from: Research & Analysis,Technical Writing,Code Review,Data Analysis,Project Management,Content Creation,SEO & Marketing,System Design,Database Management,API Development,Testing & QA,DevOps,UI/UX Design,Financial Analysis,Legal Research,Translation,Teaching & Tutoring"], "processes": "string" },
-  "tools": { "enabled": ["from available tools list"] },
-  "memory": { "scope": "project|global", "auto_save": true/false, "search_on_start": true/false, "retention_days": "30|60|90|180|365", "compaction_enabled": true/false, "compaction_threshold": "30|50|75|100" },
-  "heartbeat": { "tasks": [] },
-  "channels": { "serve": ["cli", "web"], "default_channel": "web" },
-  "bootstrap": { "enabled": true/false, "greeting": "string", "discovery_questions": ["string"], "auto_delete": true }
+  "name": "string (1-50 chars, display name)",
+  "role": "string (1-200 chars, what the agent does)",
+  "avatar": "single emoji",
+  "model": "strong|fast|local",
+  "tool_profile": "full|coding|messaging|readonly|minimal",
+  "examples": ["4-6 example prompts the user might try, each under 200 chars"]
 }
 
-Available tools: ` + strings.Join(toolList, ", ") + `
+Rules:
+- name: short, memorable, no HTML tags
+- role: concise description of capabilities
+- avatar: exactly one emoji that represents the agent
+- model: "strong" for complex tasks, "fast" for quick responses, "local" for privacy
+- tool_profile: "full" (all tools), "coding" (dev focused), "messaging" (communication), "readonly" (safe browsing), "minimal" (conversation only)
+- examples: 4-6 specific, actionable prompts a user would send to this agent
 
-Generate a thoughtful, well-configured agent that matches the user's description. Be specific in the soul, expertise, and behavior sections.`
+Generate a thoughtful agent that matches the user's description.`
 
-	// Estimate cost (rough: ~1500 input tokens + ~500 output tokens).
-	costEstimate := "$0.01-0.03"
-
-	// If no router/provider configured, return error.
+	// If no router/provider configured, fall back to presets.
 	if s.router == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		writeJSON(w, map[string]string{"error": "No AI provider configured. Add a provider first."})
+		writeJSON(w, map[string]any{
+			"config":   bestPresetForDescription(p.Description),
+			"fallback": true,
+		})
 		return
 	}
 
@@ -139,7 +135,7 @@ Generate a thoughtful, well-configured agent that matches the user's description
 	ctx := r.Context()
 	req := &canonical.Request{
 		Model:     "strong",
-		MaxTokens: 4096,
+		MaxTokens: 2048,
 		System:    systemPrompt,
 		Messages: []canonical.Message{
 			{Role: "user", Content: []canonical.Content{{Type: "text", Text: p.Description}}},
@@ -148,8 +144,12 @@ Generate a thoughtful, well-configured agent that matches the user's description
 
 	resp, err := s.router.ChatWithFallback(ctx, "strong", req)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]string{"error": "Generation failed: " + err.Error()})
+		// Fallback to presets on LLM failure.
+		writeJSON(w, map[string]any{
+			"config":   bestPresetForDescription(p.Description),
+			"fallback": true,
+			"reason":   "LLM unavailable, using preset",
+		})
 		return
 	}
 
@@ -168,30 +168,199 @@ Generate a thoughtful, well-configured agent that matches the user's description
 	// Parse JSON from response (might have markdown wrapping).
 	jsonStr := response
 	if idx := strings.Index(jsonStr, "{"); idx >= 0 {
-		// Find matching closing brace.
 		depth := 0
 		for i := idx; i < len(jsonStr); i++ {
-			if jsonStr[i] == '{' { depth++ }
-			if jsonStr[i] == '}' { depth--; if depth == 0 { jsonStr = jsonStr[idx:i+1]; break } }
+			if jsonStr[i] == '{' {
+				depth++
+			}
+			if jsonStr[i] == '}' {
+				depth--
+				if depth == 0 {
+					jsonStr = jsonStr[idx : i+1]
+					break
+				}
+			}
 		}
 	}
 
 	// Validate it's valid JSON.
 	var config map[string]any
 	if err := json.Unmarshal([]byte(jsonStr), &config); err != nil {
-		// Return raw response for debugging.
+		// Fallback to presets on malformed JSON.
 		writeJSON(w, map[string]any{
-			"error": "Failed to parse generated config. Try regenerating.",
-			"raw": response,
-			"cost_estimate": costEstimate,
+			"config":   bestPresetForDescription(p.Description),
+			"fallback": true,
+			"reason":   "Malformed LLM response, using preset",
 		})
 		return
 	}
 
+	// Sanitize and validate all fields.
+	config = sanitizeGeneratedConfig(config)
+
 	writeJSON(w, map[string]any{
 		"config": config,
-		"cost_estimate": costEstimate,
 	})
+}
+
+// sanitizeGeneratedConfig validates and sanitizes LLM-generated agent config.
+// Untrusted output — every field is checked and clamped.
+func sanitizeGeneratedConfig(cfg map[string]any) map[string]any {
+	result := make(map[string]any)
+
+	// name: string, 1-50 chars, no HTML.
+	result["name"] = sanitizeString(getStr(cfg, "name"), 50, "New Agent")
+
+	// role: string, 1-200 chars, no HTML.
+	result["role"] = sanitizeString(getStr(cfg, "role"), 200, "AI assistant")
+
+	// avatar: 1-10 chars (emoji).
+	avatar := getStr(cfg, "avatar")
+	if avatar == "" || len(avatar) > 30 { // emojis can be multi-byte
+		avatar = "\u2B50"
+	}
+	result["avatar"] = avatar
+
+	// model: must be one of known values.
+	model := getStr(cfg, "model")
+	validModels := map[string]bool{"strong": true, "fast": true, "local": true}
+	if !validModels[model] {
+		model = "strong"
+	}
+	result["model"] = model
+
+	// tool_profile: must be one of known values.
+	profile := getStr(cfg, "tool_profile")
+	validProfiles := map[string]bool{"full": true, "coding": true, "messaging": true, "readonly": true, "minimal": true}
+	if !validProfiles[profile] {
+		profile = "full"
+	}
+	result["tool_profile"] = profile
+
+	// examples: array of 0-6 strings, each max 200 chars.
+	result["examples"] = sanitizeExamples(cfg)
+
+	return result
+}
+
+// sanitizeExamples extracts and sanitizes example prompts from LLM output.
+func sanitizeExamples(cfg map[string]any) []string {
+	raw, ok := cfg["examples"]
+	if !ok {
+		return nil
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var examples []string
+	for _, item := range arr {
+		s, ok := item.(string)
+		if !ok || s == "" {
+			continue
+		}
+		s = stripHTMLTags(s)
+		if len(s) > 200 {
+			s = s[:200]
+		}
+		examples = append(examples, s)
+		if len(examples) >= 6 {
+			break
+		}
+	}
+	return examples
+}
+
+// bestPresetForDescription picks the best preset archetype based on keywords.
+func bestPresetForDescription(desc string) map[string]any {
+	lower := strings.ToLower(desc)
+
+	type match struct {
+		id       string
+		keywords []string
+	}
+	matches := []match{
+		{"developer", []string{"code", "program", "develop", "debug", "software", "engineer"}},
+		{"researcher", []string{"research", "search", "find", "discover", "investigate", "study"}},
+		{"writer", []string{"write", "blog", "content", "article", "story", "edit", "draft"}},
+		{"analyst", []string{"analy", "data", "report", "chart", "metric", "statistic"}},
+		{"coordinator", []string{"manage", "coordinate", "delegate", "team", "project", "task"}},
+	}
+
+	for _, m := range matches {
+		for _, kw := range m.keywords {
+			if strings.Contains(lower, kw) {
+				preset := presetConfigs[m.id]
+				if preset != nil {
+					// Convert preset to simplified format.
+					identity, _ := preset["identity"].(map[string]any)
+					return map[string]any{
+						"name":         identity["name"],
+						"role":         identity["purpose"],
+						"avatar":       identity["emoji"],
+						"model":        identity["model"],
+						"tool_profile": "full",
+						"examples":     agentcfg.DefaultExamples("full"),
+					}
+				}
+			}
+		}
+	}
+
+	// Default: assistant preset.
+	return map[string]any{
+		"name":         "Assistant",
+		"role":         "General-purpose AI assistant",
+		"avatar":       "\u2B50",
+		"model":        "strong",
+		"tool_profile": "full",
+		"examples":     agentcfg.DefaultExamples("full"),
+	}
+}
+
+// getStr safely extracts a string from a map.
+func getStr(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// sanitizeString strips HTML tags and clamps length.
+func sanitizeString(s string, maxLen int, fallback string) string {
+	s = stripHTMLTags(s)
+	if s == "" {
+		return fallback
+	}
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	return s
+}
+
+// stripHTMLTags removes HTML/script tags from a string.
+func stripHTMLTags(s string) string {
+	var result strings.Builder
+	inTag := false
+	for _, r := range s {
+		if r == '<' {
+			inTag = true
+			continue
+		}
+		if r == '>' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
 }
 
 // presetConfigs defines the full config for each preset archetype.

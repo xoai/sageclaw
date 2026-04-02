@@ -159,7 +159,7 @@ var knownModelCaps = map[string]Capabilities{
 		Caching: true, Tools: true, Streaming: true,
 		Vision: true, JSON: true, SearchGrounding: true, CodeExecution: true,
 	},
-	"gemini-2.0-flash-lite": {
+	"gemini-2.5-flash-lite": {
 		ContextWindow: 1000000, MaxOutputTokens: 8192,
 		Tools: true, Streaming: true,
 		Vision: true, JSON: true,

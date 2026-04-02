@@ -82,8 +82,9 @@ export default function StepComplete({ progress, onDone }) {
 
       {/* Action buttons */}
       <div style="display:flex;flex-direction:column;gap:8px">
-        <a href="/chat" class="btn-primary" style="text-decoration:none;text-align:center;display:block;padding:14px;font-size:14px">
-          Open Chat
+        <a href={`/?agent=${encodeURIComponent(progress.agentId || '')}`} class="btn-primary" style="text-decoration:none;text-align:center;display:block;padding:14px;font-size:14px"
+          onClick={(e) => { e.preventDefault(); onDone(); }}>
+          Start Chatting
         </a>
         <div style="display:flex;gap:8px">
           <a href={`/agents/${progress.agentId}`} class="btn-secondary" style="flex:1;text-decoration:none;text-align:center">

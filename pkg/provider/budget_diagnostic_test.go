@@ -192,7 +192,7 @@ func TestH2_PricingAccuracy_Gemini(t *testing.T) {
 		{"gemini-2.5-pro", 1.25, 10.0, 0.315},
 		{"gemini-2.5-flash", 0.15, 0.6, 0.0375},
 		{"gemini-2.0-flash", 0.1, 0.4, 0.025},
-		{"gemini-2.0-flash-lite", 0.075, 0.3, 0.01875},
+		{"gemini-2.5-flash-lite", 0.1, 0.4, 0.025},
 	}
 
 	for _, tt := range tests {

@@ -69,8 +69,9 @@ export default function Onboarding() {
   const goBack = () => setStep(s => Math.max(s - 1, 0));
 
   const handleDone = () => {
+    const agentId = progress.agentId;
     clearProgress();
-    route('/', true);
+    route(agentId ? `/?agent=${encodeURIComponent(agentId)}` : '/', true);
   };
 
   if (checking) {

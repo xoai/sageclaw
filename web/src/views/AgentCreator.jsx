@@ -4,6 +4,7 @@ import { route } from 'preact-router';
 import { rpc } from '../api';
 import BodyDiagram from '../components/BodyDiagram';
 import ConfigPanel from '../components/ConfigPanel';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 const defaultConfig = {
   identity: {}, soul: {}, behavior: {}, skills: {},
@@ -182,6 +183,7 @@ export default function AgentCreator({ id }) {
 
   return (
     <div>
+      <Breadcrumb items={[{ label: 'Agents', href: '/agents' }, { label: isNew ? 'Create' : (config.identity?.name || id) }]} />
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
           <h1 style="margin-bottom:2px">{isNew ? 'Create Agent' : `Edit: ${config.identity?.name || id}`}</h1>

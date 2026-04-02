@@ -142,8 +142,8 @@ func (s *Server) activateProvider(provType, apiKey, baseURL string) {
 		fastModel = "gpt-4o-mini"
 	case "gemini":
 		prov = gemini.NewClient(apiKey)
-		strongModel = "gemini-2.0-flash"
-		fastModel = "gemini-2.0-flash-lite"
+		strongModel = "gemini-2.5-flash"
+		fastModel = "gemini-2.5-flash-lite"
 	case "openrouter":
 		prov = openrouter.NewClient(apiKey)
 		strongModel = "anthropic/claude-sonnet-4-20250514"

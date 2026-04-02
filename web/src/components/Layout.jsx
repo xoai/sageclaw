@@ -81,9 +81,9 @@ export function Layout({ children }) {
               <div style="display:flex;align-items:flex-start;gap:12px">
                 <span style="font-size:20px;flex-shrink:0">&#9888;</span>
                 <div style="flex:1">
-                  <div style="font-weight:700;font-size:14px;margin-bottom:4px">Permission Required</div>
-                  <div style="font-size:13px;color:var(--text-muted);margin-bottom:2px">
-                    {consent.agentName && <span>Agent <strong>{consent.agentName}</strong> wants to use </span>}
+                  <div style="font-weight:600;font-size:var(--text-base);margin-bottom:4px">Approve this action?</div>
+                  <div style="font-size:var(--text-sm);color:var(--text-muted);margin-bottom:2px">
+                    {consent.agentName && <span><strong>{consent.agentName}</strong> wants to use </span>}
                     <strong style="font-family:var(--mono)">{consent.tool_name}</strong>
                   </div>
                   <div style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--text-muted);margin-bottom:8px">
@@ -100,22 +100,22 @@ export function Layout({ children }) {
                     try {
                       const parsed = JSON.parse(consent.tool_input);
                       return (
-                        <pre style="margin-bottom:8px;padding:8px;background:var(--bg-darker,#1a1a2e);border-radius:4px;font-size:10px;font-family:var(--mono);color:var(--text);overflow-x:auto;max-height:120px;white-space:pre-wrap;word-break:break-all">
+                        <pre style="margin-bottom:8px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:10px;font-family:var(--mono);color:var(--text);overflow-x:auto;max-height:120px;white-space:pre-wrap;word-break:break-all">
                           {JSON.stringify(parsed, null, 2)}
                         </pre>
                       );
                     } catch {
                       return (
-                        <pre style="margin-bottom:8px;padding:8px;background:var(--bg-darker,#1a1a2e);border-radius:4px;font-size:10px;font-family:var(--mono);color:var(--text);overflow-x:auto;max-height:120px;white-space:pre-wrap;word-break:break-all">
+                        <pre style="margin-bottom:8px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:10px;font-family:var(--mono);color:var(--text);overflow-x:auto;max-height:120px;white-space:pre-wrap;word-break:break-all">
                           {consent.tool_input}
                         </pre>
                       );
                     }
                   })()}
                   <div style="display:flex;gap:8px">
-                    <button class="btn-primary" style="padding:6px 16px;font-size:13px" onClick={() => respondConsent(true, 'once')}>Allow once</button>
-                    <button class="btn-primary" style="padding:6px 16px;font-size:13px;background:var(--success)" onClick={() => respondConsent(true, 'always')}>Always allow</button>
-                    <button class="btn-secondary" style="padding:6px 16px;font-size:13px" onClick={() => respondConsent(false, 'deny')}>Deny</button>
+                    <button class="btn-primary" style="padding:6px 16px;font-size:var(--text-sm)" onClick={() => respondConsent(true, 'once')}>Allow this time</button>
+                    <button class="btn-primary" style="padding:6px 16px;font-size:var(--text-sm);background:var(--success)" onClick={() => respondConsent(true, 'always')}>Always allow</button>
+                    <button class="btn-secondary" style="padding:6px 16px;font-size:var(--text-sm)" onClick={() => respondConsent(false, 'deny')}>Block</button>
                   </div>
                 </div>
               </div>

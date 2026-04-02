@@ -91,20 +91,18 @@ export function Nav({ open, onNavigate }) {
     <nav class={`sidebar ${open ? 'open' : ''}`}>
       <div class="sidebar-header">
         <div class="sidebar-logo">
-          <StatusDot ok={healthy} />
+          <img src="/logo.png" alt="SageClaw" style="width:28px;height:28px;flex-shrink:0;object-fit:contain;border-radius:4px" />
           <span>SageClaw</span>
         </div>
-        <button class="theme-toggle" onClick={toggleTheme} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
-          {theme === 'dark' ? '\u2600' : '\u263D'}
-        </button>
+        <StatusDot ok={healthy} />
       </div>
 
       <div class="nav-items">
-        {link('/chat', 'Chat', IconChat)}
+        {link('/', 'Chat', IconChat)}
         {link('/agents', 'Agents', IconBot, attentionCount)}
         {link('/marketplace', 'Marketplace', IconSkills)}
         {link('/knowledge', 'Knowledge', IconKnowledge)}
-        {link('/', 'Dashboard', IconDashboard)}
+        {link('/dashboard', 'Dashboard', IconDashboard)}
       </div>
 
       <div style="flex:1" />
