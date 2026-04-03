@@ -211,7 +211,6 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 		Grounding:        cfg.Tools.Grounding,
 		CodeExecution:    cfg.Tools.CodeExecution,
 
-		ContextPipeline:          cfg.Context.Pipeline,
 		ContextAggregateBudget:   cfg.Context.AggregateBudget,
 		ContextSnipAge:           cfg.Context.SnipAge,
 		ContextMicroCompactAge:   cfg.Context.MicroCompactAge,

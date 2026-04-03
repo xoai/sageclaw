@@ -99,9 +99,8 @@ type Config struct {
 	ExecSecurity  string          // "deny", "safe-only" (default), "ask".
 	ExecAllowlist map[string]bool // Custom safe binary overrides (merged on DefaultSafeBinaries).
 
-	// Context pipeline (v2): multi-layer compaction.
-	ContextPipeline        string  // "v1" (default) or "v2".
-	ContextOverflowDir     string  // Overflow directory for v2 pipeline.
+	// Context pipeline: multi-layer pressure-gated compaction.
+	ContextOverflowDir     string  // Overflow directory for context pipeline.
 	ContextAggregateBudget int     // Aggregate budget chars (0 = default 20000).
 	ContextSnipAge         int     // Iterations before snipping (0 = default 8).
 	ContextMicroCompactAge int     // Iterations before micro-compacting (0 = default 5).
@@ -152,7 +151,7 @@ type Loop struct {
 
 	// Context management.
 	compactionMgr   *CompactionManager          // Optional: auto-compaction.
-	contextPipeline *agentctx.ContextPipeline    // Optional: v2 context pipeline.
+	contextPipeline *agentctx.ContextPipeline    // Context pipeline (lazy-initialized).
 
 	// Owner resolution (lazy-cached per session).
 	ownerResolver OwnerResolver
@@ -237,8 +236,7 @@ func WithCompactionManager(cm *CompactionManager) LoopOption {
 	return func(l *Loop) { l.compactionMgr = cm }
 }
 
-// WithContextPipeline enables the v2 context pipeline (multi-layer compaction).
-// When set, Prepare() replaces PrepareHistoryWithBudget for history management.
+// WithContextPipeline sets a custom context pipeline (for testing).
 func WithContextPipeline(cp *agentctx.ContextPipeline) LoopOption {
 	return func(l *Loop) { l.contextPipeline = cp }
 }
@@ -354,8 +352,8 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		denialCounts:       make(map[string]int),
 	}
 
-	// Lazily create v2 context pipeline from config.
-	if l.contextPipeline == nil && l.config.ContextPipeline == "v2" {
+	// Lazily create context pipeline from config.
+	if l.contextPipeline == nil {
 		cfg := agentctx.DefaultPipelineConfig()
 		if l.config.ContextOverflowDir != "" {
 			cfg.OverflowDir = l.config.ContextOverflowDir
@@ -380,7 +378,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		if l.router != nil {
 			l.contextPipeline.SetLLMCaller(agentctx.NewLLMCaller(l.router, l.config.Model, l.config.UtilityModel))
 		}
-		log.Printf("[%s] context pipeline v2 activated", sessionID)
+		log.Printf("[%s] context pipeline activated", sessionID)
 	}
 
 	// Sanitize history before starting.
@@ -413,11 +411,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		if l.config.MaxRequestTokens > 0 {
 			state.budget.CapHistoryBudget(l.config.MaxRequestTokens)
 		}
-		if l.contextPipeline != nil {
-			history = l.contextPipeline.PrepareWithContext(ctx, sessionID, history, iteration)
-		} else {
-			history = PrepareHistoryWithBudget(history, state.budget)
-		}
+		history = l.contextPipeline.PrepareWithContext(ctx, sessionID, history, iteration)
 
 		// Run PreContext middleware.
 		hookData := &middleware.HookData{

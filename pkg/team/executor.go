@@ -25,6 +25,9 @@ const DefaultTaskTimeout = 10 * time.Minute
 type LoopFactory interface {
 	// NewTaskLoop creates a fresh, ephemeral Loop for a member agent.
 	NewTaskLoop(agentID string) *agent.Loop
+	// RegisterTaskLoop temporarily adds a task loop so consent can reach it.
+	// Returns a cleanup function.
+	RegisterTaskLoop(key string, loop *agent.Loop) func()
 }
 
 // MaxDispatchAttempts is the maximum number of times a task can be dispatched
@@ -35,16 +38,11 @@ const MaxDispatchAttempts = 3
 const DefaultStaleTimeout = 600
 
 // TeamExecutor is the orchestration engine that dispatches tasks to member agents.
-// OnTaskSessionFunc is called when a member session is created for a task.
-// Used by the WorkflowRelay to register session → workflow mapping.
-type OnTaskSessionFunc func(taskID, teamID, sessionID, agentID string)
-
 type TeamExecutor struct {
 	store        store.Store
 	loopFactory  LoopFactory
 	eventHandler agent.EventHandler
 	notifier     *TeamProgressNotifier
-	onTaskSession OnTaskSessionFunc // Optional: called when member session created.
 
 	mu          sync.Mutex
 	inboxes     map[string]*TeamInbox           // teamID → completion inbox
@@ -190,11 +188,6 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 	// Link session to task.
 	e.store.UpdateTask(ctx, taskID, map[string]any{"session_id": session.ID})
 
-	// Notify relay of the new member session for workflow forwarding.
-	if e.onTaskSession != nil {
-		e.onTaskSession(taskID, teamID, session.ID, agentID)
-	}
-
 	// Create ephemeral Loop for this task.
 	loop := e.loopFactory.NewTaskLoop(agentID)
 	if loop == nil {
@@ -202,6 +195,12 @@ func (e *TeamExecutor) execute(teamID, taskID, agentID string) {
 		e.failTask(ctx, taskID, teamID, "agent_not_found", fmt.Sprintf("agent %q not configured", agentID))
 		return
 	}
+
+	// Register the ephemeral loop so consent responses can reach it.
+	// Use a unique key to avoid colliding with the agent's main loop in the pool.
+	taskLoopKey := agentID + ":task:" + taskID
+	unregister := e.loopFactory.RegisterTaskLoop(taskLoopKey, loop)
+	defer unregister()
 
 	// Run the loop.
 	messages := []canonical.Message{
@@ -571,11 +570,6 @@ func (e *TeamExecutor) EmitTaskFailed(ctx context.Context, teamID, taskID string
 // SetNotifier attaches a progress notifier to the executor.
 func (e *TeamExecutor) SetNotifier(n *TeamProgressNotifier) {
 	e.notifier = n
-}
-
-// SetOnTaskSession sets the callback for member session creation.
-func (e *TeamExecutor) SetOnTaskSession(fn OnTaskSessionFunc) {
-	e.onTaskSession = fn
 }
 
 // emitEvent sends a team event via the event handler and notifier.

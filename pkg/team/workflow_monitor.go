@@ -147,6 +147,13 @@ func (m *WorkflowMonitor) collectResult(taskID string, eventType agent.EventType
 	}
 
 	mw.mu.Lock()
+	// Dedup: skip if this task was already collected (timeout + event can both fire).
+	for _, r := range mw.results {
+		if r.TaskID == taskID {
+			mw.mu.Unlock()
+			return
+		}
+	}
 	mw.results = append(mw.results, result)
 	mw.mu.Unlock()
 
@@ -256,11 +263,11 @@ func (m *WorkflowMonitor) advanceToSynthesize(mw *monitoredWorkflow) {
 		}
 	}
 
-	// Cleanup AFTER wake so mw data is available during the wake call.
-	m.cleanup(mw.workflowID)
+	// Cleanup happens in HandleLeadRunComplete or when the workflow transitions
+	// to a terminal state (after synthesis completes).
 }
 
-// cleanup removes a workflow from the monitor's tracking maps and relay.
+// cleanup removes a workflow from the monitor's tracking maps.
 func (m *WorkflowMonitor) cleanup(workflowID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -270,11 +277,6 @@ func (m *WorkflowMonitor) cleanup(workflowID string) {
 			delete(m.taskIndex, taskID)
 		}
 		delete(m.workflows, workflowID)
-	}
-
-	// Also clean up the relay's forwarding state.
-	if m.engine != nil && m.engine.relay != nil {
-		m.engine.relay.UnregisterWorkflow(workflowID)
 	}
 }
 
@@ -390,7 +392,7 @@ func (m *WorkflowMonitor) recoverStaleWorkflows() {
 	seen := make(map[string]bool)
 	var stale []store.TeamWorkflow
 	for _, wf := range staleEarly {
-		if wf.State == StateAnalyze || wf.State == StatePlan || wf.State == StateSynthesize {
+		if wf.State == StateAnalyze || wf.State == StatePlan || wf.State == StateCreate || wf.State == StateSynthesize || wf.State == StateDeliver {
 			stale = append(stale, wf)
 			seen[wf.ID] = true
 		}
@@ -403,13 +405,30 @@ func (m *WorkflowMonitor) recoverStaleWorkflows() {
 
 	for _, wf := range stale {
 		switch wf.State {
-		case StateAnalyze, StatePlan:
-			// Stuck in early LLM-dependent states → mark failed.
+		case StateAnalyze, StatePlan, StateCreate:
+			// Stuck in early LLM-dependent or transient states → mark failed.
 			log.Printf("[workflow:%s] stale in %s (>5m) — marking failed", wf.ID[:min(8, len(wf.ID))], wf.State)
 			if err := m.store.UpdateWorkflowState(ctx, wf.ID, StateFailed, wf.Version, map[string]any{
 				"error": fmt.Sprintf("stale: stuck in %s for >5 minutes", wf.State),
 			}); err != nil {
 				log.Printf("[workflow:%s] stale recovery: %v", wf.ID[:min(8, len(wf.ID))], err)
+			} else if m.eventHandler != nil {
+				m.eventHandler(agent.Event{
+					Type: agent.EventWorkflowCompleted, AgentID: wf.TeamID, Text: wf.ID,
+					TeamData: &agent.TeamEventData{TeamID: wf.TeamID},
+				})
+			}
+
+		case StateDeliver:
+			// Stuck between DELIVER and COMPLETE (process crash). Auto-complete.
+			log.Printf("[workflow:%s] stale in deliver (>5m) — auto-completing", wf.ID[:min(8, len(wf.ID))])
+			if err := m.store.UpdateWorkflowState(ctx, wf.ID, StateComplete, wf.Version, nil); err != nil {
+				log.Printf("[workflow:%s] stale recovery: %v", wf.ID[:min(8, len(wf.ID))], err)
+			} else if m.eventHandler != nil {
+				m.eventHandler(agent.Event{
+					Type: agent.EventWorkflowCompleted, AgentID: wf.TeamID, Text: wf.ID,
+					TeamData: &agent.TeamEventData{TeamID: wf.TeamID},
+				})
 			}
 
 		case StateExecute, StateMonitor:
@@ -420,6 +439,11 @@ func (m *WorkflowMonitor) recoverStaleWorkflows() {
 					"error": "stale: no tasks to recover",
 				}); err != nil {
 					log.Printf("[workflow:%s] stale recovery: %v", wf.ID[:min(8, len(wf.ID))], err)
+				} else if m.eventHandler != nil {
+					m.eventHandler(agent.Event{
+						Type: agent.EventWorkflowCompleted, AgentID: wf.TeamID, Text: wf.ID,
+						TeamData: &agent.TeamEventData{TeamID: wf.TeamID},
+					})
 				}
 				continue
 			}
@@ -456,8 +480,42 @@ func (m *WorkflowMonitor) recoverStaleWorkflows() {
 			}
 
 		case StateSynthesize:
-			// Stuck in synthesize → the lead may have crashed. Re-wake.
-			log.Printf("[workflow:%s] stale in synthesize (>5m) — re-waking lead", wf.ID[:min(8, len(wf.ID))])
+			// Stuck in synthesize → the lead may have crashed. Re-wake with retry limit.
+			wakeCount := 0
+			if strings.Contains(wf.Error, "synth_wake:") {
+				fmt.Sscanf(wf.Error[strings.Index(wf.Error, "synth_wake:")+len("synth_wake:"):], "%d", &wakeCount)
+			}
+			wakeCount++
+
+			if wakeCount > 3 {
+				// Exceeded retry limit — give up.
+				log.Printf("[workflow:%s] stale in synthesize — exceeded 3 re-wake attempts, failing", wf.ID[:min(8, len(wf.ID))])
+				if err := m.store.UpdateWorkflowState(ctx, wf.ID, StateFailed, wf.Version, map[string]any{
+					"error": fmt.Sprintf("synthesis failed after %d re-wake attempts", wakeCount-1),
+				}); err != nil {
+					log.Printf("[workflow:%s] stale recovery: %v", wf.ID[:min(8, len(wf.ID))], err)
+				}
+				if m.eventHandler != nil {
+					m.eventHandler(agent.Event{
+						Type:    agent.EventWorkflowCompleted,
+						AgentID: wf.TeamID,
+						Text:    wf.ID,
+						TeamData: &agent.TeamEventData{TeamID: wf.TeamID},
+					})
+				}
+				continue
+			}
+
+			// Record attempt count and re-wake.
+			newError := fmt.Sprintf("synth_wake:%d", wakeCount)
+			if wf.Error != "" && !strings.Contains(wf.Error, "synth_wake:") {
+				newError = wf.Error + "; " + newError
+			}
+			_ = m.store.UpdateWorkflowState(ctx, wf.ID, StateSynthesize, wf.Version, map[string]any{
+				"error": newError,
+			})
+
+			log.Printf("[workflow:%s] stale in synthesize (>5m) — re-waking lead (attempt %d/3)", wf.ID[:min(8, len(wf.ID))], wakeCount)
 			if m.wakeLead != nil {
 				team, err := m.store.GetTeam(ctx, wf.TeamID)
 				if err != nil || team == nil {

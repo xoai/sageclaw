@@ -93,7 +93,7 @@ func DefaultDisplayMap() *ToolDisplayMap {
 			"load_skill": {Emoji: "🧩", Verb: "Loading skill", DetailKey: "skill", Category: "tool"},
 			"plan":       {Emoji: "📝", Verb: "Planning", DetailKey: "", Category: "tool"},
 
-			// Workflow progress (synthetic events from WorkflowRelay)
+			// Workflow progress (synthetic events from WorkflowEventCollector)
 			"_wf_delegating":     {Emoji: "📤", Verb: "Delegating to team", DetailKey: "count", Category: "tool"},
 			"_wf_task_started":   {Emoji: "📋", Verb: "Task started", DetailKey: "title", Category: "tool"},
 			"_wf_task_completed": {Emoji: "✅", Verb: "Task done", DetailKey: "title", Category: "tool"},
@@ -112,7 +112,7 @@ func (m *ToolDisplayMap) ResolveDisplay(toolName string, input json.RawMessage) 
 		_ = json.Unmarshal(input, &args) // best-effort; args stays nil on failure
 	}
 
-	// Member-prefixed tool calls from WorkflowRelay: "member:{displayName}:{realTool}"
+	// Member-prefixed tool calls: "member:{displayName}:{realTool}"
 	var memberPrefix string
 	if strings.HasPrefix(toolName, "member:") {
 		parts := strings.SplitN(toolName, ":", 3)

@@ -69,7 +69,7 @@ type WorkflowEngine struct {
 	executor     *TeamExecutor
 	eventHandler agent.EventHandler
 	monitor      *WorkflowMonitor
-	relay        *WorkflowRelay
+	collector *WorkflowEventCollector
 }
 
 // NewWorkflowEngine creates a new workflow engine.
@@ -88,9 +88,28 @@ func (w *WorkflowEngine) Monitor() *WorkflowMonitor {
 	return w.monitor
 }
 
-// SetRelay sets the workflow relay for progress forwarding.
-func (w *WorkflowEngine) SetRelay(relay *WorkflowRelay) {
-	w.relay = relay
+// SetCollector sets the persist-first event collector.
+func (w *WorkflowEngine) SetCollector(collector *WorkflowEventCollector) {
+	w.collector = collector
+}
+
+// CancelActiveWorkflow cancels any active workflow for the given session.
+// Returns true if a workflow was found and cancelled, false otherwise.
+func (w *WorkflowEngine) CancelActiveWorkflow(ctx context.Context, sessionID string) (bool, error) {
+	// Find active workflow by scanning non-terminal workflows for this session.
+	all, err := w.store.ListNonTerminalWorkflows(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, wf := range all {
+		if wf.SessionID == sessionID {
+			if err := w.monitor.CancelWorkflow(ctx, wf.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // transition advances a workflow to a new state with optimistic concurrency.
@@ -174,6 +193,10 @@ func (w *WorkflowEngine) HandleAnalyze(ctx context.Context, teamID, sessionID, u
 	}
 	id, err := w.store.CreateWorkflow(ctx, wf)
 	if err != nil {
+		// Catch unique constraint violation from partial index (concurrent creation guard).
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			return "A delegation is already in progress for this session. Wait for it to complete or ask the user to cancel it.", false, nil
+		}
 		return "", false, fmt.Errorf("creating workflow: %w", err)
 	}
 
@@ -347,16 +370,33 @@ func (w *WorkflowEngine) executeCreate(ctx context.Context, wf *store.TeamWorkfl
 		w.monitor.StartMonitoring(wf.ID, wf.TeamID, wf.SessionID, createdIDs)
 	}
 
-	// Register relay for progress forwarding to user's session.
-	if w.relay != nil {
-		// Look up the lead agent for pause/resume detection.
+	// Register collector for persist-first progress tracking.
+	if w.collector != nil {
 		team, _ := w.store.GetTeam(ctx, wf.TeamID)
 		leadID := ""
 		if team != nil {
 			leadID = team.LeadID
 		}
-		w.relay.RegisterWorkflow(wf.ID, wf.SessionID, leadID, wf.TeamID)
-		w.relay.EmitDelegating(wf.ID, wf.SessionID, len(createdIDs))
+		// Build member map from the plan tasks (available at creation time).
+		members := make(map[string]string) // agentID → displayName
+		for _, pt := range plan.Tasks {
+			if pt.Assignee != "" && members[pt.Assignee] == "" {
+				members[pt.Assignee] = pt.Assignee // Default: use agent ID as display name.
+			}
+		}
+		// Enrich display names from team member list if available.
+		if team != nil {
+			teamMembers, _ := w.store.ListTeamMembers(ctx, team.ID)
+			for _, m := range teamMembers {
+				if _, ok := members[m.AgentID]; ok {
+					if m.DisplayName != "" {
+						members[m.AgentID] = m.DisplayName
+					}
+				}
+			}
+		}
+		w.collector.RegisterWorkflow(wf.ID, wf.SessionID, leadID, wf.TeamID, members)
+		w.collector.EmitDelegating(wf.ID, wf.SessionID, len(createdIDs))
 	}
 
 	return fmt.Sprintf("%s\n\n[%d tasks created and dispatched. The system will monitor progress and deliver results when all tasks complete.]",
@@ -431,6 +471,14 @@ func (w *WorkflowEngine) HandleLeadRunComplete(ctx context.Context, teamID, sess
 			Text:    wf.ID,
 			TeamData: &agent.TeamEventData{TeamID: wf.TeamID},
 		})
+	}
+
+	// Cleanup collector and monitor state NOW that the workflow is fully complete.
+	if w.collector != nil {
+		w.collector.UnregisterWorkflow(wf.ID)
+	}
+	if w.monitor != nil {
+		w.monitor.cleanup(wf.ID)
 	}
 }
 

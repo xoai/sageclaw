@@ -142,6 +142,20 @@ func (p *LoopPool) NewTaskLoopWithDeny(agentID string, extraDeny []string) *Loop
 	return NewLoop(cfgCopy, p.provider, p.toolRegistry, p.preContext, p.postTool, p.onEvent, p.opts...)
 }
 
+// RegisterTaskLoop temporarily adds an ephemeral task loop to the pool
+// so that InjectTo/InjectAll can reach it (e.g., for consent delivery).
+// Returns a cleanup function that removes the loop from the pool.
+func (p *LoopPool) RegisterTaskLoop(key string, loop *Loop) func() {
+	p.mu.Lock()
+	p.loops[key] = loop
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		delete(p.loops, key)
+		p.mu.Unlock()
+	}
+}
+
 // InjectAll broadcasts a message to all active loops' inject channels.
 // Used for consent responses where the target loop is unknown.
 func (p *LoopPool) InjectAll(msg canonical.Message) {

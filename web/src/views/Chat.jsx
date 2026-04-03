@@ -108,6 +108,8 @@ export function Chat() {
   const timerRef = useRef(null);
   const sseRef = useRef(null);
   const watcherRef = useRef(null);
+  const sessionRef = useRef(null); // Current session ID — always up-to-date for SSE filter.
+  const isNearBottomRef = useRef(true); // Tracks if user is near bottom for smart scroll.
   const initialScrollDone = useRef(false);
   const pendingSend = useRef(false); // Auto-send after homepage → chat transition
   const chatTextareaRef = useRef(null);
@@ -124,14 +126,52 @@ export function Chat() {
     setListLoading(false);
   }, []);
 
+  // loadMessages returns { messages, dbToolSteps } — chat messages + reconstructed tool timeline.
   const loadMessages = useCallback(async (sessionId) => {
     const { data: msgs } = await callRPC('sessions.messages', { id: sessionId, limit: 100 });
-    if (!msgs || !Array.isArray(msgs)) return [];
-    return msgs.map(m => {
-      const text = extractText(m.content);
-      const audio = extractAudio(m.content);
-      return { role: m.role, text, audio };
-    }).filter(m => (m.text || m.audio) && !m.text.startsWith('[system:workflow]') && !m.text.startsWith('[Workflow Results]'));
+    if (!msgs || !Array.isArray(msgs)) return { messages: [], dbToolSteps: [] };
+
+    const chatMessages = [];
+    const dbToolSteps = [];
+
+    for (const m of msgs) {
+      if (!m.content || !Array.isArray(m.content)) continue;
+
+      let hasText = false;
+      for (const c of m.content) {
+        // Reconstruct tool timeline from persisted workflow_activity blocks.
+        if (c.type === 'workflow_activity' && c.meta) {
+          const meta = c.meta;
+          if (meta.activity_type === 'tool_call' || meta.activity_type === 'task_started' ||
+              meta.activity_type === 'delegating' || meta.activity_type === 'consent_needed') {
+            dbToolSteps.push({
+              id: meta.tool_call_id || ('wf_' + Date.now() + '_' + dbToolSteps.length),
+              name: meta.agent_name ? 'member:' + meta.agent_name + ':' + (meta.tool_name || '') : (meta.tool_name || meta.activity_type),
+              detail: meta.detail || meta.task_title || '',
+              input: meta.detail ? { _detail: meta.detail } : null,
+              status: meta.status === 'done' ? 'done' : 'running',
+              startedAt: Date.now(),
+            });
+          } else if (meta.activity_type === 'tool_result' || meta.activity_type === 'task_completed' || meta.activity_type === 'task_failed') {
+            // Mark matching step as done.
+            const step = dbToolSteps.find(s => s.id === meta.tool_call_id);
+            if (step) step.status = 'done';
+          }
+          continue;
+        }
+        if (c.type === 'text' && c.text) hasText = true;
+      }
+
+      if (hasText) {
+        const text = extractText(m.content);
+        const audio = extractAudio(m.content);
+        if (text && !text.startsWith('##wf:7a3f9e2b-4c1d-48a6-b5e0-3d2f1a8c9b7e##') && !text.startsWith('[Workflow Results]')) {
+          chatMessages.push({ role: m.role, text, audio });
+        }
+      }
+    }
+
+    return { messages: chatMessages, dbToolSteps };
   }, []);
 
   const findWebSession = useCallback(async (agentId) => {
@@ -251,23 +291,26 @@ export function Chat() {
   }, [rightPanel, messages.length]);
 
   // Subsequent messages: auto-scroll if user is near bottom.
-  // Use instant scroll during streaming (smooth can't keep up with rapid updates).
+  // Smart scroll: follow when at bottom, stick when user scrolled up.
   useEffect(() => {
     if (rightPanel !== 'chat' || !initialScrollDone.current) return;
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300;
-    if (nearBottom) {
-      const behavior = streaming ? 'instant' : 'smooth';
-      bottomRef.current?.scrollIntoView({ behavior });
+    if (isNearBottomRef.current && messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
     }
   }, [messages, streaming, toolSteps]);
+
+  // Track scroll position to determine if user is near bottom.
+  const handleMessagesScroll = useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    isNearBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+  }, []);
 
   // --- Session Actions ---
 
   const openSessionById = async (id, agentId, agentName) => {
     initialScrollDone.current = false; // Reset for new session.
-    setSelectedSession(id);
+    setSelectedSession(id); sessionRef.current = id;
     setSelectedAgent(agentId);
     setSelectedAgentName(agentName);
     // Restore chatID from session so subsequent messages go to the right session.
@@ -275,8 +318,12 @@ export function Chat() {
     if (sess && sess.chat_id) {
       chatIdRef.current = sess.chat_id;
     }
-    const msgs = await loadMessages(id);
+    const { messages: msgs, dbToolSteps } = await loadMessages(id);
     setMessages(msgs);
+    if (dbToolSteps.length > 0) {
+      setToolSteps(dbToolSteps);
+      setToolCollapsed(true); // Show collapsed on load.
+    }
     setRightPanel('chat');
     setMobileView('conversation');
   };
@@ -300,7 +347,7 @@ export function Chat() {
   const startNewChat = (agent) => {
     // Generate unique chatID so each conversation gets its own session.
     chatIdRef.current = 'web-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    setSelectedSession(null);
+    setSelectedSession(null); sessionRef.current = null;
     setSelectedAgent(agent.id);
     setSelectedAgentName(agent.name || agent.id);
     setMessages([]);
@@ -317,7 +364,7 @@ export function Chat() {
 
   const goHome = () => {
     setRightPanel('empty');
-    setSelectedSession(null);
+    setSelectedSession(null); sessionRef.current = null;
     setMobileView('list');
   };
 
@@ -418,8 +465,7 @@ export function Chat() {
     const es = new EventSource('/events', { withCredentials: true });
     sseRef.current = es;
 
-    // Background watcher: polls for new messages that arrive after the initial response.
-    // Handles delegation synthesis, team results, and any async agent output.
+    // Recovery watcher: polls for new messages when SSE disconnects mid-workflow.
     if (watcherRef.current) { clearTimeout(watcherRef.current); watcherRef.current = null; }
     const startWatcher = (sessionId, knownCount) => {
       let watchAttempts = 0;
@@ -427,11 +473,25 @@ export function Chat() {
         watchAttempts++;
         if (watchAttempts > 150) return; // 5 min max (150 × 2s).
         try {
-          const msgs = await loadMessages(sessionId);
-          if (msgs.length > knownCount) {
-            setMessages(msgs);
-            knownCount = msgs.length;
+          const r = await loadMessages(sessionId);
+          if (r.messages.length > knownCount) {
+            setMessages(r.messages);
+            // Merge: DB steps are authoritative, keep SSE-only steps.
+            if (r.dbToolSteps.length > 0) {
+              setToolSteps(prev => {
+                const dbIds = new Set(r.dbToolSteps.map(s => s.id));
+                const sseOnly = prev.filter(s => !dbIds.has(s.id));
+                return [...r.dbToolSteps, ...sseOnly];
+              });
+              setToolCollapsed(true);
+            }
+            knownCount = r.messages.length;
             loadSessions();
+            // New messages arrived (likely synthesis) — mark all tools as done.
+            setToolSteps(prev => prev.map(s =>
+              s.status === 'running' ? { ...s, status: 'done' } : s
+            ));
+            setToolCollapsed(true);
           }
         } catch {}
         watcherRef.current = setTimeout(watch, 2000);
@@ -443,17 +503,29 @@ export function Chat() {
       try {
         const event = JSON.parse(e.data);
 
+        // Session-scope filtering: skip events from other sessions.
+        // Uses sessionRef (always current) instead of closure-captured selectedSession.
+        if (event.session_id && sessionRef.current && event.session_id !== sessionRef.current) {
+          return;
+        }
+
         if (event.type === 'chunk' && event.text) {
           gotChunks = true;
           streamText += event.text;
           setStreaming(streamText);
+          // Auto-scroll during synthesis streaming (after first run.completed).
+          if (completed && messagesContainerRef.current) {
+            messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+          }
         }
 
         if (event.type === 'tool.call') {
           gotChunks = true;
           const toolCall = event.tool_call || {};
           let input = null;
-          try { if (toolCall.input) input = JSON.parse(toolCall.input); } catch {}
+          try {
+            if (toolCall.input) input = typeof toolCall.input === 'string' ? JSON.parse(toolCall.input) : toolCall.input;
+          } catch {}
           setToolSteps(prev => [...prev, {
             id: toolCall.id || 'tc_' + Date.now(),
             name: toolCall.name || 'unknown',
@@ -468,7 +540,7 @@ export function Chat() {
           const toolResult = event.tool_result || {};
           setToolSteps(prev => prev.map(s =>
             s.id === toolResult.tool_call_id
-              ? { ...s, status: toolResult.is_error ? 'error' : 'done' }
+              ? { ...s, status: 'done' }
               : s
           ));
         }
@@ -487,9 +559,8 @@ export function Chat() {
             // First run.completed: show initial response, keep SSE OPEN for async events.
             completed = true;
 
-            setToolSteps(prev => prev.map(s =>
-              s.status === 'running' ? { ...s, status: 'done' } : s
-            ));
+            // Don't force-complete all tools here — member tools may still be arriving.
+            // Only collapse the timeline. Individual tool.result events handle completion.
             setToolCollapsed(true);
 
             if (gotChunks && streamText) {
@@ -505,10 +576,14 @@ export function Chat() {
             streamText = '';
             gotChunks = false;
           } else {
-            // Subsequent run.completed (e.g., synthesis): show new response.
-            setToolSteps(prev => prev.map(s =>
-              s.status === 'running' ? { ...s, status: 'done' } : s
-            ));
+            // Subsequent run.completed (e.g., synthesis): finalize.
+            // Force-complete ALL tools and collapse timeline.
+            setToolSteps(prev => {
+              const updated = prev.map(s =>
+                s.status === 'running' ? { ...s, status: 'done' } : s
+              );
+              return updated;
+            });
             setToolCollapsed(true);
 
             if (gotChunks && streamText) {
@@ -517,7 +592,17 @@ export function Chat() {
             } else {
               // Synthesis may have stored in DB without streaming — poll once.
               findWebSession(selectedAgent).then(sid => {
-                if (sid) loadMessages(sid).then(msgs => setMessages(msgs));
+                if (sid) loadMessages(sid).then(r => {
+                  setMessages(r.messages);
+                  if (r.dbToolSteps.length > 0) {
+                    setToolSteps(r.dbToolSteps.map(s => ({ ...s, status: 'done' })));
+                  } else {
+                    setToolSteps(prev => prev.map(s =>
+                      s.status === 'running' ? { ...s, status: 'done' } : s
+                    ));
+                  }
+                  setToolCollapsed(true);
+                });
               });
             }
             loadSessions();
@@ -538,7 +623,7 @@ export function Chat() {
       } else {
         // SSE disconnected after initial response — start watcher for async results.
         findWebSession(selectedAgent).then(sid => {
-          if (sid) loadMessages(sid).then(msgs => startWatcher(sid, msgs.length));
+          if (sid) loadMessages(sid).then(r => startWatcher(sid, r.messages.length));
         });
       }
     };
@@ -584,11 +669,12 @@ export function Chat() {
           return;
         }
 
-        if (!selectedSession) setSelectedSession(sid);
+        if (!selectedSession) { setSelectedSession(sid); sessionRef.current = sid; }
 
-        const msgs = await loadMessages(sid);
-        if (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
-          setMessages(msgs);
+        const r = await loadMessages(sid);
+        if (r.messages.length > 0 && r.messages[r.messages.length - 1].role === 'assistant') {
+          setMessages(r.messages);
+          if (r.dbToolSteps.length > 0) { setToolSteps(r.dbToolSteps); setToolCollapsed(true); }
           setSending(false); sendingRef.current = false;
           setStreaming('');
           loadSessions();
@@ -820,6 +906,7 @@ export function Chat() {
             )}
 
             <div class="chat-messages" ref={messagesContainerRef} aria-live="polite" aria-relevant="additions"
+              onScroll={handleMessagesScroll}
               onDragOver={e => { e.preventDefault(); e.stopPropagation(); }}
               onDrop={e => { e.preventDefault(); e.stopPropagation(); addFiles(Array.from(e.dataTransfer.files)); }}>
               {messages.length === 0 && !sending && (() => {

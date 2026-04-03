@@ -20,6 +20,10 @@ type mockLoopFactory struct {
 	delay    time.Duration
 }
 
+func (f *mockLoopFactory) RegisterTaskLoop(key string, loop *agent.Loop) func() {
+	return func() {} // No-op for tests.
+}
+
 func (f *mockLoopFactory) NewTaskLoop(agentID string) *agent.Loop {
 	// We can't easily mock agent.Loop since it's a concrete struct.
 	// Instead, we'll test at the integration level using a real store

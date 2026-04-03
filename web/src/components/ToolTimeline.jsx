@@ -19,7 +19,28 @@ const TOOL_DISPLAY = {
   read_document:   { emoji: '\u{1F4C4}', verb: 'Reading document' },
 };
 
+// Workflow synthetic tool entries.
+TOOL_DISPLAY['_wf_delegating']     = { emoji: '\u{1F4E4}', verb: 'Delegating to team', key: 'count' };
+TOOL_DISPLAY['_wf_task_started']   = { emoji: '\u{1F4CB}', verb: 'Task started',       key: 'title' };
+TOOL_DISPLAY['_wf_task_completed'] = { emoji: '\u2705',     verb: 'Task done',          key: 'title' };
+TOOL_DISPLAY['_wf_task_failed']    = { emoji: '\u274C',     verb: 'Task failed',        key: 'title' };
+TOOL_DISPLAY['_workflow_analyze']   = { emoji: '\u{1F9E0}', verb: 'Analyzing request' };
+TOOL_DISPLAY['_workflow_plan']      = { emoji: '\u{1F4DD}', verb: 'Planning delegation' };
+TOOL_DISPLAY['delegation_status']   = { emoji: '\u{1F4CB}', verb: 'Checking delegation' };
+TOOL_DISPLAY['plan']                = { emoji: '\u{1F4DD}', verb: 'Planning' };
+TOOL_DISPLAY['team_tasks']          = { emoji: '\u{1F4CB}', verb: 'Managing tasks' };
+
 function resolveDisplay(name, input) {
+  // Member-prefixed tool calls: "member:DisplayName:toolName"
+  let memberPrefix = '';
+  if (name.startsWith('member:')) {
+    const parts = name.split(':');
+    if (parts.length >= 3) {
+      memberPrefix = parts[1];
+      name = parts.slice(2).join(':'); // Handle tool names with colons.
+    }
+  }
+
   // Sub-action disambiguation.
   let key = name;
   if (input && input.action) {
@@ -33,7 +54,8 @@ function resolveDisplay(name, input) {
     if (name.startsWith('mcp_')) {
       return { emoji: '\u{1F50C}', text: 'Using extension' };
     }
-    return { emoji: '\u{1F527}', text: 'Running ' + name };
+    const fallbackText = memberPrefix ? memberPrefix + ': Running ' + name : 'Running ' + name;
+    return { emoji: '\u{1F527}', text: fallbackText };
   }
 
   let detail = '';
@@ -42,9 +64,10 @@ function resolveDisplay(name, input) {
     if (detail.length > 50) detail = detail.slice(0, 47) + '...';
   }
 
+  let verb = memberPrefix ? memberPrefix + ': ' + entry.verb : entry.verb;
   return {
     emoji: entry.emoji,
-    text: detail ? entry.verb + ': ' + detail : entry.verb,
+    text: detail ? verb + ': ' + detail : verb,
   };
 }
 
@@ -65,7 +88,7 @@ TOOL_DISPLAY['team_tasks:search'] = { emoji: '\u{1F4CB}', verb: 'Searching tasks
 export function ToolTimeline({ steps, collapsed, onToggle }) {
   if (!steps || steps.length === 0) return null;
 
-  const doneCount = steps.filter(s => s.status !== 'running').length;
+  const doneCount = steps.filter(s => s.status === 'done' || s.status === 'warning' || s.status === 'error').length;
   const total = steps.length;
   const allDone = doneCount === total;
 
@@ -85,11 +108,17 @@ export function ToolTimeline({ steps, collapsed, onToggle }) {
         <div class="tool-timeline-steps">
           {steps.map(step => {
             const display = resolveDisplay(step.name, step.input);
+            // Use pre-extracted detail if available (from collector persistence).
+            const text = step.detail
+              ? (display.emoji ? display.verb + ': ' + step.detail : step.detail)
+              : display.text;
             const icon = step.status === 'running'
               ? '\u23F3' // hourglass
-              : step.status === 'error'
-                ? '\u274C'
-                : '\u2705';
+              : step.status === 'warning'
+                ? '\u26A0\uFE0F' // ⚠️
+                : step.status === 'error'
+                  ? '\u274C'
+                  : '\u2705';
             const stale = step.status === 'running' && step.startedAt
               && (Date.now() - step.startedAt > 10000);
 
@@ -98,7 +127,7 @@ export function ToolTimeline({ steps, collapsed, onToggle }) {
                 <span class="tool-step-icon">{icon}</span>
                 <span class="tool-step-emoji">{display.emoji}</span>
                 <span class="tool-step-text">
-                  {display.text}
+                  {step.detail ? text : display.text}
                   {stale && <span class="tool-step-stale"> (still working...)</span>}
                 </span>
               </div>

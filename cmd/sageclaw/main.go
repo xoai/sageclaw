@@ -185,7 +185,6 @@ Flags:
   --tui              Launch TUI dashboard
   --rpc              Start RPC server (default: off, port 9090)
   --full-access      Enable full access mode (default: standard)
-  --context-v2       Enable v2 context pipeline (multi-layer compaction)
   --workspace PATH   Workspace root (default: current directory)
   --db PATH          Database file path (default: ~/.sageclaw/sageclaw.db)
 
@@ -222,7 +221,6 @@ type flags struct {
 	rpc        bool
 	mcpMode    bool
 	fullAccess bool
-	contextV2  bool
 	workspace  string
 	dbPath     string
 	configDir  string
@@ -246,8 +244,6 @@ func parseFlags() flags {
 			f.mcpMode = true
 		case arg == "--full-access":
 			f.fullAccess = true
-		case arg == "--context-v2":
-			f.contextV2 = true
 		case strings.HasPrefix(arg, "--workspace="):
 			f.workspace = strings.TrimPrefix(arg, "--workspace=")
 		case strings.HasPrefix(arg, "--db="):
@@ -682,7 +678,8 @@ func run() error {
 	// Forward-declare loopPool and workflowEngine so the file watcher closure can reference them.
 	var loopPool *agent.LoopPool
 	var workflowEngine *team.WorkflowEngine
-	var workflowRelay *team.WorkflowRelay
+	var workflowCollector *team.WorkflowEventCollector
+	leadAgentIDs := &sync.Map{} // agentID → true for team leads (cached for fast filtering)
 
 	if len(fileAgents) > 0 {
 		for id, ac := range fileAgents {
@@ -1045,15 +1042,6 @@ Key behaviors:
 	loopOpts = append(loopOpts, agent.WithStreamingExecutor(streamingExec))
 	log.Println("tools: streaming & parallel execution enabled")
 
-	// Apply --context-v2 flag to all agent configs.
-	if f.contextV2 {
-		for id, ac := range agentConfigs {
-			ac.ContextPipeline = "v2"
-			agentConfigs[id] = ac
-		}
-		log.Println("context: v2 pipeline enabled for all agents (--context-v2)")
-	}
-
 	// Load utility model setting and inject into all agent configs.
 	if utilModel, _ := appStore.GetSetting(context.Background(), "utility_model"); utilModel != "" && utilModel != "auto" {
 		for id, ac := range agentConfigs {
@@ -1074,8 +1062,11 @@ Key behaviors:
 			case agent.EventRunCompleted:
 				log.Printf("[%s] run completed", e.SessionID)
 				toolTracker.OnRunCompleted(e.SessionID)
-				// Check if a team lead just completed a synthesis run.
+				// Check if a team lead just completed a synthesis run (fast-path: cached lead IDs).
 				if workflowEngine != nil && e.AgentID != "" && e.SessionID != "" {
+					if _, isLead := leadAgentIDs.Load(e.AgentID); !isLead {
+						break // Not a lead — skip DB lookup entirely.
+					}
 					agentID := e.AgentID
 					sessID := e.SessionID
 					go func() {
@@ -1130,9 +1121,9 @@ Key behaviors:
 			if telegramEventForwarder != nil {
 				telegramEventForwarder(e)
 			}
-			// Relay: detect lead pause/resume for workflow forwarding.
-			if workflowRelay != nil {
-				workflowRelay.HandleLeadEvent(e)
+			// Persist-first event collection (handles tool calls from member loops).
+			if workflowCollector != nil {
+				workflowCollector.HandleEvent(e)
 			}
 		}, loopOpts...)
 
@@ -1154,9 +1145,9 @@ Key behaviors:
 			if sseBroadcast != nil {
 				sseBroadcast(e)
 			}
-			// Relay: forward member tool calls and task events to user's session.
-			if workflowRelay != nil {
-				workflowRelay.HandleMemberEvent(e)
+			// Persist task lifecycle events.
+			if workflowCollector != nil {
+				workflowCollector.HandleEvent(e)
 			}
 			// Chain: forward task events to the workflow monitor.
 			if workflowEngine != nil {
@@ -1176,43 +1167,13 @@ Key behaviors:
 				sseBroadcast(e)
 			}
 		})
-		workflowRelay = team.NewWorkflowRelay(toolTracker, appStore, func(e agent.Event) {
-			// Relay synthetic events to SSE so the web chat sees member activity.
+		// Persist-first event collector.
+		workflowCollector = team.NewWorkflowEventCollector(appStore, func(e agent.Event) {
 			if sseBroadcast != nil {
 				sseBroadcast(e)
 			}
-		})
-		workflowEngine.SetRelay(workflowRelay)
-		// Register member sessions with relay when executor launches tasks.
-		teamExec.SetOnTaskSession(func(taskID, teamID, sessionID, agentID string) {
-			if workflowRelay == nil {
-				return
-			}
-			// Look up task to find batch_id (workflow ID) and agent display name.
-			task, err := appStore.GetTask(context.Background(), taskID)
-			if err != nil || task == nil || task.BatchID == "" {
-				return // Not a workflow task.
-			}
-			wf, err := appStore.GetWorkflow(context.Background(), task.BatchID)
-			if err != nil || wf == nil {
-				return
-			}
-			// Get display name from agent config.
-			agentMu.Lock()
-			displayName := agentID
-			if fa, ok := fileAgents[agentID]; ok && fa.Identity.Name != "" {
-				displayName = fa.Identity.Name
-			}
-			agentMu.Unlock()
-
-			workflowRelay.RegisterMemberSession(sessionID, team.RelayEntry{
-				WorkflowID:        task.BatchID,
-				UserSessionID:     wf.SessionID,
-				TeamID:            teamID,
-				MemberAgentID:     agentID,
-				MemberDisplayName: displayName,
-			})
-		})
+		}, toolTracker)
+		workflowEngine.SetCollector(workflowCollector)
 		// Wire lead wakeup and start timeout ticker + recovery.
 		workflowEngine.Monitor().SetWakeLead(func(ctx context.Context, leadAgentID, teamID, systemMessage, sessionID string) {
 			if wakeLeadFn != nil {
@@ -1398,6 +1359,13 @@ Key behaviors:
 				}
 			}
 		}
+		// Update cached lead agent IDs for fast filtering.
+		// Clear old entries and add new ones.
+		leadAgentIDs.Range(func(key, _ any) bool { leadAgentIDs.Delete(key); return true })
+		for _, tc := range dbTeams {
+			leadAgentIDs.Store(tc.LeadID, true)
+		}
+
 		log.Printf("team reload: updated %d teams", len(dbTeams))
 	}
 
@@ -1645,7 +1613,7 @@ Key behaviors:
 		}
 		msg := canonical.Message{
 			Role:    "user",
-			Content: []canonical.Content{{Type: "text", Text: "[system:workflow]\n" + systemMessage}},
+			Content: []canonical.Content{{Type: "text", Text: "##wf:7a3f9e2b-4c1d-48a6-b5e0-3d2f1a8c9b7e##\n" + systemMessage}},
 		}
 		req := pipeline.RunRequest{
 			SessionID: sessID,
@@ -1811,6 +1779,12 @@ Key behaviors:
 		rpc.WithAudioBasePath(audioStoragePath),
 		rpc.WithLoopPool(loopPool),
 		rpc.WithTeamReload(reloadTeams),
+		rpc.WithWorkflowCancel(func(ctx context.Context, sessionID string) (bool, error) {
+			if workflowEngine == nil {
+				return false, nil
+			}
+			return workflowEngine.CancelActiveWorkflow(ctx, sessionID)
+		}),
 		rpc.WithWorkspace(f.workspace),
 	)
 	// Wire SSE broadcast now that rpcServer exists.

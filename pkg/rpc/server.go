@@ -76,8 +76,9 @@ type Server struct {
 	loginLimiter   *auth.LoginLimiter
 	pendingTOTP    map[string]pendingTOTPEntry // nonce → entry
 	loopPool       *agent.LoopPool
-	teamReloadFunc func() // Called after team create/update/delete to hot-reload team config.
-	workspace      string // Workspace root for file uploads.
+	teamReloadFunc      func()                                       // Called after team create/update/delete to hot-reload team config.
+	workflowCancelFunc  func(ctx context.Context, sessionID string) (bool, error) // Cancel active workflow for session.
+	workspace           string                                       // Workspace root for file uploads.
 }
 
 // wsConn is a minimal WebSocket connection using the standard upgrade.
@@ -276,6 +277,10 @@ func WithLoopPool(lp *agent.LoopPool) ServerOption {
 // The callback should reload team configs into the agent loop pool.
 func WithTeamReload(fn func()) ServerOption {
 	return func(s *Server) { s.teamReloadFunc = fn }
+}
+
+func WithWorkflowCancel(fn func(ctx context.Context, sessionID string) (bool, error)) ServerOption {
+	return func(s *Server) { s.workflowCancelFunc = fn }
 }
 
 // NewServer creates a new RPC server.
@@ -610,6 +615,9 @@ func (s *Server) EventHandler() agent.EventHandler {
 		if e.ToolCall != nil {
 			payload["tool_call"] = e.ToolCall
 		}
+		if e.ToolResult != nil {
+			payload["tool_result"] = e.ToolResult
+		}
 		if e.Consent != nil {
 			payload["consent"] = e.Consent
 			// Queue for polling — SSE may be missed.
@@ -738,6 +746,8 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 		return s.memoryList(ctx, req.Params)
 	case "chat.send":
 		return s.chatSend(ctx, req.Params)
+	case "workflow.cancel":
+		return s.workflowCancel(ctx, req.Params)
 	case "session.continue":
 		return s.sessionContinue(ctx, req.Params)
 	default:
@@ -934,6 +944,24 @@ func (s *Server) sessionsGet(ctx context.Context, params json.RawMessage) (any, 
 		result["agent_name"] = s.resolveAgentName(sess.AgentID)
 	}
 	return result, nil
+}
+
+func (s *Server) workflowCancel(ctx context.Context, params json.RawMessage) (any, error) {
+	var p struct {
+		SessionID string `json:"session_id"`
+	}
+	json.Unmarshal(params, &p)
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("session_id required")
+	}
+	if s.workflowCancelFunc == nil {
+		return map[string]any{"cancelled": false, "reason": "workflow engine not available"}, nil
+	}
+	cancelled, err := s.workflowCancelFunc(ctx, p.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"cancelled": cancelled}, nil
 }
 
 func (s *Server) sessionsMessages(ctx context.Context, params json.RawMessage) (any, error) {

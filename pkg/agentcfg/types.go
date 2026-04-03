@@ -233,22 +233,19 @@ func (cfg *AgentConfig) VoiceNameOrDefault() string {
 
 // ContextConfig controls the context management pipeline.
 type ContextConfig struct {
-	// Pipeline selects the context pipeline version: "v1" (default) or "v2".
-	Pipeline string `json:"pipeline,omitempty" yaml:"pipeline"`
-
-	// AggregateBudget is the max chars per tool_result message (v2 only, default: 20000).
+	// AggregateBudget is the max chars per tool_result message (default: 20000).
 	AggregateBudget int `json:"aggregate_budget,omitempty" yaml:"aggregate_budget"`
 
-	// SnipAge is iterations before snipping stale read-only results (v2 only, default: 8).
+	// SnipAge is iterations before snipping stale read-only results (default: 8).
 	SnipAge int `json:"snip_age,omitempty" yaml:"snip_age"`
 
-	// MicroCompactAge is iterations before micro-compacting (v2 only, default: 5).
+	// MicroCompactAge is iterations before micro-compacting (default: 5).
 	MicroCompactAge int `json:"microcompact_age,omitempty" yaml:"microcompact_age"`
 
-	// CollapseThreshold is the budget usage ratio to trigger collapse (v2 only, default: 0.7).
+	// CollapseThreshold is the budget usage ratio to trigger collapse (default: 0.7).
 	CollapseThreshold float64 `json:"collapse_threshold,omitempty" yaml:"collapse_threshold"`
 
-	// OverflowMaxMB is the per-session overflow disk cap in MB (v2 only, default: 50).
+	// OverflowMaxMB is the per-session overflow disk cap in MB (default: 50).
 	OverflowMaxMB int `json:"overflow_max_mb,omitempty" yaml:"overflow_max_mb"`
 }
 

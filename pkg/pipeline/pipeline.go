@@ -98,7 +98,7 @@ func (p *Pipeline) InjectConsent(nonce string, granted bool, tier string) error 
 		return fmt.Errorf("consent infrastructure not available")
 	}
 
-	pending, err := p.nonceManager.Validate(nonce)
+	_, err := p.nonceManager.Validate(nonce)
 	if err != nil {
 		return fmt.Errorf("invalid consent nonce: %w", err)
 	}
@@ -112,7 +112,10 @@ func (p *Pipeline) InjectConsent(nonce string, granted bool, tier string) error 
 	}
 	token := fmt.Sprintf("__consent__%s_%s_%s", nonce, action, tier)
 
-	p.loopPool.InjectTo(pending.AgentID, canonical.Message{
+	// Broadcast to ALL loops (including ephemeral task loops) since the agent
+	// may be running in an ephemeral loop not registered under its main ID.
+	// The consent token is nonce-specific, so only the waiting loop acts on it.
+	p.loopPool.InjectAll(canonical.Message{
 		Role:    "user",
 		Content: []canonical.Content{{Type: "text", Text: token}},
 	})
@@ -491,6 +494,10 @@ func (p *Pipeline) RunAgent(ctx context.Context, req RunRequest) {
 	// Append new messages.
 	allMsgs := append(history, req.Messages...)
 
+	// Filter workflow_activity content blocks — these are metadata for the
+	// tool timeline display, not conversation content. Must not enter LLM context.
+	allMsgs = filterWorkflowActivity(allMsgs)
+
 	// S5: Agent loop — select the right loop for this agent.
 	loop := p.loopPool.Get(req.AgentID)
 	if loop == nil {
@@ -695,4 +702,25 @@ func extractUserMessageID(meta map[string]string) string {
 		}
 	}
 	return ""
+}
+
+// filterWorkflowActivity strips workflow_activity content blocks from messages
+// before LLM submission. These are metadata for the tool timeline display —
+// they must not enter the LLM context window.
+func filterWorkflowActivity(msgs []canonical.Message) []canonical.Message {
+	var result []canonical.Message
+	for _, m := range msgs {
+		var filtered []canonical.Content
+		for _, c := range m.Content {
+			if c.Type != "workflow_activity" {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) > 0 {
+			m.Content = filtered
+			result = append(result, m)
+		}
+		// Messages with ONLY workflow_activity content are dropped entirely.
+	}
+	return result
 }
