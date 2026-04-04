@@ -63,6 +63,12 @@ func LoadAgent(dir string) (*AgentConfig, error) {
 			log.Printf("agentcfg: %s/memory.yaml parse error: %v (using defaults)", id, err)
 		}
 	}
+	// Default ReviewInterval for existing agents whose memory.yaml
+	// predates the background review feature. YAML unmarshal zeros
+	// fields not present in the file, overriding Defaults().
+	if cfg.Memory.ReviewInterval == 0 {
+		cfg.Memory.ReviewInterval = 10
+	}
 
 	// heartbeat.yaml — optional.
 	if data, err := os.ReadFile(filepath.Join(dir, "heartbeat.yaml")); err == nil {

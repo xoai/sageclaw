@@ -20,6 +20,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xoai/sageclaw/pkg/agent"
+	agentctx "github.com/xoai/sageclaw/pkg/agent/context"
 	"github.com/xoai/sageclaw/pkg/agentcfg"
 	"github.com/xoai/sageclaw/pkg/audio"
 	localbus "github.com/xoai/sageclaw/pkg/bus/local"
@@ -397,88 +398,61 @@ func run() error {
 	}
 
 	// --- Providers + Router ---
-	routes := make(map[provider.Tier]provider.Route)
+	// Discovery-first boot: no hardcoded model IDs.
+	// 1. Create providers from API keys
+	// 2. Create empty router, register providers
+	// 3. Load cached models from DB or discover synchronously (first boot)
+	// 4. Generate preset combos from discovered models
+	// 5. Load combos into router
+
+	ctx := context.Background()
+	router := provider.NewEmptyRouter()
 	var defaultProvider provider.Provider
 
-	// Provider registration order:
-	// Strong tier: Anthropic > OpenAI > Gemini > OpenRouter > GitHub Copilot
-	// Fast tier:   Gemini > OpenAI > Anthropic > OpenRouter (best cost/speed ratio)
-
-	// Track providers for fast tier — registered after all providers are loaded.
-	var (
-		apClient  provider.Provider
-		opClient  provider.Provider
-		gpClient  provider.Provider
-		orpClient provider.Provider
-	)
-
+	// Create and register providers from API keys.
 	if anthropicKey != "" {
 		ap := anthropic.NewClient(anthropicKey)
-		apClient = ap
-		routes[provider.TierStrong] = provider.Route{Provider: ap, Model: "claude-sonnet-4-20250514"}
+		router.RegisterProvider("anthropic", ap)
 		defaultProvider = ap
 		log.Println("provider: anthropic")
 	}
-
 	if openaiKey != "" {
 		op := openai.NewClient(openaiKey)
-		opClient = op
-		if _, exists := routes[provider.TierStrong]; !exists {
-			routes[provider.TierStrong] = provider.Route{Provider: op, Model: "gpt-4o"}
-		}
+		router.RegisterProvider("openai", op)
 		if defaultProvider == nil {
 			defaultProvider = op
 		}
 		log.Println("provider: openai")
 	}
-
-	// Gemini.
 	var geminiClient *gemini.Client
 	if geminiKey != "" {
 		geminiClient = gemini.NewClient(geminiKey)
-		gpClient = geminiClient
-		if _, exists := routes[provider.TierStrong]; !exists {
-			routes[provider.TierStrong] = provider.Route{Provider: geminiClient, Model: "gemini-2.0-flash"}
-		}
+		router.RegisterProvider("gemini", geminiClient)
 		if defaultProvider == nil {
 			defaultProvider = geminiClient
 		}
 		log.Println("provider: gemini")
 	}
-
-	// OpenRouter.
 	if openrouterKey != "" {
 		orp := openrouter.NewClient(openrouterKey)
-		orpClient = orp
-		if _, exists := routes[provider.TierStrong]; !exists {
-			routes[provider.TierStrong] = provider.Route{Provider: orp, Model: "anthropic/claude-sonnet-4-20250514"}
-		}
+		router.RegisterProvider("openrouter", orp)
 		if defaultProvider == nil {
 			defaultProvider = orp
 		}
 		log.Println("provider: openrouter")
-
-		_ = orpClient // used below for fast tier
 	}
-
-	// GitHub Copilot.
 	if githubToken != "" {
 		ghp := github.NewClient(githubToken)
-		if _, exists := routes[provider.TierStrong]; !exists {
-			routes[provider.TierStrong] = provider.Route{Provider: ghp, Model: "gpt-4o"}
-		}
+		router.RegisterProvider("github", ghp)
 		if defaultProvider == nil {
 			defaultProvider = ghp
 		}
 		log.Println("provider: github copilot")
 	}
-
-	// Ollama (local).
-	ctx := context.Background()
 	ollamaClient := ollama.New()
 	ollamaHealthy := ollamaClient.Healthy(ctx)
 	if ollamaHealthy {
-		routes[provider.TierLocal] = provider.Route{Provider: ollamaClient, Model: "llama3.2:3b"}
+		router.RegisterProvider("ollama", ollamaClient)
 		if defaultProvider == nil {
 			defaultProvider = ollamaClient
 		}
@@ -488,84 +462,116 @@ func run() error {
 		log.Println("provider: ollama not available")
 	}
 
-	// Fast tier: Gemini > OpenAI > Anthropic > OpenRouter.
-	// These models offer the best speed/cost ratio for the fast tier.
-	if _, exists := routes[provider.TierFast]; !exists && gpClient != nil {
-		routes[provider.TierFast] = provider.Route{Provider: gpClient, Model: "gemini-3-flash-preview"}
-	}
-	if _, exists := routes[provider.TierFast]; !exists && opClient != nil {
-		routes[provider.TierFast] = provider.Route{Provider: opClient, Model: "gpt-5.4-mini"}
-	}
-	if _, exists := routes[provider.TierFast]; !exists && apClient != nil {
-		routes[provider.TierFast] = provider.Route{Provider: apClient, Model: "claude-haiku-4-5-20251001"}
-	}
-	if _, exists := routes[provider.TierFast]; !exists && orpClient != nil {
-		routes[provider.TierFast] = provider.Route{Provider: orpClient, Model: "anthropic/claude-haiku-4-5-20251001"}
+	if defaultProvider == nil {
+		log.Println("warning: no providers available — dashboard will work but agent chat requires API keys or Ollama")
 	}
 
-	noProviders := defaultProvider == nil
-	if noProviders {
-		log.Println("warning: no providers available — dashboard will work but agent chat requires ANTHROPIC_API_KEY, OPENAI_API_KEY, or Ollama")
-	}
-
-	var router *provider.Router
-	if !noProviders {
-		fallback := provider.TierStrong
-		if _, ok := routes[fallback]; !ok {
-			for _, t := range []provider.Tier{provider.TierFast, provider.TierLocal} {
-				if _, ok := routes[t]; ok {
-					fallback = t
-					break
-				}
-			}
-		}
-		var err error
-		router, err = provider.NewRouter(routes, fallback)
-		if err != nil {
-			return fmt.Errorf("creating router: %w", err)
-		}
-		log.Printf("router: tiers=%v fallback=%s", router.Tiers(), router.Fallback())
-	} else {
-		// Create empty router so hot-reload from dashboard works (providers added via UI).
-		router = provider.NewEmptyRouter()
-		log.Println("router: empty (providers can be added via dashboard)")
-	}
-
-	// Register providers for combo resolution and model discovery.
-	// Must run for ALL routers — not just the empty router path.
-	if apClient != nil {
-		router.RegisterProvider("anthropic", apClient)
-	}
-	if opClient != nil {
-		router.RegisterProvider("openai", opClient)
-	}
-	if gpClient != nil {
-		router.RegisterProvider("gemini", gpClient)
-	}
-	if orpClient != nil {
-		router.RegisterProvider("openrouter", orpClient)
-	}
-	if ollamaHealthy {
-		router.RegisterProvider("ollama", ollamaClient)
-	}
-
-	// Seed preset combos once: if no presets exist in DB, generate from KnownModels
-	// with all providers (unconnected models are skipped at resolution time).
-	// Once seeded, users are free to edit them — they're never overwritten.
+	// Discovery-first boot: load cached models or discover synchronously.
 	{
+		allModels, _ := appStore.ListAllDiscoveredModels(ctx)
+		if len(allModels) == 0 && defaultProvider != nil {
+			// First boot: discover synchronously (~2-5s per provider).
+			log.Println("discovery: first boot — discovering models from providers...")
+			provMap := make(map[string]provider.Provider)
+			router.ForEachProvider(func(name string, p provider.Provider) {
+				provMap[name] = p
+			})
+			results := provider.DiscoverAll(ctx, provMap)
+			total := provider.TotalDiscovered(results)
+			if total > 0 {
+				// Cache discovered models in DB.
+				for _, r := range results {
+					if r.Err != nil || len(r.Models) == 0 {
+						continue
+					}
+					discovered := make([]store.DiscoveredModel, 0, len(r.Models))
+					for _, m := range r.Models {
+						discovered = append(discovered, store.DiscoveredModel{
+							ID: m.ID, Provider: m.Provider, ModelID: m.ModelID,
+							DisplayName: m.Name, ContextWindow: m.ContextWindow,
+							Capabilities: make(map[string]bool),
+						})
+					}
+					if sqlStore, ok := appStore.(*sqlite.Store); ok {
+						sqlStore.RefreshDiscoveredModels(ctx, r.Provider, discovered)
+					}
+				}
+				allModels, _ = appStore.ListAllDiscoveredModels(ctx)
+				log.Printf("discovery: found %d models total", total)
+			} else {
+				log.Println("discovery: WARNING — no models discovered. Check API keys in Settings > Providers.")
+			}
+		} else if len(allModels) > 0 {
+			// Subsequent boot: use cached models, refresh in background.
+			log.Printf("discovery: loaded %d cached models", len(allModels))
+			go func() {
+				provMap := make(map[string]provider.Provider)
+				router.ForEachProvider(func(name string, p provider.Provider) {
+					provMap[name] = p
+				})
+				results := provider.DiscoverAll(context.Background(), provMap)
+				total := provider.TotalDiscovered(results)
+				if total > 0 {
+					for _, r := range results {
+						if r.Err != nil || len(r.Models) == 0 {
+							continue
+						}
+						discovered := make([]store.DiscoveredModel, 0, len(r.Models))
+						for _, m := range r.Models {
+							discovered = append(discovered, store.DiscoveredModel{
+								ID: m.ID, Provider: m.Provider, ModelID: m.ModelID,
+								DisplayName: m.Name, ContextWindow: m.ContextWindow,
+								Capabilities: make(map[string]bool),
+							})
+						}
+						if sqlStore, ok := appStore.(*sqlite.Store); ok {
+							sqlStore.RefreshDiscoveredModels(context.Background(), r.Provider, discovered)
+						}
+					}
+					// Regenerate preset combos from refreshed data.
+					refreshedModels, _ := appStore.ListAllDiscoveredModels(context.Background())
+					if len(refreshedModels) > 0 {
+						dmi := make([]provider.DiscoveredModelInfo, 0, len(refreshedModels))
+						for _, m := range refreshedModels {
+							dmi = append(dmi, provider.DiscoveredModelInfo{
+								ModelID: m.ModelID, Provider: m.Provider,
+								OutputCost: m.OutputCost, ContextWindow: m.ContextWindow,
+							})
+						}
+						presets := provider.GeneratePresetCombos(dmi, router.ConnectedProviders())
+						router.SetPresetCombos(presets)
+						log.Printf("discovery: background refresh — %d models, %d preset combos updated", total, len(presets))
+					}
+				}
+			}()
+		}
+
+		// Generate preset combos from discovered models (or seed from SeedPricing on first boot with 0 models).
 		var presetCount int
 		appStore.DB().QueryRow(`SELECT COUNT(*) FROM combos WHERE is_preset = 1`).Scan(&presetCount)
-		if presetCount == 0 {
-			known := make([]provider.DiscoveredModelInfo, 0, len(provider.KnownModels))
-			for _, m := range provider.KnownModels {
-				known = append(known, provider.DiscoveredModelInfo{
-					ModelID:       m.ModelID,
-					Provider:      m.Provider,
-					OutputCost:    m.OutputCost,
-					ContextWindow: m.ContextWindow,
+
+		var dmi []provider.DiscoveredModelInfo
+		if len(allModels) > 0 {
+			dmi = make([]provider.DiscoveredModelInfo, 0, len(allModels))
+			for _, m := range allModels {
+				dmi = append(dmi, provider.DiscoveredModelInfo{
+					ModelID: m.ModelID, Provider: m.Provider,
+					OutputCost: m.OutputCost, ContextWindow: m.ContextWindow,
 				})
 			}
-			presets := provider.GeneratePresetCombos(known, nil) // nil = all providers
+		} else if presetCount == 0 {
+			// Fallback: seed from SeedPricing if discovery returned nothing.
+			dmi = make([]provider.DiscoveredModelInfo, 0, len(provider.SeedPricing))
+			for _, m := range provider.SeedPricing {
+				dmi = append(dmi, provider.DiscoveredModelInfo{
+					ModelID: m.ModelID, Provider: m.Provider,
+					OutputCost: m.OutputCost, ContextWindow: m.ContextWindow,
+				})
+			}
+		}
+
+		if len(dmi) > 0 && presetCount == 0 {
+			presets := provider.GeneratePresetCombos(dmi, nil)
 			for _, combo := range presets {
 				modelsJSON, err := json.Marshal(combo.Models)
 				if err != nil {
@@ -575,7 +581,7 @@ func run() error {
 					`INSERT OR IGNORE INTO combos (id, name, description, strategy, models, is_preset) VALUES (?, ?, ?, ?, ?, 1)`,
 					combo.Name, combo.Name, "Auto-generated preset", combo.Strategy, string(modelsJSON))
 			}
-			log.Printf("router: seeded %d preset combos from known models", len(presets))
+			log.Printf("router: seeded %d preset combos from discovered models", len(presets))
 		}
 	}
 
@@ -1042,6 +1048,61 @@ Key behaviors:
 	loopOpts = append(loopOpts, agent.WithStreamingExecutor(streamingExec))
 	log.Println("tools: streaming & parallel execution enabled")
 
+	// Load per-mechanism model settings from DB.
+	mechanismModels := map[string]string{}
+	for _, mech := range []string{"snip", "compact", "review"} {
+		if v, _ := appStore.GetSetting(context.Background(), "mechanism_model_"+mech); v != "" && v != "auto" {
+			mechanismModels[mech] = v
+		}
+	}
+	if len(mechanismModels) > 0 {
+		log.Printf("mechanism model overrides: %v", mechanismModels)
+	}
+
+	// Background review: proactive memory persistence every N user turns.
+	// Uses the first agent config's review interval, or default 10.
+	reviewInterval := 10
+	mainModel := "strong"
+	// Prefer "default" agent's config; fall back to any agent with explicit settings.
+	if ac, ok := fileAgents["default"]; ok {
+		if ac.Memory.ReviewInterval > 0 {
+			reviewInterval = ac.Memory.ReviewInterval
+		}
+		if ac.Identity.Model != "" {
+			mainModel = ac.Identity.Model
+		}
+	} else {
+		for _, ac := range fileAgents {
+			if ac.Memory.ReviewInterval > 0 {
+				reviewInterval = ac.Memory.ReviewInterval
+			}
+			if ac.Identity.Model != "" {
+				mainModel = ac.Identity.Model
+			}
+			break
+		}
+	}
+	if router != nil && reviewInterval > 0 {
+		// Resolve review model: mechanism override → legacy ReviewModel → utility → auto.
+		reviewModel := ""
+		if ac, ok := fileAgents["default"]; ok && ac.Memory.ReviewModel != "" {
+			reviewModel = ac.Memory.ReviewModel
+			log.Printf("memory.review_model is deprecated, use mechanism_model_review setting instead")
+		}
+		// Load utility model for fallback resolution.
+		utilModel, _ := appStore.GetSetting(context.Background(), "utility_model")
+		effectiveReview := agentctx.ResolveMechanismModel(mechanismModels, utilModel, "review")
+		if effectiveReview == "" && reviewModel != "" {
+			effectiveReview = reviewModel // Backwards compat: use legacy ReviewModel.
+		}
+		msgCaller := agentctx.NewMessageLLMCaller(router, mainModel, effectiveReview)
+		if msgCaller != nil {
+			reviewer := agent.NewBackgroundReviewer(memEngine, agent.LLMCaller(msgCaller), reviewInterval)
+			loopOpts = append(loopOpts, agent.WithBackgroundReviewer(reviewer))
+			log.Printf("background review: enabled (every %d turns)", reviewInterval)
+		}
+	}
+
 	// Load utility model setting and inject into all agent configs.
 	if utilModel, _ := appStore.GetSetting(context.Background(), "utility_model"); utilModel != "" && utilModel != "auto" {
 		for id, ac := range agentConfigs {
@@ -1049,6 +1110,14 @@ Key behaviors:
 			agentConfigs[id] = ac
 		}
 		log.Printf("utility model override: %s", utilModel)
+	}
+
+	// Inject mechanism models into all agent configs.
+	if len(mechanismModels) > 0 {
+		for id, ac := range agentConfigs {
+			ac.MechanismModels = mechanismModels
+			agentConfigs[id] = ac
+		}
 	}
 
 	// Always create LoopPool so hot-reload from dashboard works.
@@ -1652,7 +1721,7 @@ Key behaviors:
 	}
 	cronRunner.Start(startCtx)
 	modelRegistry.StartPricingRefresh(startCtx)
-	if noProviders {
+	if defaultProvider == nil {
 		log.Println("agent: no providers configured yet — add one via dashboard to start chatting")
 	}
 

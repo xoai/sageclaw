@@ -560,6 +560,7 @@ button { font-family: var(--sans); }
 .chat-send-btn:hover:not(:disabled) { opacity: 0.85; }
 .chat-send-btn:disabled { opacity: 0.3; cursor: default; }
 .chat-send-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.chat-stop-btn { background: var(--danger, #e53e3e); }
 .chat-icon-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 /* Agent select dropdown — styled native select */
 .chat-agent-select {

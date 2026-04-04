@@ -257,11 +257,18 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		key := channelKey(env.Channel, kind, env.ChatID, env.ThreadID, env.AgentID)
 
 		// Cache envelope metadata (e.g., telegram_message_id) for userMsgID threading.
-		if len(env.Metadata) > 0 {
-			p.metadataMu.Lock()
-			p.lastMetadata[key] = env.Metadata
-			p.metadataMu.Unlock()
+		p.metadataMu.Lock()
+		if p.lastMetadata[key] == nil {
+			p.lastMetadata[key] = make(map[string]string)
 		}
+		for k, v := range env.Metadata {
+			p.lastMetadata[key][k] = v
+		}
+		// Thread pre-resolved SessionID through debouncer via metadata.
+		if env.SessionID != "" {
+			p.lastMetadata[key]["_session_id"] = env.SessionID
+		}
+		p.metadataMu.Unlock()
 
 		for _, msg := range env.Messages {
 			// S2: Debouncer.
@@ -374,10 +381,26 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 		}
 	}
 
-	// Find or create session with kind and thread awareness.
+	// Extract envelope metadata early — needed for pre-resolved SessionID and userMsgID.
+	compositeKey := channelKey(channel, kind, chatID, threadID, requestAgentID)
+	p.metadataMu.Lock()
+	envMeta := p.lastMetadata[compositeKey]
+	delete(p.lastMetadata, compositeKey) // consumed
+	p.metadataMu.Unlock()
+
+	// Check for pre-resolved SessionID (set by RPC chatSend).
 	var sess *store.Session
 	var err error
+	if preSessionID := envMeta["_session_id"]; preSessionID != "" {
+		sess, err = p.store.GetSession(ctx, preSessionID)
+		if err == nil && sess != nil {
+			log.Printf("pipeline: using pre-resolved session %s", preSessionID)
+			goto sessionResolved
+		}
+		log.Printf("pipeline: pre-resolved session %s not found, falling back to find-or-create", preSessionID)
+	}
 
+	// Find or create session with kind and thread awareness.
 	if threadID != "" {
 		sess, err = p.store.FindSessionWithThread(ctx, channel, chatID, threadID)
 		if err != nil {
@@ -413,6 +436,7 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 		}
 	}
 
+sessionResolved:
 	// Update session label with agent display name if different from ID.
 	agentName := p.resolveAgentName(agentID)
 	if agentName != agentID {
@@ -421,11 +445,6 @@ func (p *Pipeline) routeToAgent(ctx context.Context, channel, chatID, kind, thre
 	}
 
 	// Thread user_message_id from envelope metadata into session metadata.
-	compositeKey := channelKey(channel, kind, chatID, threadID, requestAgentID)
-	p.metadataMu.Lock()
-	envMeta := p.lastMetadata[compositeKey]
-	delete(p.lastMetadata, compositeKey) // consumed
-	p.metadataMu.Unlock()
 	if envMeta != nil {
 		userMsgID := extractUserMessageID(envMeta)
 		if userMsgID != "" {

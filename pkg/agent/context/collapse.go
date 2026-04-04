@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/xoai/sageclaw/pkg/canonical"
@@ -16,7 +17,23 @@ const (
 - File paths that were read or modified
 - Errors encountered and how they were resolved
 - User preferences or instructions expressed
-Keep under 200 tokens. Start directly with the summary.`
+Keep under 300 tokens. Start directly with the summary.`
+
+	collapseSummaryIterativePrompt = `Summarize this conversation segment concisely. Preserve:
+- Decisions made and their rationale
+- File paths that were read or modified
+- Errors encountered and how they were resolved
+- User preferences or instructions expressed
+
+IMPORTANT: A previous summary is provided below. UPDATE it — merge
+new information into the summary. Do not discard previous content.
+Append new decisions, facts, and actions.
+
+[Previous summary]
+%s
+[End previous summary]
+
+Keep under 300 tokens. Start directly with the summary.`
 
 	// collapseProtectedTail is the number of recent messages never collapsed.
 	collapseProtectedTail = 5
@@ -118,8 +135,22 @@ func applyCollapse(
 		return history // Not enough messages to justify a collapse.
 	}
 
-	// Generate summary.
-	summary := generateCollapseSummary(ctx, toCollapse, llmCaller)
+	// Build previous summary from existing collapses for iterative carry-forward.
+	var previousSummary string
+	if len(existing) > 0 {
+		var parts []string
+		for _, e := range existing {
+			if e.Summary != "" {
+				parts = append(parts, e.Summary)
+			}
+		}
+		if len(parts) > 0 {
+			previousSummary = strings.Join(parts, "\n\n")
+		}
+	}
+
+	// Generate summary (iterative if previous exists).
+	summary := generateCollapseSummary(ctx, toCollapse, llmCaller, previousSummary)
 	if summary == "" {
 		return history // Summary generation failed — skip collapse.
 	}
@@ -229,7 +260,9 @@ func buildProtectedSet(history []canonical.Message) map[int]bool {
 }
 
 // generateCollapseSummary creates a summary of messages to collapse.
-func generateCollapseSummary(ctx context.Context, msgs []canonical.Message, llmCaller LLMCaller) string {
+// When previousSummary is non-empty, the prompt instructs the LLM to
+// merge new content with the existing summary (iterative carry-forward).
+func generateCollapseSummary(ctx context.Context, msgs []canonical.Message, llmCaller LLMCaller, previousSummary string) string {
 	if llmCaller == nil {
 		return ""
 	}
@@ -263,7 +296,12 @@ func generateCollapseSummary(ctx context.Context, msgs []canonical.Message, llmC
 		content = content[:8000] + "\n[truncated]"
 	}
 
-	summary, err := llmCaller(ctx, collapseSummaryPrompt, content, collapseTimeout)
+	prompt := collapseSummaryPrompt
+	if previousSummary != "" {
+		prompt = fmt.Sprintf(collapseSummaryIterativePrompt, previousSummary)
+	}
+
+	summary, err := llmCaller(ctx, prompt, content, collapseTimeout)
 	if err != nil {
 		log.Printf("[context-pipeline] collapse summary failed: %v", err)
 		return ""

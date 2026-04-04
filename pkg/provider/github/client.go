@@ -56,4 +56,11 @@ func (c *Client) Healthy(ctx context.Context) bool {
 	return resp.StatusCode == 200
 }
 
+// ListModels delegates to the inner OpenAI-compatible client.
+// GitHub Copilot's API returns available models (GPT-4o, Claude, etc.).
+func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
+	return c.inner.ListModels(ctx)
+}
+
 var _ provider.Provider = (*Client)(nil)
+var _ provider.ModelLister = (*Client)(nil)

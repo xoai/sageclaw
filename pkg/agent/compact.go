@@ -183,7 +183,13 @@ FACTS: [specific facts learned — file paths, error messages, values]
 ACTIONS: [what was done, what remains]
 CONTEXT: [user preferences, constraints, goals expressed]
 
-Stay under 500 tokens total. Omit sections with no content.
+IMPORTANT: If a previous SUMMARY with these sections exists in the
+messages (marked with "[Previous conversation summary]"), UPDATE it —
+merge new information into existing sections. Do not discard information
+from the previous summary. Append new decisions, facts, and actions.
+Update the CONTEXT section if user preferences have changed.
+
+Stay under 800 tokens total. Omit sections with no content.
 Be specific and factual. Write in past tense. Do not add commentary.`
 
 	response, err := cm.llmCall(sumCtx, systemPrompt, msgs)

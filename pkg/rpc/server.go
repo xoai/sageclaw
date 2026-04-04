@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"time"
@@ -62,6 +63,7 @@ type Server struct {
 	router         *provider.Router
 	chanMgr        *channel.Manager
 	mcpMgr         *mcp.Manager
+	eventStream    *EventStream
 	consentHandler func(nonce string, granted bool, tier string) error // Nonce-based consent callback.
 	consentStore         consentGrantStore                                  // For grant list/revoke endpoints.
 	pendingConsent []map[string]any                // Queued consent prompts awaiting response.
@@ -81,15 +83,20 @@ type Server struct {
 	workspace           string                                       // Workspace root for file uploads.
 }
 
-// wsConn is a minimal WebSocket connection using the standard upgrade.
+// wsConn is a per-client SSE connection with its own write mutex.
 type wsConn struct {
-	// Using http.ResponseWriter with Flusher for SSE-style communication.
-	// True WebSocket requires golang.org/x/net or a hand-rolled upgrade.
-	// For v0.3, we use Server-Sent Events as a simpler alternative
-	// that doesn't require any dependency.
+	mu      sync.Mutex
 	writer  http.ResponseWriter
 	flusher http.Flusher
 	done    chan struct{}
+}
+
+// write sends an SSE event with id: field, safe for concurrent use.
+func (c *wsConn) write(seq int64, data []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fmt.Fprintf(c.writer, "id: %d\ndata: %s\n\n", seq, data)
+	c.flusher.Flush()
 }
 
 // Config for the RPC server.
@@ -304,6 +311,7 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 		loginLimiter:   auth.NewLoginLimiter(),
 		pendingTOTP:    make(map[string]pendingTOTPEntry),
 		clients:        make(map[*wsConn]bool),
+		eventStream:    NewEventStream(1024),
 		startTime:      time.Now(),
 		providerHealth: map[string]string{},
 	}
@@ -374,6 +382,8 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("POST /api/settings/import", srv.authGuard(srv.handleSettingsImport))
 	mux.HandleFunc("GET /api/settings/utility-model", srv.authGuard(srv.handleGetUtilityModel))
 	mux.HandleFunc("PUT /api/settings/utility-model", srv.authGuard(srv.handleSetUtilityModel))
+	mux.HandleFunc("GET /api/settings/mechanism-models", srv.authGuard(srv.handleGetMechanismModels))
+	mux.HandleFunc("PUT /api/settings/mechanism-models", srv.authGuard(srv.handleSetMechanismModels))
 
 	// Cron (authenticated).
 	mux.HandleFunc("GET /api/cron", srv.authGuard(srv.handleCronList))
@@ -653,12 +663,28 @@ func (s *Server) EventHandler() agent.EventHandler {
 			s.pendingConsent = filtered
 			s.mu.Unlock()
 		}
-		data, _ := json.Marshal(payload)
-		s.broadcast(data)
+		s.emit(e.SessionID, string(e.Type), payload)
 	}
 }
 
-func (s *Server) broadcast(data []byte) {
+// emit marshals a payload, appends it to the ring buffer with a global
+// sequence number, and broadcasts to all SSE clients with an id: field.
+func (s *Server) emit(sessionID, eventType string, payload map[string]any) {
+	// Reserve seq first, then build wireData with event_seq included.
+	// Store wireData in ring buffer so catch-up replays are identical to live.
+	seq := s.eventStream.Reserve()
+
+	// Copy payload to avoid mutating caller's map.
+	wire := make(map[string]any, len(payload)+1)
+	for k, v := range payload {
+		wire[k] = v
+	}
+	wire["event_seq"] = seq
+	wireData, _ := json.Marshal(wire)
+
+	// Store in ring buffer — same data as live delivery.
+	s.eventStream.Store(seq, sessionID, eventType, wireData)
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for client := range s.clients {
@@ -667,9 +693,8 @@ func (s *Server) broadcast(data []byte) {
 			continue
 		default:
 		}
-		// SSE format.
-		fmt.Fprintf(client.writer, "data: %s\n\n", data)
-		client.flusher.Flush()
+		// SSE format with id: for Last-Event-ID support.
+		client.write(seq, wireData)
 	}
 }
 
@@ -687,9 +712,35 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	conn := &wsConn{writer: w, flusher: flusher, done: make(chan struct{})}
 
+	// Register client FIRST to prevent gap between catch-up and live events.
+	// Any events emitted during catch-up replay will also be sent live;
+	// the client deduplicates by seq (EventSource ignores duplicate id:).
 	s.mu.Lock()
 	s.clients[conn] = true
 	s.mu.Unlock()
+
+	// Catch-up: replay missed events from global ring buffer.
+	if lastID := r.Header.Get("Last-Event-ID"); lastID != "" {
+		afterSeq, _ := strconv.ParseInt(lastID, 10, 64)
+		events, ok := s.eventStream.After(afterSeq)
+		if !ok {
+			// Buffer expired — send sync event (client reloads from DB).
+			syncData, _ := json.Marshal(map[string]any{
+				"type": "sync", "reason": "events_expired",
+			})
+			conn.mu.Lock()
+			fmt.Fprintf(w, "data: %s\n\n", syncData)
+			flusher.Flush()
+			conn.mu.Unlock()
+		} else {
+			conn.mu.Lock()
+			for _, ev := range events {
+				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", ev.Seq, ev.Data)
+			}
+			flusher.Flush()
+			conn.mu.Unlock()
+		}
+	}
 
 	// Send heartbeat every 15s to prevent connection timeout.
 	go func() {
@@ -698,8 +749,10 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-ticker.C:
+				conn.mu.Lock()
 				fmt.Fprintf(w, ": heartbeat\n\n")
 				flusher.Flush()
+				conn.mu.Unlock()
 			case <-r.Context().Done():
 				return
 			case <-conn.done:
@@ -1013,7 +1066,9 @@ func (s *Server) chatSend(ctx context.Context, params json.RawMessage) (any, err
 		Text    string `json:"text"`
 		AgentID string `json:"agent_id"`
 	}
-	json.Unmarshal(params, &p)
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
 	if p.Channel == "" {
 		p.Channel = "web"
 	}
@@ -1044,21 +1099,55 @@ func (s *Server) chatSend(ctx context.Context, params json.RawMessage) (any, err
 		}
 	}
 
+	// Resolve session synchronously before publishing.
+	sessionID, err := s.resolveWebSession(ctx, p.Channel, p.ChatID, p.AgentID)
+	if err != nil {
+		return nil, fmt.Errorf("session resolution failed: %w", err)
+	}
+
 	envelope := bus.Envelope{
-		Channel: p.Channel,
-		ChatID:  p.ChatID,
+		Channel:   p.Channel,
+		ChatID:    p.ChatID,
+		SessionID: sessionID,
 		Messages: []canonical.Message{
 			{Role: "user", Content: []canonical.Content{{Type: "text", Text: p.Text}}},
 		},
 	}
 
-	// If agent_id specified, include it in metadata so the pipeline routes correctly.
+	// If agent_id specified, include it so the pipeline routes correctly.
 	if p.AgentID != "" {
 		envelope.AgentID = p.AgentID
 	}
 
 	s.msgBus.PublishInbound(ctx, envelope)
-	return map[string]string{"status": "sent"}, nil
+	return map[string]string{"status": "sent", "session_id": sessionID}, nil
+}
+
+// resolveWebSession finds or creates a session for web chat.
+func (s *Server) resolveWebSession(ctx context.Context, channel, chatID, agentID string) (string, error) {
+	sess, err := s.store.FindSessionWithKind(ctx, channel, chatID, "dm")
+	if err == nil && sess != nil {
+		// If agent changed, close old session and create new.
+		if agentID != "" && sess.AgentID != agentID {
+			s.store.DB().ExecContext(ctx,
+				`UPDATE sessions SET status = 'closed', updated_at = datetime('now') WHERE id = ?`,
+				sess.ID)
+		} else {
+			return sess.ID, nil
+		}
+	}
+
+	// Determine agent to use.
+	effectiveAgent := agentID
+	if effectiveAgent == "" {
+		effectiveAgent = "default"
+	}
+
+	newSess, err := s.store.CreateSessionWithKind(ctx, channel, chatID, effectiveAgent, "dm")
+	if err != nil {
+		return "", err
+	}
+	return newSess.ID, nil
 }
 
 // resolveAgentName looks up the display name for an agent ID.

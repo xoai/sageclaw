@@ -1,5 +1,7 @@
 import { h } from 'preact';
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'preact/hooks';
+import { createChatEngine } from '../lib/chatEngine';
+import { createSSEConnection } from '../lib/sseConnection';
 import { SessionPanel } from '../components/SessionPanel';
 import { ToolTimeline } from '../components/ToolTimeline';
 import { ExampleCards } from '../components/ExampleCards';
@@ -105,14 +107,12 @@ export function Chat() {
   const [attachedFiles, setAttachedFiles] = useState([]);  // [{file, name, size, preview?}]
   const bottomRef = useRef(null);
   const messagesContainerRef = useRef(null);
-  const timerRef = useRef(null);
-  const sseRef = useRef(null);
-  const watcherRef = useRef(null);
   const sessionRef = useRef(null); // Current session ID — always up-to-date for SSE filter.
   const isNearBottomRef = useRef(true); // Tracks if user is near bottom for smart scroll.
   const initialScrollDone = useRef(false);
   const pendingSend = useRef(false); // Auto-send after homepage → chat transition
   const chatTextareaRef = useRef(null);
+  const engineRef = useRef(null);
 
   const loadSessions = useCallback(async () => {
     setListLoading(true);
@@ -172,16 +172,6 @@ export function Chat() {
     }
 
     return { messages: chatMessages, dbToolSteps };
-  }, []);
-
-  const findWebSession = useCallback(async (agentId) => {
-    const { data: sessions } = await callRPC('sessions.list', { limit: 50 });
-    if (!sessions) return null;
-    const chatId = chatIdRef.current;
-    const match = agentId
-      ? sessions.find(s => s.channel === 'web' && s.chat_id === chatId && s.agent_id === agentId)
-      : sessions.find(s => s.channel === 'web' && s.chat_id === chatId);
-    return match ? match.id : null;
   }, []);
 
   // Load agents eagerly so examples are available in homepage mode.
@@ -261,15 +251,105 @@ export function Chat() {
     window.addEventListener('keydown', handleGlobalKeys);
 
     return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-      if (watcherRef.current) clearTimeout(watcherRef.current);
-      if (sseRef.current) sseRef.current.close();
       window.removeEventListener('popstate', handleNavHome);
       window.removeEventListener('keydown', handleGlobalKeys);
       // Clean up file preview object URLs.
       attachedFiles.forEach(af => { if (af.preview) URL.revokeObjectURL(af.preview); });
     };
   }, [rightPanel]);
+
+  // Chat engine: state machine for send/receive lifecycle.
+  useEffect(() => {
+    const engine = createChatEngine({
+      onStateChange: (s) => {
+        if (s === 'COMPLETING') {
+          // First run.completed — response is visible. Re-enable input,
+          // finalize streaming text as a message, collapse tool timeline.
+          setSending(false);
+          setStreaming(prev => {
+            if (prev) {
+              setMessages(msgs => [...msgs, { role: 'assistant', text: prev }]);
+            }
+            return '';
+          });
+          setToolCollapsed(true);
+          loadSessions();
+        } else if (s === 'STREAMING') {
+          // Entered or re-entered streaming (synthesis). Keep input enabled
+          // but prepare for new streaming text.
+          setStreaming('');
+        } else if (s === 'IDLE') {
+          setSending(false);
+          setStreaming('');
+          loadSessions();
+        } else if (s === 'ERROR') {
+          setSending(false);
+        } else {
+          // SENDING, CONSENT
+          setSending(true);
+        }
+      },
+      onStreamChunk: (text) => {
+        setStreaming(prev => prev + text);
+        // Auto-scroll during streaming.
+        if (isNearBottomRef.current && messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+        }
+      },
+      onToolStep: (step) => {
+        if (step.type === 'tool.result') {
+          setToolSteps(prev => prev.map(s =>
+            s.id === step.id ? { ...s, status: 'done' } : s
+          ));
+        } else {
+          setToolSteps(prev => [...prev, step]);
+        }
+      },
+      onMessages: (msgs, dbSteps) => {
+        setMessages(msgs);
+        setStreaming('');
+        if (dbSteps && dbSteps.length > 0) {
+          setToolSteps(dbSteps.map(s => ({ ...s, status: 'done' })));
+        } else {
+          setToolSteps([]);
+        }
+        setToolCollapsed(true);
+        loadSessions();
+      },
+      onConsent: () => {
+        setStreaming('Needs your approval to continue...');
+      },
+      onError: (err) => {
+        console.error('chatEngine error:', err);
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          text: `Something went wrong: ${err}. Try sending your message again.`,
+        }]);
+        setSending(false);
+      },
+      rpc: callRPC,
+      loadMessages,
+    });
+    engineRef.current = engine;
+    return () => engine.destroy();
+  }, []);
+
+  // Persistent SSE connection.
+  useEffect(() => {
+    const sse = createSSEConnection('/events', {
+      onEvent: (event) => {
+        if (engineRef.current) {
+          engineRef.current.processEvent(event);
+        }
+      },
+      onStatusChange: (status) => {
+        if (engineRef.current) {
+          engineRef.current.setSseStatus(status);
+        }
+      },
+    });
+    return () => sse.close();
+  }, []);
 
   // Auto-send when transitioning from homepage to chat with pending input.
   useEffect(() => {
@@ -352,7 +432,8 @@ export function Chat() {
     setSelectedAgentName(agent.name || agent.id);
     setMessages([]);
     if (!pendingSend.current) setInput(''); // Preserve input for auto-send from homepage
-    setSending(false); sendingRef.current = false;
+    setSending(false);
+    if (engineRef.current) engineRef.current.destroy();
     setStreaming('');
     setRightPanel('chat');
     setMobileView('conversation');
@@ -425,13 +506,25 @@ export function Chat() {
 
   // --- Chat Actions ---
 
-  const sendingRef = useRef(false); // Guard against async double-submit
+  const stopAgent = async () => {
+    const sid = sessionRef.current || engineRef.current?.getSessionId();
+    if (sid) {
+      await callRPC('workflow.cancel', { session_id: sid });
+    }
+    if (engineRef.current) engineRef.current.destroy();
+    setSending(false);
+    setStreaming('');
+    // Reload messages from DB to get whatever was completed.
+    if (sid) {
+      const result = await loadMessages(sid);
+      setMessages(result.messages);
+    }
+  };
 
   const send = async () => {
     const text = input.trim();
     if (!text && attachedFiles.length === 0) return;
-    if (sending || sendingRef.current) return;
-    sendingRef.current = true;
+    if (sending) return;
 
     // Upload files first if any attached.
     let fileRefs = [];
@@ -448,243 +541,23 @@ export function Chat() {
     }
 
     setInput('');
-    if (chatTextareaRef.current) chatTextareaRef.current.style.height = 'auto'; // Reset textarea height
+    if (chatTextareaRef.current) chatTextareaRef.current.style.height = 'auto';
     setMessages(prev => [...prev, { role: 'user', text: fullText }]);
-    setSending(true);
     setStreaming('');
     setToolSteps([]);
     setToolCollapsed(false);
 
-    let streamText = '';
-    let gotChunks = false;
-    let completed = false;
-    let messageCountAtSend = 0; // Track message count to detect async arrivals.
-
-    if (sseRef.current) sseRef.current.close();
-
-    const es = new EventSource('/events', { withCredentials: true });
-    sseRef.current = es;
-
-    // Recovery watcher: polls for new messages when SSE disconnects mid-workflow.
-    if (watcherRef.current) { clearTimeout(watcherRef.current); watcherRef.current = null; }
-    const startWatcher = (sessionId, knownCount) => {
-      let watchAttempts = 0;
-      const watch = async () => {
-        watchAttempts++;
-        if (watchAttempts > 150) return; // 5 min max (150 × 2s).
-        try {
-          const r = await loadMessages(sessionId);
-          if (r.messages.length > knownCount) {
-            setMessages(r.messages);
-            // Merge: DB steps are authoritative, keep SSE-only steps.
-            if (r.dbToolSteps.length > 0) {
-              setToolSteps(prev => {
-                const dbIds = new Set(r.dbToolSteps.map(s => s.id));
-                const sseOnly = prev.filter(s => !dbIds.has(s.id));
-                return [...r.dbToolSteps, ...sseOnly];
-              });
-              setToolCollapsed(true);
-            }
-            knownCount = r.messages.length;
-            loadSessions();
-            // New messages arrived (likely synthesis) — mark all tools as done.
-            setToolSteps(prev => prev.map(s =>
-              s.status === 'running' ? { ...s, status: 'done' } : s
-            ));
-            setToolCollapsed(true);
-          }
-        } catch {}
-        watcherRef.current = setTimeout(watch, 2000);
-      };
-      watcherRef.current = setTimeout(watch, 3000); // First check after 3s.
-    };
-
-    es.onmessage = (e) => {
-      try {
-        const event = JSON.parse(e.data);
-
-        // Session-scope filtering: skip events from other sessions.
-        // Uses sessionRef (always current) instead of closure-captured selectedSession.
-        if (event.session_id && sessionRef.current && event.session_id !== sessionRef.current) {
-          return;
+    const engine = engineRef.current;
+    if (engine) {
+      engine.setSession(sessionRef.current);
+      engine.send(fullText, selectedAgent, chatIdRef.current).then(() => {
+        // Update session ref from engine's resolved session_id.
+        const sid = engine.getSessionId();
+        if (sid && !selectedSession) {
+          setSelectedSession(sid);
+          sessionRef.current = sid;
         }
-
-        if (event.type === 'chunk' && event.text) {
-          gotChunks = true;
-          streamText += event.text;
-          setStreaming(streamText);
-          // Auto-scroll during synthesis streaming (after first run.completed).
-          if (completed && messagesContainerRef.current) {
-            messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-          }
-        }
-
-        if (event.type === 'tool.call') {
-          gotChunks = true;
-          const toolCall = event.tool_call || {};
-          let input = null;
-          try {
-            if (toolCall.input) input = typeof toolCall.input === 'string' ? JSON.parse(toolCall.input) : toolCall.input;
-          } catch {}
-          setToolSteps(prev => [...prev, {
-            id: toolCall.id || 'tc_' + Date.now(),
-            name: toolCall.name || 'unknown',
-            input,
-            status: 'running',
-            startedAt: Date.now(),
-          }]);
-        }
-
-        if (event.type === 'tool.result') {
-          gotChunks = true;
-          const toolResult = event.tool_result || {};
-          setToolSteps(prev => prev.map(s =>
-            s.id === toolResult.tool_call_id
-              ? { ...s, status: 'done' }
-              : s
-          ));
-        }
-
-        if (event.type === 'consent.needed' && event.consent) {
-          gotChunks = true;
-          setStreaming('Needs your approval to continue...');
-        }
-
-        if (event.type === 'consent.result') {
-          setStreaming('');
-        }
-
-        if (event.type === 'run.completed') {
-          if (!completed) {
-            // First run.completed: show initial response, keep SSE OPEN for async events.
-            completed = true;
-
-            // Don't force-complete all tools here — member tools may still be arriving.
-            // Only collapse the timeline. Individual tool.result events handle completion.
-            setToolCollapsed(true);
-
-            if (gotChunks && streamText) {
-              setStreaming('');
-              setMessages(prev => [...prev, { role: 'assistant', text: streamText }]);
-            } else {
-              startPoll();
-            }
-            setSending(false); sendingRef.current = false;
-            loadSessions();
-
-            // Reset stream state for the next run (synthesis).
-            streamText = '';
-            gotChunks = false;
-          } else {
-            // Subsequent run.completed (e.g., synthesis): finalize.
-            // Force-complete ALL tools and collapse timeline.
-            setToolSteps(prev => {
-              const updated = prev.map(s =>
-                s.status === 'running' ? { ...s, status: 'done' } : s
-              );
-              return updated;
-            });
-            setToolCollapsed(true);
-
-            if (gotChunks && streamText) {
-              setStreaming('');
-              setMessages(prev => [...prev, { role: 'assistant', text: streamText }]);
-            } else {
-              // Synthesis may have stored in DB without streaming — poll once.
-              findWebSession(selectedAgent).then(sid => {
-                if (sid) loadMessages(sid).then(r => {
-                  setMessages(r.messages);
-                  if (r.dbToolSteps.length > 0) {
-                    setToolSteps(r.dbToolSteps.map(s => ({ ...s, status: 'done' })));
-                  } else {
-                    setToolSteps(prev => prev.map(s =>
-                      s.status === 'running' ? { ...s, status: 'done' } : s
-                    ));
-                  }
-                  setToolCollapsed(true);
-                });
-              });
-            }
-            loadSessions();
-
-            // Reset for potential further runs.
-            streamText = '';
-            gotChunks = false;
-          }
-        }
-      } catch {}
-    };
-
-    es.onerror = () => {
-      es.close();
-      sseRef.current = null;
-      if (!completed && !gotChunks) {
-        startPoll();
-      } else {
-        // SSE disconnected after initial response — start watcher for async results.
-        findWebSession(selectedAgent).then(sid => {
-          if (sid) loadMessages(sid).then(r => startWatcher(sid, r.messages.length));
-        });
-      }
-    };
-
-    const { error } = await callRPC('chat.send', { text: fullText, agent_id: selectedAgent || undefined, chat_id: chatIdRef.current });
-    if (error) {
-      es.close();
-      sseRef.current = null;
-      setMessages(prev => [...prev, { role: 'assistant', text: `Something went wrong: ${error}. Try sending your message again.` }]);
-      setSending(false); sendingRef.current = false;
-      setStreaming('');
-      return;
-    }
-
-    const sseTimeout = setTimeout(() => {
-      if (!gotChunks && !completed) {
-        es.close();
-        sseRef.current = null;
-        startPoll();
-      }
-    }, 120000);
-
-    const origClose = es.close.bind(es);
-    es.close = () => { clearTimeout(sseTimeout); origClose(); };
-
-    function startPoll() {
-      let attempts = 0;
-      const poll = async () => {
-        attempts++;
-        if (attempts > 40) {
-          setMessages(prev => [...prev, {
-            role: 'assistant',
-            text: 'This is taking longer than expected. The agent may still be working \u2014 try refreshing in a moment.'
-          }]);
-          setSending(false); sendingRef.current = false;
-          setStreaming('');
-          return;
-        }
-
-        const sid = await findWebSession(selectedAgent);
-        if (!sid) {
-          timerRef.current = setTimeout(poll, 1500);
-          return;
-        }
-
-        if (!selectedSession) { setSelectedSession(sid); sessionRef.current = sid; }
-
-        const r = await loadMessages(sid);
-        if (r.messages.length > 0 && r.messages[r.messages.length - 1].role === 'assistant') {
-          setMessages(r.messages);
-          if (r.dbToolSteps.length > 0) { setToolSteps(r.dbToolSteps); setToolCollapsed(true); }
-          setSending(false); sendingRef.current = false;
-          setStreaming('');
-          loadSessions();
-          return;
-        }
-
-        timerRef.current = setTimeout(poll, 1500);
-      };
-
-      timerRef.current = setTimeout(poll, 2000);
+      });
     }
   };
 
@@ -1034,11 +907,10 @@ export function Chat() {
 
               <textarea
                 ref={chatTextareaRef}
-                placeholder={`Message ${selectedAgentName}...`}
+                placeholder={sending ? 'Agent is working... click stop to cancel' : `Message ${selectedAgentName}...`}
                 value={input}
                 onInput={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
                 onKeyDown={handleKeyDown}
-                disabled={sending}
                 rows={1}
                 aria-label={`Message ${selectedAgentName}`}
               />
@@ -1052,9 +924,15 @@ export function Chat() {
                     <IconStore width={16} height={16} />
                   </a>
                 </div>
-                <button class="chat-send-btn" onClick={send} disabled={sending || (!input.trim() && attachedFiles.length === 0)} title="Send" aria-label="Send message">
-                  {sending ? <IconLoader width={16} height={16} class="spin" /> : <IconArrowUp width={18} height={18} />}
-                </button>
+                {sending ? (
+                  <button class="chat-send-btn chat-stop-btn" onClick={stopAgent} title="Stop agent" aria-label="Stop agent">
+                    <IconX width={16} height={16} />
+                  </button>
+                ) : (
+                  <button class="chat-send-btn" onClick={send} disabled={!input.trim() && attachedFiles.length === 0} title="Send" aria-label="Send message">
+                    <IconArrowUp width={18} height={18} />
+                  </button>
+                )}
               </div>
             </div>
           </div>

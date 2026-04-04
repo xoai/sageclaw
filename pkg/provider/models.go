@@ -1,5 +1,7 @@
 package provider
 
+import "sync"
+
 // ModelInfo describes a model available from a provider.
 type ModelInfo struct {
 	ID            string  `json:"id"`             // e.g. "anthropic/claude-sonnet-4-20250514"
@@ -23,9 +25,12 @@ func (m *ModelInfo) EffectiveThinkingCost() float64 {
 	return m.OutputCost
 }
 
-// KnownModels is the registry of well-known models across all providers.
+// SeedPricing is the baseline pricing data for well-known models.
+// Used ONLY for: (1) initial pricing seed before OpenRouter refresh,
+// (2) pricing enrichment during model discovery, (3) OpenRouter fuzzy matching.
+// NOT used for: model routing, combo generation, capability detection.
 // Prices as of March 2026.
-var KnownModels = []ModelInfo{
+var SeedPricing = []ModelInfo{
 	// --- Anthropic ---
 	{ID: "anthropic/claude-opus-4-20250514", Provider: "anthropic", ModelID: "claude-opus-4-20250514", Name: "Claude Opus 4", Tier: "reasoning", InputCost: 15.0, OutputCost: 75.0, CacheCost: 1.5, ContextWindow: 200000},
 	{ID: "anthropic/claude-sonnet-4-20250514", Provider: "anthropic", ModelID: "claude-sonnet-4-20250514", Name: "Claude Sonnet 4", Tier: "strong", InputCost: 3.0, OutputCost: 15.0, CacheCost: 0.3, ContextWindow: 200000},
@@ -68,11 +73,43 @@ var KnownModels = []ModelInfo{
 	{ID: "ollama/gemma2", Provider: "ollama", ModelID: "gemma2", Name: "Gemma 2", Tier: "local", InputCost: 0, OutputCost: 0, ContextWindow: 8192},
 }
 
-// ModelsForProvider returns models available for a specific provider.
-func ModelsForProvider(provider string) []ModelInfo {
+// KnownModels is a deprecated alias for SeedPricing.
+// Use SeedPricing directly for new code.
+var KnownModels = SeedPricing
+
+// seedPricingMap provides O(1) lookup of seed pricing by model ID.
+// Initialized once via sync.Once for thread safety.
+var (
+	seedPricingMap  map[string]*ModelInfo
+	seedPricingOnce sync.Once
+)
+
+// GetSeedPricing looks up seed pricing by model ID (full or raw).
+// Thread-safe. Used during discovery enrichment to avoid querying
+// discovered_models (which is being populated at the same time).
+func GetSeedPricing(modelID string) *ModelInfo {
+	seedPricingOnce.Do(func() {
+		seedPricingMap = make(map[string]*ModelInfo, len(SeedPricing)*2)
+		for i := range SeedPricing {
+			// First match wins (matches old FindModel linear scan behavior).
+			// Prevents free providers (GitHub) from overwriting paid entries
+			// that share the same ModelID (e.g., "claude-sonnet-4-20250514").
+			if _, exists := seedPricingMap[SeedPricing[i].ID]; !exists {
+				seedPricingMap[SeedPricing[i].ID] = &SeedPricing[i]
+			}
+			if _, exists := seedPricingMap[SeedPricing[i].ModelID]; !exists {
+				seedPricingMap[SeedPricing[i].ModelID] = &SeedPricing[i]
+			}
+		}
+	})
+	return seedPricingMap[modelID]
+}
+
+// ModelsForProvider returns seed models available for a specific provider.
+func ModelsForProvider(providerName string) []ModelInfo {
 	var result []ModelInfo
-	for _, m := range KnownModels {
-		if m.Provider == provider {
+	for _, m := range SeedPricing {
+		if m.Provider == providerName {
 			result = append(result, m)
 		}
 	}
@@ -81,12 +118,8 @@ func ModelsForProvider(provider string) []ModelInfo {
 
 // FindModel looks up a model by its full ID (e.g. "anthropic/claude-sonnet-4-20250514")
 // or raw model ID (e.g. "claude-sonnet-4-20250514").
+// Currently searches SeedPricing. Will be replaced by discovered_models query in future.
 func FindModel(id string) *ModelInfo {
-	for _, m := range KnownModels {
-		if m.ID == id || m.ModelID == id {
-			return &m
-		}
-	}
-	return nil
+	return GetSeedPricing(id)
 }
 

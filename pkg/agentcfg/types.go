@@ -152,6 +152,8 @@ type MemoryConfig struct {
 	RetentionDays int      `json:"retention_days" yaml:"retention_days"` // 0 = forever
 	SearchLimit   int      `json:"search_limit" yaml:"search_limit"`
 	TagsBoost     []string `json:"tags_boost" yaml:"tags_boost"`
+	ReviewInterval int    `json:"review_interval" yaml:"review_interval"` // User turns between background reviews. 0 = disabled, default 10.
+	ReviewModel    string `json:"review_model,omitempty" yaml:"review_model"` // Model ID or tier for review. "" = auto (cheap).
 }
 
 // HeartbeatConfig defines proactive schedules (heartbeat.yaml).
@@ -247,6 +249,11 @@ type ContextConfig struct {
 
 	// OverflowMaxMB is the per-session overflow disk cap in MB (default: 50).
 	OverflowMaxMB int `json:"overflow_max_mb,omitempty" yaml:"overflow_max_mb"`
+
+	// MechanismModels overrides the global utility model for specific mechanisms.
+	// Keys: "snip", "compact", "review". Values: model ID or "" (inherit from
+	// global utility_model setting, then auto-resolve).
+	MechanismModels map[string]string `json:"mechanism_models,omitempty" yaml:"mechanism_models"`
 }
 
 // Defaults returns an AgentConfig with sensible defaults.
@@ -262,9 +269,10 @@ func Defaults(id string) AgentConfig {
 			MaxIterations: 25,
 		},
 		Memory: MemoryConfig{
-			Scope:       "project",
-			AutoStore:   true,
-			SearchLimit: 10,
+			Scope:          "project",
+			AutoStore:      true,
+			SearchLimit:    10,
+			ReviewInterval: 10,
 		},
 	}
 }

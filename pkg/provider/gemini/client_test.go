@@ -210,7 +210,7 @@ data: [DONE]
 	}))
 	defer srv.Close()
 
-	client := NewClient("test-key", WithBaseURL(srv.URL))
+	client := NewClient("test-key", WithBaseURL(srv.URL), WithModel("gemini-2.5-flash"))
 	req := &canonical.Request{
 		Messages: []canonical.Message{
 			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "search both"}}},
@@ -255,7 +255,7 @@ data: [DONE]
 	}))
 	defer srv.Close()
 
-	client := NewClient("test-key", WithBaseURL(srv.URL))
+	client := NewClient("test-key", WithBaseURL(srv.URL), WithModel("gemini-2.5-flash"))
 	req := &canonical.Request{
 		Messages: []canonical.Message{
 			{Role: "user", Content: []canonical.Content{{Type: "text", Text: "hi"}}},

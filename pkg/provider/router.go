@@ -88,6 +88,9 @@ func (r *Router) ChatWithFallback(ctx context.Context, tier Tier, req *canonical
 		return nil, fmt.Errorf("no providers configured — add one via Settings > AI Models")
 	}
 	primary, primaryModel := r.Resolve(tier)
+	if primary == nil {
+		return nil, fmt.Errorf("no provider available for tier %s", tier)
+	}
 	req.Model = primaryModel
 
 	resp, err := primary.Chat(ctx, req)
@@ -96,22 +99,20 @@ func (r *Router) ChatWithFallback(ctx context.Context, tier Tier, req *canonical
 	}
 
 	// Primary failed — try fallback if different.
-	r.mu.RLock()
-	fallbackRoute := r.routes[r.fallback]
-	r.mu.RUnlock()
-	if fallbackRoute.Provider.Name() == primary.Name() && fallbackRoute.Model == primaryModel {
+	fallbackProv, fallbackModel := r.Resolve(r.fallback)
+	if fallbackProv == nil || (fallbackProv.Name() == primary.Name() && fallbackModel == primaryModel) {
 		return nil, fmt.Errorf("provider %s failed (no different fallback): %w", primary.Name(), err)
 	}
 
 	log.Printf("router: %s/%s failed (%v), falling back to %s/%s",
-		primary.Name(), primaryModel, err, fallbackRoute.Provider.Name(), fallbackRoute.Model)
+		primary.Name(), primaryModel, err, fallbackProv.Name(), fallbackModel)
 
 	// Bridge the context — truncate if the fallback model has a smaller window.
-	result := r.bridge.Transfer(req.Messages, primaryModel, fallbackRoute.Model)
+	result := r.bridge.Transfer(req.Messages, primaryModel, fallbackModel)
 	req.Messages = result.Messages
-	req.Model = fallbackRoute.Model
+	req.Model = fallbackModel
 
-	return fallbackRoute.Provider.Chat(ctx, req)
+	return fallbackProv.Chat(ctx, req)
 }
 
 // ChatStreamWithFallback is the streaming version of ChatWithFallback.
@@ -120,6 +121,9 @@ func (r *Router) ChatStreamWithFallback(ctx context.Context, tier Tier, req *can
 		return nil, fmt.Errorf("no providers configured — add one via Settings > AI Models")
 	}
 	primary, primaryModel := r.Resolve(tier)
+	if primary == nil {
+		return nil, fmt.Errorf("no provider available for tier %s", tier)
+	}
 	req.Model = primaryModel
 
 	stream, err := primary.ChatStream(ctx, req)
@@ -128,21 +132,19 @@ func (r *Router) ChatStreamWithFallback(ctx context.Context, tier Tier, req *can
 	}
 
 	// Primary failed — try fallback.
-	r.mu.RLock()
-	fallbackRoute := r.routes[r.fallback]
-	r.mu.RUnlock()
-	if fallbackRoute.Provider.Name() == primary.Name() && fallbackRoute.Model == primaryModel {
+	fallbackProv, fallbackModel := r.Resolve(r.fallback)
+	if fallbackProv == nil || (fallbackProv.Name() == primary.Name() && fallbackModel == primaryModel) {
 		return nil, fmt.Errorf("provider %s failed (no different fallback): %w", primary.Name(), err)
 	}
 
 	log.Printf("router: %s/%s stream failed (%v), falling back to %s/%s",
-		primary.Name(), primaryModel, err, fallbackRoute.Provider.Name(), fallbackRoute.Model)
+		primary.Name(), primaryModel, err, fallbackProv.Name(), fallbackModel)
 
-	result := r.bridge.Transfer(req.Messages, primaryModel, fallbackRoute.Model)
+	result := r.bridge.Transfer(req.Messages, primaryModel, fallbackModel)
 	req.Messages = result.Messages
-	req.Model = fallbackRoute.Model
+	req.Model = fallbackModel
 
-	return fallbackRoute.Provider.ChatStream(ctx, req)
+	return fallbackProv.ChatStream(ctx, req)
 }
 
 // Bridge returns the router's context bridge for direct use.
@@ -168,37 +170,57 @@ func (r *Router) SetDefault(provider Provider) {
 }
 
 // Resolve returns the provider and model for a given tier.
-// Checks preset/user combos first (tier name as combo key), then falls back
-// to the static routes map, then to the fallback tier.
+// Resolution order: combo[tier] → routes[tier] → combo[fallback] → routes[fallback] → nil.
+// Returns (nil, "") if no provider is available for the tier or its fallback.
 func (r *Router) Resolve(tier Tier) (Provider, string) {
-	// Try combo resolution first (preset combos use tier names as keys).
+	// 1. Try combo for the requested tier.
 	if p, model, err := r.ResolveCombo(string(tier)); err == nil {
 		return p, model
 	}
 
-	// Fallback to static routes.
+	// 2. Try static route for the requested tier.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	route, ok := r.routes[tier]
-	if !ok {
-		route = r.routes[r.fallback]
+	r.mu.RUnlock()
+	if ok {
+		return route.Provider, route.Model
 	}
-	return route.Provider, route.Model
+
+	// 3. Try combo for the fallback tier (skip if same as requested).
+	if tier != r.fallback {
+		if p, model, err := r.ResolveCombo(string(r.fallback)); err == nil {
+			return p, model
+		}
+	}
+
+	// 4. Try static route for the fallback tier.
+	r.mu.RLock()
+	route, ok = r.routes[r.fallback]
+	r.mu.RUnlock()
+	if ok {
+		return route.Provider, route.Model
+	}
+
+	// 5. No provider available.
+	return nil, ""
 }
 
-// HasTier returns true if the tier is configured.
+// HasTier returns true if the tier is configured (via static route or combo).
 func (r *Router) HasTier(tier Tier) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.routes[tier]
+	if _, ok := r.routes[tier]; ok {
+		return true
+	}
+	_, ok := r.combos[string(tier)]
 	return ok
 }
 
-// HasRoutes returns true if the router has any routes configured.
+// HasRoutes returns true if the router has any routes or combos configured.
 func (r *Router) HasRoutes() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.routes) > 0
+	return len(r.routes) > 0 || len(r.combos) > 0
 }
 
 // Tiers returns all configured tier names.

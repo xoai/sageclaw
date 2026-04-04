@@ -119,51 +119,46 @@ func (s *Server) handleProvidersCreate(w http.ResponseWriter, r *http.Request) {
 	if s.router != nil && p.APIKey != "" {
 		s.activateProvider(p.Type, p.APIKey, p.BaseURL)
 		s.router.SetProviderTPM(p.Type, tpm)
-		// Discover models async after activation.
-		go s.discoverModels(p.Type)
 	}
 
 	writeJSON(w, map[string]string{"id": id, "status": "created"})
 }
 
-// activateProvider creates a provider client and registers it with the router at runtime.
+// safeProviderHealth returns a snapshot of the health map (thread-safe).
+func (s *Server) safeProviderHealth() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cp := make(map[string]string, len(s.providerHealth))
+	for k, v := range s.providerHealth {
+		cp[k] = v
+	}
+	return cp
+}
+
+// activateProvider creates a provider client, registers it, and triggers async
+// model discovery + preset combo regeneration. No hardcoded model IDs.
 func (s *Server) activateProvider(provType, apiKey, baseURL string) {
 	var prov provider.Provider
-	var strongModel, fastModel string
 
 	switch provType {
 	case "anthropic":
 		prov = anthropic.NewClient(apiKey)
-		strongModel = "claude-sonnet-4-20250514"
-		fastModel = "claude-haiku-4-5-20251001"
 	case "openai":
 		prov = openai.NewClient(apiKey)
-		strongModel = "gpt-4o"
-		fastModel = "gpt-4o-mini"
 	case "gemini":
 		prov = gemini.NewClient(apiKey)
-		strongModel = "gemini-2.5-flash"
-		fastModel = "gemini-2.5-flash-lite"
 	case "openrouter":
 		prov = openrouter.NewClient(apiKey)
-		strongModel = "anthropic/claude-sonnet-4-20250514"
-		fastModel = "anthropic/claude-haiku-4-5-20251001"
 	case "github":
 		prov = provgithub.NewClient(apiKey)
-		strongModel = "gpt-4o"
-		fastModel = "gpt-4o-mini"
 	case "ollama":
 		if baseURL == "" {
 			baseURL = "http://localhost:11434"
 		}
 		prov = ollama.New(ollama.WithBaseURL(baseURL))
-		strongModel = "llama3.2:3b"
-		fastModel = "llama3.2:3b"
 	default:
-		// Try openaicompat registry for known providers (DeepSeek, xAI, Groq, etc).
 		cfg := openaicompat.KnownProvider(provType)
 		if cfg == nil {
-			// Unknown provider — create a generic openaicompat client.
 			cfg = &openaicompat.Config{Name: provType}
 		}
 		cfg.APIKey = apiKey
@@ -171,9 +166,6 @@ func (s *Server) activateProvider(provType, apiKey, baseURL string) {
 			cfg.BaseURL = baseURL
 		}
 		prov = openaicompat.New(*cfg)
-		// Generic tier — use whatever model the user configures via combos.
-		strongModel = ""
-		fastModel = ""
 	}
 
 	if prov == nil {
@@ -182,20 +174,35 @@ func (s *Server) activateProvider(provType, apiKey, baseURL string) {
 
 	// Register provider for combo resolution and model discovery.
 	s.router.RegisterProvider(provType, prov)
+	s.mu.Lock()
+	s.providerHealth[provType] = "activating"
+	s.mu.Unlock()
 
-	// Register with router — set tiers if not already occupied.
-	// Skip when model is empty (openaicompat providers rely on combos for model selection).
-	if strongModel != "" && !s.router.HasTier(provider.TierStrong) {
-		s.router.SetRoute(provider.TierStrong, provider.Route{Provider: prov, Model: strongModel})
-	}
-	if fastModel != "" && !s.router.HasTier(provider.TierFast) {
-		s.router.SetRoute(provider.TierFast, provider.Route{Provider: prov, Model: fastModel})
-	}
+	log.Printf("provider: %s registered — discovering models...", provType)
 
-	// Update health map.
-	s.providerHealth[provType] = "connected"
+	// Async discovery + preset combo regeneration.
+	go func() {
+		s.discoverModels(provType)
 
-	log.Printf("provider: %s activated at runtime (hot-reload)", provType)
+		// Regenerate preset combos from all discovered models.
+		allModels, _ := s.store.ListAllDiscoveredModels(context.Background())
+		if len(allModels) > 0 {
+			dmi := make([]provider.DiscoveredModelInfo, 0, len(allModels))
+			for _, m := range allModels {
+				dmi = append(dmi, provider.DiscoveredModelInfo{
+					ModelID: m.ModelID, Provider: m.Provider,
+					OutputCost: m.OutputCost, ContextWindow: m.ContextWindow,
+				})
+			}
+			presets := provider.GeneratePresetCombos(dmi, s.router.ConnectedProviders())
+			s.router.SetPresetCombos(presets)
+		}
+
+		s.mu.Lock()
+		s.providerHealth[provType] = "connected"
+		s.mu.Unlock()
+		log.Printf("provider: %s activated at runtime (discovery complete)", provType)
+	}()
 }
 
 // discoverModels fetches the model list from a provider API and caches it in SQLite.
@@ -252,9 +259,11 @@ func (s *Server) discoverModels(provType string) {
 
 	log.Printf("discover models: %s: cached %d models", provType, len(discovered))
 
-	// Enrich newly discovered models with KnownModels pricing,
+	// Enrich newly discovered models with seed pricing,
 	// but only for models that have NO pricing yet (empty source).
 	// Models already priced by OpenRouter or user are not downgraded.
+	// Uses GetSeedPricing (not FindModel) to avoid chicken-and-egg
+	// during first boot when discovered_models is being populated.
 	allModels, _ := s.store.ListAllDiscoveredModels(context.Background())
 	hasPricing := make(map[string]bool)
 	for _, m := range allModels {
@@ -269,9 +278,9 @@ func (s *Server) discoverModels(provType string) {
 		if hasPricing[d.ModelID] || hasPricing[d.ID] {
 			continue // Already has pricing — don't downgrade.
 		}
-		km := provider.FindModel(d.ModelID)
+		km := provider.GetSeedPricing(d.ModelID)
 		if km == nil {
-			km = provider.FindModel(d.ID)
+			km = provider.GetSeedPricing(d.ID)
 		}
 		if km != nil {
 			pricingUpdates = append(pricingUpdates, store.ModelPricingBulk{
@@ -380,11 +389,13 @@ func (s *Server) handleProvidersDelete(w http.ResponseWriter, r *http.Request) {
 // handleProvidersModels returns all models (discovered + known fallback) with pricing and availability.
 func (s *Server) handleProvidersModels(w http.ResponseWriter, r *http.Request) {
 	connectedProviders := map[string]bool{}
+	s.mu.RLock()
 	for pName, status := range s.providerHealth {
 		if status == "connected" {
 			connectedProviders[pName] = true
 		}
 	}
+	s.mu.RUnlock()
 
 	// 1. Load discovered models from SQLite cache.
 	discovered, dbErr := s.store.ListAllDiscoveredModels(r.Context())
@@ -587,6 +598,15 @@ func (s *Server) handleCombosCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "name required"})
 		return
 	}
+
+	// Block reserved preset combo names.
+	reserved := map[string]bool{"strong": true, "fast": true, "balanced": true, "local": true}
+	if reserved[strings.ToLower(p.Name)] {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": fmt.Sprintf("name %q is reserved for preset combos", p.Name)})
+		return
+	}
+
 	if p.Strategy == "" {
 		p.Strategy = "priority"
 	}

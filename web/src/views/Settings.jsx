@@ -79,6 +79,8 @@ export function Settings() {
 function GeneralTab() {
   const [theme, setTheme] = useState(localStorage.getItem('sageclaw-theme') || 'dark');
   const [utilityModel, setUtilityModel] = useState('auto');
+  const [mechModels, setMechModels] = useState({ snip: 'auto', compact: 'auto', review: 'auto' });
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [models, setModels] = useState([]);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
@@ -92,6 +94,8 @@ function GeneralTab() {
   useEffect(() => {
     fetch('/api/settings/utility-model', { credentials: 'include' })
       .then(r => r.json()).then(d => { if (d.model) setUtilityModel(d.model); }).catch(() => {});
+    fetch('/api/settings/mechanism-models', { credentials: 'include' })
+      .then(r => r.json()).then(d => { if (d) setMechModels(prev => ({ ...prev, ...d })); }).catch(() => {});
     fetch('/api/providers/models', { credentials: 'include' })
       .then(r => r.json()).then(d => {
         const list = Array.isArray(d) ? d : (d && Array.isArray(d.models) ? d.models : []);
@@ -102,15 +106,22 @@ function GeneralTab() {
       }).catch(() => {});
   }, []);
 
-  const saveUtilityModel = async () => {
+  const saveModels = async () => {
     setSaving(true);
     try {
-      const res = await fetch('/api/settings/utility-model', {
-        method: 'PUT', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: utilityModel }),
-      });
-      if (res.ok) {
+      const [r1, r2] = await Promise.all([
+        fetch('/api/settings/utility-model', {
+          method: 'PUT', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: utilityModel }),
+        }),
+        fetch('/api/settings/mechanism-models', {
+          method: 'PUT', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(mechModels),
+        }),
+      ]);
+      if (r1.ok && r2.ok) {
         setToast({ msg: 'Saved. Restart server to apply.', type: 'success' });
       } else {
         setToast({ msg: 'Failed to save', type: 'error' });
@@ -133,9 +144,9 @@ function GeneralTab() {
         </div>
       </div>
 
-      <h3 style="margin-top:24px;margin-bottom:16px">Background Model</h3>
+      <h3 style="margin-top:24px;margin-bottom:16px">Default Background Model</h3>
       <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
-        Used for context summaries and micro-compact. Leave on Auto to use the cheapest available model.
+        Used for context summaries, compaction, and background tasks. Leave on Auto to use the cheapest available model.
       </p>
       <div style="display:flex;gap:8px;align-items:center">
         <select value={utilityModel} onChange={e => setUtilityModel(e.target.value)}
@@ -147,10 +158,44 @@ function GeneralTab() {
             </option>
           ))}
         </select>
-        <button class="btn-primary" style="padding:6px 16px;font-size:13px" onClick={saveUtilityModel} disabled={saving}>
+        <button class="btn-primary" style="padding:6px 16px;font-size:13px" onClick={saveModels} disabled={saving}>
           {saving ? 'Saving...' : 'Save'}
         </button>
       </div>
+
+      <div style="margin-top:16px">
+        <button class="btn-secondary" style="padding:4px 12px;font-size:12px"
+          onClick={() => setShowAdvanced(!showAdvanced)}>
+          {showAdvanced ? 'Hide' : 'Show'} Advanced Model Settings
+        </button>
+      </div>
+      {showAdvanced && (
+        <div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:8px">
+          <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+            Override the background model for specific mechanisms. "Auto" inherits the default above.
+          </p>
+          {[
+            { key: 'snip', label: 'Snip Summary', desc: 'Generates one-line summaries when snipping old tool results' },
+            { key: 'compact', label: 'Compaction', desc: 'Summarizes conversation history during context compaction' },
+            { key: 'review', label: 'Background Review', desc: 'Extracts learnings and procedures from conversation' },
+          ].map(({ key, label, desc }) => (
+            <div key={key} style="margin-bottom:12px">
+              <label style="font-size:13px;font-weight:500">{label}</label>
+              <p style="font-size:11px;color:var(--text-muted);margin:2px 0 6px">{desc}</p>
+              <select value={mechModels[key] || 'auto'}
+                onChange={e => setMechModels(prev => ({ ...prev, [key]: e.target.value }))}
+                style="max-width:320px;width:100%">
+                <option value="auto">Auto (use default)</option>
+                {models.map(m => (
+                  <option key={m.model_id || m.id} value={m.model_id || m.id}>
+                    {m.name || m.model_id || m.id} — {m.tier || 'unknown'}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
 
       <h3 style="margin-top:24px;margin-bottom:16px">About</h3>
       <div style="font-size:13px;color:var(--text-muted)">

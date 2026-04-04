@@ -90,13 +90,13 @@ func (r *ModelRegistry) InvalidateCache() {
 	r.mu.Unlock()
 }
 
-// SeedFromKnownModels inserts KnownModels into the store as baseline data.
+// SeedFromKnownModels inserts SeedPricing into the store as baseline data.
 // Uses pricing_source="known" which gets overwritten by OpenRouter refresh.
 // Safe to call on every startup — the ON CONFLICT clause in BulkUpdatePricing
 // won't overwrite "openrouter" or "user" rows with "known" data.
 func (r *ModelRegistry) SeedFromKnownModels(ctx context.Context) {
 	var updates []PricingUpdate
-	for _, m := range KnownModels {
+	for _, m := range SeedPricing {
 		if m.InputCost == 0 && m.OutputCost == 0 {
 			continue // Skip free models (ollama, github).
 		}

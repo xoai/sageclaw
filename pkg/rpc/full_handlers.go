@@ -901,7 +901,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"sessions_active": sessionCount,
 		"memories_count":  memoryCount,
 		"cron_jobs":       cronCount,
-		"providers":       s.providerHealth,
+		"providers":       s.safeProviderHealth(),
 		"cache":           provider.GlobalCacheStats.Snapshot().WithCalculations(),
 	}
 

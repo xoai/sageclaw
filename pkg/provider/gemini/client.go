@@ -43,7 +43,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
-		model:   "gemini-2.0-flash",
+		model:   "", // No default — must be set via WithModel or per-request.
 		client:  &http.Client{Timeout: 5 * time.Minute},
 	}
 	for _, opt := range opts {
@@ -123,7 +123,10 @@ func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
 }
 
 func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.Response, error) {
-	model := c.resolveModel(req.Model)
+	model, err := c.resolveModel(req.Model)
+	if err != nil {
+		return nil, err
+	}
 	c.applyCaching(ctx, req, model)
 	body := toGeminiRequest(req)
 
@@ -153,7 +156,10 @@ func (c *Client) Chat(ctx context.Context, req *canonical.Request) (*canonical.R
 }
 
 func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan provider.StreamEvent, error) {
-	model := c.resolveModel(req.Model)
+	model, err := c.resolveModel(req.Model)
+	if err != nil {
+		return nil, err
+	}
 	c.applyCaching(ctx, req, model)
 	body := toGeminiRequest(req)
 	jsonBody, _ := json.Marshal(body)
@@ -269,11 +275,14 @@ func (c *Client) ChatStream(ctx context.Context, req *canonical.Request) (<-chan
 	return events, nil
 }
 
-func (c *Client) resolveModel(model string) string {
+func (c *Client) resolveModel(model string) (string, error) {
 	if model != "" {
-		return model
+		return model, nil
 	}
-	return c.model
+	if c.model != "" {
+		return c.model, nil
+	}
+	return "", fmt.Errorf("gemini: no model specified — set WithModel() on client or provide model in request")
 }
 
 // --- Gemini API types ---
@@ -673,10 +682,13 @@ func fromGeminiResponse(body []byte) (*canonical.Response, error) {
 }
 
 // TranscribeAudio sends audio to Gemini's REST API for transcription.
-// Uses gemini-2.0-flash (fast, supports audio) to convert audio to text.
+// Uses the client's configured model (must support audio input).
 // This bypasses the Live API entirely — no WebSocket, no PCM conversion.
 func (c *Client) TranscribeAudio(ctx context.Context, audioData []byte, mimeType string) (string, error) {
-	model := "gemini-2.5-flash" // Fast model, supports audio input.
+	model, err := c.resolveModel("")
+	if err != nil {
+		return "", fmt.Errorf("transcribe audio: %w", err)
+	}
 
 	reqBody := map[string]any{
 		"contents": []map[string]any{

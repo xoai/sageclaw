@@ -69,7 +69,10 @@ func PreContextMemoryWithConfig(engine memory.MemoryEngine, minConfidence float6
 	}
 }
 
-// PreContextSelfLearning injects self-learning rules as warnings.
+// PreContextSelfLearning injects self-learning rules as warnings and
+// procedural knowledge as separate guidance. Corrections (gotchas,
+// conventions) are framed as "Warnings from past experience."
+// Procedures are framed as "Relevant procedures from past experience."
 func PreContextSelfLearning(engine memory.MemoryEngine) Middleware {
 	return func(ctx context.Context, data *HookData, next NextFunc) error {
 		if data.HookPoint != HookPreContext {
@@ -81,26 +84,65 @@ func PreContextSelfLearning(engine memory.MemoryEngine) Middleware {
 			return next(ctx, data)
 		}
 
-		// Search for self-learning rules.
-		results, err := engine.Search(ctx, query, memory.SearchOptions{
-			FilterTags: []string{"self-learning"},
-			Limit:      3,
+		// Two separate searches: corrections at 0.6, procedures at 0.3.
+		// This preserves existing correction filtering behavior while
+		// allowing newer procedures (initial confidence 0.5) to surface.
+		corrections, err := engine.Search(ctx, query, memory.SearchOptions{
+			FilterTags:    []string{"self-learning"},
+			Limit:         5,
+			MinConfidence: 0.6,
 		})
 		if err != nil {
-			return next(ctx, data)
+			corrections = nil
 		}
 
-		if len(results) > 0 {
+		procedures, err := engine.Search(ctx, query, memory.SearchOptions{
+			FilterTags:    []string{"self-learning", "procedure"},
+			Limit:         3,
+			MinConfidence: 0.3,
+		})
+		if err != nil {
+			procedures = nil
+		}
+
+		// Filter procedures out of corrections (they appear in both searches).
+		var warnings []memory.Entry
+		for _, r := range corrections {
+			if !hasTag(r.Tags, "procedure") {
+				warnings = append(warnings, r)
+			}
+		}
+
+		if len(warnings) > 0 {
 			var sb strings.Builder
 			sb.WriteString("Warnings from past experience:\n")
-			for _, r := range results {
+			for _, r := range warnings {
 				fmt.Fprintf(&sb, "- %s\n", r.Content)
+			}
+			data.Injections = append(data.Injections, sb.String())
+		}
+
+		if len(procedures) > 0 {
+			var sb strings.Builder
+			sb.WriteString("Relevant procedures from past experience:\n")
+			for _, r := range procedures {
+				fmt.Fprintf(&sb, "- [%s] %s\n", r.Title, r.Content)
 			}
 			data.Injections = append(data.Injections, sb.String())
 		}
 
 		return next(ctx, data)
 	}
+}
+
+// hasTag checks if a tag exists in a slice.
+func hasTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }
 
 func extractLastUserText(msgs []canonical.Message) string {

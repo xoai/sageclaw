@@ -68,4 +68,11 @@ func (t *openRouterTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return http.DefaultTransport.RoundTrip(req)
 }
 
+// ListModels delegates to the inner OpenAI-compatible client.
+// OpenRouter's /v1/models endpoint returns all available models.
+func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
+	return c.inner.ListModels(ctx)
+}
+
 var _ provider.Provider = (*Client)(nil)
+var _ provider.ModelLister = (*Client)(nil)

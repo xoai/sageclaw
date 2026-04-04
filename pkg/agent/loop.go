@@ -72,6 +72,9 @@ type runState struct {
 	denialCounts        map[string]int // per-tool consecutive denial count
 	denialRetries       int            // consecutive iterations where ALL tools were denied
 
+	// Final iteration count (set when loop exits, used by background reviewer).
+	finalIteration int
+
 	// Team delegation (cached from iteration 0).
 	delegationHint string // Formatted [Delegation Analysis] block, empty if not a lead.
 }
@@ -106,7 +109,8 @@ type Config struct {
 	ContextMicroCompactAge int     // Iterations before micro-compacting (0 = default 5).
 	ContextCollapseThreshold float64 // Budget usage ratio for collapse (0 = default 0.7).
 	ContextOverflowMaxBytes  int64   // Per-session overflow cap in bytes (0 = default 50MB).
-	UtilityModel             string  // Override model for background tasks (micro-compact, summaries). "" or "auto" = auto-resolve.
+	UtilityModel             string            // Override model for background tasks (micro-compact, summaries). "" or "auto" = auto-resolve.
+	MechanismModels          map[string]string // Per-mechanism model overrides. Keys: "snip", "compact", "review". "" = inherit UtilityModel.
 
 	// Provider-specific features.
 	ThinkingLevel string // Extended thinking: "low", "medium", "high".
@@ -166,6 +170,8 @@ type Loop struct {
 	subagentMgr *SubagentManager // Optional: for subagent result injection.
 
 	streamingExecutor *StreamingExecutor // Optional: parallel + streaming tool execution.
+
+	reviewer *BackgroundReviewer // Optional: periodic background memory review.
 
 	consentSessionID string // If set, consent events use this session ID instead of the run session.
 
@@ -239,6 +245,11 @@ func WithCompactionManager(cm *CompactionManager) LoopOption {
 // WithContextPipeline sets a custom context pipeline (for testing).
 func WithContextPipeline(cp *agentctx.ContextPipeline) LoopOption {
 	return func(l *Loop) { l.contextPipeline = cp }
+}
+
+// WithBackgroundReviewer adds periodic background memory review.
+func WithBackgroundReviewer(br *BackgroundReviewer) LoopOption {
+	return func(l *Loop) { l.reviewer = br }
 }
 
 // WithStreamingExecutor enables parallel and streaming tool execution.
@@ -375,8 +386,10 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		}
 		l.contextPipeline = agentctx.NewContextPipeline(cfg)
 		// Set up fast-tier LLM caller for micro-compact and summaries.
+		// Uses per-mechanism model resolution: snip override → utility model → auto.
 		if l.router != nil {
-			l.contextPipeline.SetLLMCaller(agentctx.NewLLMCaller(l.router, l.config.Model, l.config.UtilityModel))
+			snipModel := agentctx.ResolveMechanismModel(l.config.MechanismModels, l.config.UtilityModel, "snip")
+			l.contextPipeline.SetLLMCaller(agentctx.NewLLMCaller(l.router, l.config.Model, snipModel))
 		}
 		log.Printf("[%s] context pipeline activated", sessionID)
 	}
@@ -392,7 +405,13 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		}
 	}
 
+	if l.compactionMgr != nil && l.contextPipeline != nil {
+		log.Printf("[%s] WARNING: CompactionManager and ContextPipeline both active — CompactionManager may invalidate collapse summaries", sessionID)
+	}
+
 	for iteration := 0; iteration < state.maxIter; iteration++ {
+		state.finalIteration = iteration
+
 		// Check for injected messages (steer/inject).
 		l.drainInjections(&history)
 
@@ -826,6 +845,11 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 	// Layer 3: Background compaction after loop exits.
 	if l.compactionMgr != nil {
 		l.compactionMgr.MaybeBackgroundCompact(sessionID, history, state.budget)
+	}
+
+	// Background review: proactive memory persistence every N user turns.
+	if l.reviewer != nil {
+		l.reviewer.OnUserTurn(sessionID, history, state.finalIteration)
 	}
 
 	// Check if we timed out.

@@ -38,4 +38,9 @@ type MemoryEngine interface {
 // facts 0.7, inferred preferences 0.5.
 type ConfidenceWriter interface {
 	WriteWithConfidence(ctx context.Context, content, title string, tags []string, confidence float64) (string, error)
+	// UpdateConfidence sets the confidence score of an existing memory entry.
+	UpdateConfidence(ctx context.Context, id string, confidence float64) error
+	// BumpConfidence increments the confidence of an existing entry by delta,
+	// capped at maxConf. Used by the background reviewer for procedure reuse.
+	BumpConfidence(ctx context.Context, id string, delta, maxConf float64) error
 }

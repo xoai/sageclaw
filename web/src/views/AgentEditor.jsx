@@ -45,7 +45,7 @@ export default function AgentEditor({ id }) {
         behavior: '',
         bootstrap: '',
         tools: { enabled: [], config: {} },
-        memory: { scope: 'project', auto_store: true, retention_days: 0, search_limit: 10, tags_boost: [] },
+        memory: { scope: 'project', auto_store: true, retention_days: 0, search_limit: 10, tags_boost: [], review_interval: 10, review_model: '' },
         heartbeat: { schedules: [] },
         channels: { serve: [], overrides: {} },
       });
@@ -615,6 +615,23 @@ function MemoryTab({ agent, update }) {
           placeholder="e.g. important, decision, learning" />
         <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
           Memories with these tags rank higher in search results.
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Review Interval (user turns)</label>
+        <input type="number" value={mem.review_interval ?? 10} min="0" max="100"
+          onInput={e => update('memory.review_interval', parseInt(e.target.value) || 0)} />
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+          Background memory extraction every N user turns. 0 = disabled.
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Review Model</label>
+        <input type="text" value={mem.review_model || ''}
+          onInput={e => update('memory.review_model', e.target.value.trim())}
+          placeholder="auto (uses utility model)" />
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+          Model for background memory extraction. Leave empty for auto.
         </div>
       </div>
     </div>

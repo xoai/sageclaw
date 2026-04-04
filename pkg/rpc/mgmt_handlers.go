@@ -212,6 +212,37 @@ func (s *Server) handleSetUtilityModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "saved"})
 }
 
+func (s *Server) handleGetMechanismModels(w http.ResponseWriter, r *http.Request) {
+	result := map[string]string{}
+	for _, mech := range []string{"snip", "compact", "review"} {
+		val, _ := s.store.GetSetting(r.Context(), "mechanism_model_"+mech)
+		if val == "" {
+			val = "auto"
+		}
+		result[mech] = val
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) handleSetMechanismModels(w http.ResponseWriter, r *http.Request) {
+	var params map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid request"})
+		return
+	}
+	for _, mech := range []string{"snip", "compact", "review"} {
+		if val, ok := params[mech]; ok {
+			if err := s.store.SetSetting(r.Context(), "mechanism_model_"+mech, val); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+	}
+	writeJSON(w, map[string]string{"status": "saved"})
+}
+
 func (s *Server) handleSettingsExport(w http.ResponseWriter, r *http.Request) {
 	// Export agents as JSON.
 	rows, err := s.store.DB().QueryContext(r.Context(),

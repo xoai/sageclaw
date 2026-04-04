@@ -169,10 +169,10 @@ func normalizeProviderName(orProvider string) string {
 	}
 }
 
-// matchToKnownModel tries to find a KnownModels entry that corresponds
+// matchToKnownModel tries to find a SeedPricing entry that corresponds
 // to an OpenRouter model ID, using 3-tier matching:
 // (a) Exact match on full ID (e.g. "anthropic/claude-sonnet-4-20250514")
-// (b) Strip provider prefix, match against KnownModels.ModelID
+// (b) Strip provider prefix, match against SeedPricing.ModelID
 // (c) Fuzzy prefix match: strip -preview, -latest, date suffixes
 func matchToKnownModel(orID string) string {
 	parts := strings.SplitN(orID, "/", 2)
@@ -183,7 +183,7 @@ func matchToKnownModel(orID string) string {
 	orModel := parts[1]
 	sageclawProvider := normalizeProviderName(orProvider)
 
-	for _, km := range KnownModels {
+	for _, km := range SeedPricing {
 		// (a) Exact match on full ID.
 		if km.ID == sageclawProvider+"/"+orModel {
 			return km.ModelID

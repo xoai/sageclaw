@@ -48,6 +48,26 @@ func (e *Engine) WriteWithConfidence(ctx context.Context, content, title string,
 	return id, nil
 }
 
+// UpdateConfidence changes the confidence score of an existing memory entry.
+func (e *Engine) UpdateConfidence(ctx context.Context, id string, confidence float64) error {
+	if confidence < 0 {
+		confidence = 0
+	}
+	if confidence > 1 {
+		confidence = 1
+	}
+	_, err := e.store.DB().ExecContext(ctx, `UPDATE memories SET confidence = ? WHERE id = ?`, confidence, id)
+	return err
+}
+
+// BumpConfidence increments confidence by delta, capped at maxConf.
+func (e *Engine) BumpConfidence(ctx context.Context, id string, delta, maxConf float64) error {
+	_, err := e.store.DB().ExecContext(ctx,
+		`UPDATE memories SET confidence = MIN(COALESCE(confidence, 0.5) + ?, ?) WHERE id = ?`,
+		delta, maxConf, id)
+	return err
+}
+
 // Delete removes a memory by ID.
 func (e *Engine) Delete(ctx context.Context, id string) error {
 	return e.store.DeleteMemory(ctx, id)

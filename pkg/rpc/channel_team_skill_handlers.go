@@ -477,8 +477,7 @@ func (s *Server) handleTeamsTaskAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Broadcast SSE event.
-		data, _ := json.Marshal(map[string]any{"type": "team.task.deleted", "task_id": p.TaskID, "team_id": teamID})
-		s.broadcast(data)
+		s.emit("", "team.task.deleted", map[string]any{"type": "team.task.deleted", "task_id": p.TaskID, "team_id": teamID})
 		writeJSON(w, map[string]string{"task_id": p.TaskID, "action": "delete", "status": "ok"})
 		return
 
@@ -490,8 +489,7 @@ func (s *Server) handleTeamsTaskAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Broadcast SSE event.
-		data, _ := json.Marshal(map[string]any{"type": "team.task.cleared", "team_id": teamID, "count": count})
-		s.broadcast(data)
+		s.emit("", "team.task.cleared", map[string]any{"type": "team.task.cleared", "team_id": teamID, "count": count})
 		writeJSON(w, map[string]any{"action": "delete-bulk", "deleted": count})
 		return
 
@@ -591,8 +589,7 @@ func (s *Server) handleTeamsTaskAction(w http.ResponseWriter, r *http.Request) {
 		created, _ := s.store.GetTask(ctx, taskID)
 		if created != nil {
 			// SSE: team.task.created is broadcast by existing infrastructure if wired.
-			data, _ := json.Marshal(map[string]any{"type": "team.task.created", "task_id": taskID, "team_id": teamID, "task": created, "seq": created.UpdatedAt.UnixMilli()})
-			s.broadcast(data)
+			s.emit("", "team.task.created", map[string]any{"type": "team.task.created", "task_id": taskID, "team_id": teamID, "task": created, "seq": created.UpdatedAt.UnixMilli()})
 			writeJSON(w, created)
 		} else {
 			writeJSON(w, map[string]string{"id": taskID, "status": "created"})
