@@ -611,7 +611,16 @@ function ConfigSection() {
       });
       const data = await res.json();
       if (data.error) { setImportError(data.error); return; }
-      setImportMsg(`Imported: ${data.agents || 0} agents`);
+      const c = data.counts || {};
+      const parts = [];
+      if (c.agents) parts.push(`${c.agents} agents`);
+      if (c.providers) parts.push(`${c.providers} providers`);
+      if (c.combos) parts.push(`${c.combos} combos`);
+      if (c.settings) parts.push(`${c.settings} settings`);
+      if (c.cron_jobs) parts.push(`${c.cron_jobs} cron jobs`);
+      if (c.mcp_servers) parts.push(`${c.mcp_servers} MCP servers`);
+      if (c.skills_to_install) parts.push(`${c.skills_to_install} skills (re-install from Marketplace)`);
+      setImportMsg(`Imported: ${parts.join(', ') || 'nothing'}${c.providers ? '. Note: API keys must be re-entered in Settings > AI Models.' : ''}`);
     } catch {
       setImportError('Invalid JSON file');
     }
@@ -622,7 +631,7 @@ function ConfigSection() {
     <div class="memory-card" style="margin-bottom:16px">
       <h3 style="margin-bottom:12px">Configuration</h3>
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
-        Export or import your agent configuration as JSON.
+        Export or import your full configuration — agents, providers, combos, settings, cron jobs, MCP servers, and skills. API keys are excluded for security.
       </p>
       <input type="file" accept=".json" ref={fileRef} onChange={handleFileSelected} style="display:none" />
       <div style="display:flex;gap:8px">
