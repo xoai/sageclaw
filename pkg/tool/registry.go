@@ -20,6 +20,16 @@ const (
 	RiskSensitive = "sensitive" // Shell execution, delegation, MCP
 )
 
+// ToolConfigField describes a single configuration field for a tool.
+type ToolConfigField struct {
+	Type        string   `json:"type"`                  // "string", "password", "number", "boolean", "select"
+	Required    bool     `json:"required"`
+	Description string   `json:"description"`
+	Default     any      `json:"default,omitempty"`
+	Link        string   `json:"link,omitempty"`   // Help URL (e.g. "Get API key")
+	Options     []string `json:"options,omitempty"` // For "select" type
+}
+
 // registeredTool holds a tool's definition and implementation.
 type registeredTool struct {
 	def             canonical.ToolDef
@@ -28,6 +38,7 @@ type registeredTool struct {
 	risk            string // "safe", "moderate", "sensitive"
 	source          string // "builtin", "mcp:{server}", "skill:{name}"
 	concurrencySafe bool   // True if safe to run in parallel with other tools.
+	configSchema    map[string]ToolConfigField // nil = no config
 }
 
 // Registry manages available tools.
@@ -103,6 +114,32 @@ func (r *Registry) Get(name string) (canonical.ToolDef, ToolFunc, bool) {
 		return canonical.ToolDef{}, nil, false
 	}
 	return t.def, t.exec, true
+}
+
+// UpdateDescription changes a tool's LLM-visible description.
+func (r *Registry) UpdateDescription(name, description string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tools[name]
+	if !ok {
+		return false
+	}
+	t.def.Description = description
+	r.tools[name] = t
+	return true
+}
+
+// UpdateSchema changes a tool's input schema.
+func (r *Registry) UpdateSchema(name string, schema json.RawMessage) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tools[name]
+	if !ok {
+		return false
+	}
+	t.def.InputSchema = schema
+	r.tools[name] = t
+	return true
 }
 
 // GetMeta returns a tool's group, risk, and source by name.
@@ -321,3 +358,46 @@ func (r *Registry) Names() []string {
 	}
 	return names
 }
+
+// SetConfigSchema declares the configuration schema for a tool.
+// Returns false if the tool is not registered.
+func (r *Registry) SetConfigSchema(name string, schema map[string]ToolConfigField) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tools[name]
+	if !ok {
+		return false
+	}
+	t.configSchema = schema
+	r.tools[name] = t
+	return true
+}
+
+// GetConfigSchema returns the configuration schema for a tool.
+// Returns nil, false if the tool has no config or doesn't exist.
+func (r *Registry) GetConfigSchema(name string) (map[string]ToolConfigField, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	if !ok || t.configSchema == nil {
+		return nil, false
+	}
+	return t.configSchema, true
+}
+
+// ListConfigurable returns the names of all tools that have config schemas.
+func (r *Registry) ListConfigurable() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for name, t := range r.tools {
+		if t.configSchema != nil {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// ConfigReader returns a tool config value at call time.
+// The context carries per-agent config for two-level resolution.
+type ConfigReader func(ctx context.Context, toolName, fieldName string) string

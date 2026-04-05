@@ -139,7 +139,7 @@ func TestCheckExecApproval_DenyMode(t *testing.T) {
 	ctx := WithExecConfig(context.Background(), ExecConfig{Mode: ExecDeny})
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	input, _ := json.Marshal(map[string]string{"command": "ls"})
@@ -159,7 +159,7 @@ func TestCheckExecApproval_SafeOnlyMode(t *testing.T) {
 	ctx := WithExecConfig(context.Background(), ExecConfig{Mode: ExecSafeOnly})
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	// Safe command should succeed.
@@ -197,7 +197,7 @@ func TestCheckExecApproval_AskMode_SafeAutoApproved(t *testing.T) {
 	ctx := WithExecConfig(context.Background(), ExecConfig{Mode: ExecAsk})
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	// Safe command auto-approved without approver.
@@ -221,7 +221,7 @@ func TestCheckExecApproval_AskMode_ApproverGranted(t *testing.T) {
 	ctx := WithExecConfig(context.Background(), cfg)
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	input, _ := json.Marshal(map[string]string{"command": "curl https://example.com"})
@@ -244,7 +244,7 @@ func TestCheckExecApproval_AskMode_ApproverDenied(t *testing.T) {
 	ctx := WithExecConfig(context.Background(), cfg)
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	input, _ := json.Marshal(map[string]string{"command": "curl https://example.com"})
@@ -262,7 +262,7 @@ func TestCheckExecApproval_AskMode_NoApprover(t *testing.T) {
 	ctx := WithExecConfig(context.Background(), cfg)
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	// Unsafe command with no approver should fail.
@@ -281,7 +281,7 @@ func TestCheckExecApproval_NoConfigInContext(t *testing.T) {
 	ctx := context.Background()
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	input, _ := json.Marshal(map[string]string{"command": "echo hello"})
@@ -303,7 +303,7 @@ func TestCheckExecApproval_CustomAllowlist(t *testing.T) {
 	ctx := WithExecConfig(context.Background(), cfg)
 
 	reg := NewRegistry()
-	RegisterExec(reg, t.TempDir())
+	RegisterExec(reg, t.TempDir(), nil, nil)
 	_, fn, _ := reg.Get("execute_command")
 
 	// docker should now be safe — verify via IsSafeCommand (avoids needing docker installed).

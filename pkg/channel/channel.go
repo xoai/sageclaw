@@ -15,6 +15,12 @@ type Channel interface {
 	Stop(ctx context.Context) error
 }
 
+// MediaSender is optionally implemented by channel adapters that can send
+// files (images, audio, video, documents) via their platform's native API.
+type MediaSender interface {
+	SendMedia(ctx context.Context, chatID, filePath, mimeType, sendAs, caption string) error
+}
+
 // WebhookRegistrar is implemented by adapters that need HTTP webhook routes
 // registered on the shared server mux (e.g. Zalo, WhatsApp).
 type WebhookRegistrar interface {

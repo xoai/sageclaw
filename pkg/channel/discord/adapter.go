@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -641,3 +644,78 @@ func (a *Adapter) ToEnvelope(msg DiscordMessage) bus.Envelope {
 		},
 	}
 }
+
+// SendMedia implements channel.MediaSender for Discord.
+// Discord sends all file types as attachments — the client renders based on MIME.
+func (a *Adapter) SendMedia(ctx context.Context, chatID, filePath, mimeType, sendAs, caption string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("opening file: %w", err)
+	}
+	defer file.Close()
+
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+
+	errCh := make(chan error, 1)
+	go func() {
+		var writeErr error
+		defer func() {
+			writer.Close()
+			pw.CloseWithError(writeErr)
+			errCh <- writeErr
+		}()
+
+		// payload_json field carries the message content (caption).
+		payload := map[string]string{}
+		if caption != "" {
+			payload["content"] = caption
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			writeErr = err
+			return
+		}
+		if writeErr = writer.WriteField("payload_json", string(payloadJSON)); writeErr != nil {
+			return
+		}
+
+		// File attachment.
+		part, err := writer.CreateFormFile("files[0]", filepath.Base(filePath))
+		if err != nil {
+			writeErr = err
+			return
+		}
+		_, writeErr = io.Copy(part, file)
+	}()
+
+	discordURL := fmt.Sprintf("%s/channels/%s/messages", a.apiBase, chatID)
+	req, err := http.NewRequest("POST", discordURL, pr)
+	if err != nil {
+		pr.CloseWithError(err)
+		<-errCh
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bot "+a.token)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		pr.CloseWithError(err)
+		<-errCh
+		return fmt.Errorf("discord sendMedia: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if writeErr := <-errCh; writeErr != nil {
+		return writeErr
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("discord sendMedia HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+var _ channel.MediaSender = (*Adapter)(nil)

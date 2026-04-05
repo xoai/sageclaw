@@ -520,9 +520,172 @@ func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request) {
 		if source != "" {
 			entry["source"] = source
 		}
+		if schema, ok := s.toolRegistry.GetConfigSchema(d.Name); ok {
+			entry["config_schema"] = schema
+			entry["has_config"] = true
+		}
 		tools = append(tools, entry)
 	}
 	writeJSON(w, tools)
+}
+
+func (s *Server) handleToolUpdate(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "tool name required"})
+		return
+	}
+	if s.toolRegistry == nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool registry not available"})
+		return
+	}
+
+	var body struct {
+		Description string          `json:"description"`
+		Schema      json.RawMessage `json:"schema"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	if body.Description != "" {
+		if !s.toolRegistry.UpdateDescription(name, body.Description) {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]string{"error": "tool not found"})
+			return
+		}
+	}
+	if len(body.Schema) > 0 {
+		// Validate JSON schema.
+		var check map[string]any
+		if err := json.Unmarshal(body.Schema, &check); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "invalid JSON schema"})
+			return
+		}
+		s.toolRegistry.UpdateSchema(name, body.Schema)
+	}
+
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleToolConfig(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "tool name required"})
+		return
+	}
+	if s.toolConfigStore == nil || s.toolRegistry == nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool config not available"})
+		return
+	}
+
+	schema, ok := s.toolRegistry.GetConfigSchema(name)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool has no config schema"})
+		return
+	}
+
+	values := s.toolConfigStore.GetGlobalAll(r.Context(), name)
+	missing := s.toolConfigStore.Validate(r.Context(), name)
+
+	var missingNames []string
+	for _, m := range missing {
+		missingNames = append(missingNames, m.Name)
+	}
+
+	writeJSON(w, map[string]any{
+		"schema":  schema,
+		"values":  values,
+		"missing": missingNames,
+	})
+}
+
+func (s *Server) handleToolConfigSave(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "tool name required"})
+		return
+	}
+	if s.toolConfigStore == nil || s.toolRegistry == nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool config not available"})
+		return
+	}
+
+	schema, ok := s.toolRegistry.GetConfigSchema(name)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool has no config schema"})
+		return
+	}
+
+	var fields map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	// Validate field names and types against schema.
+	for fieldName, value := range fields {
+		if _, ok := schema[fieldName]; !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "unknown field: " + fieldName})
+			return
+		}
+		if msg := s.toolConfigStore.ValidateValue(name, fieldName, value); msg != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": msg})
+			return
+		}
+	}
+
+	for fieldName, value := range fields {
+		// Skip password fields that contain a masked value (unchanged by user).
+		// Masked values look like "****2345" — all asterisks except possibly last 4 chars.
+		if f, ok := schema[fieldName]; ok && f.Type == "password" && isMaskedValue(value) {
+			continue
+		}
+		if err := s.toolConfigStore.SetGlobal(r.Context(), name, fieldName, value); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	// Migrate legacy brave_api_key: delete old key when new-format key is saved.
+	if name == "web_search" {
+		if _, ok := fields["brave_api_key"]; ok {
+			_ = s.store.SetSetting(r.Context(), "tool_brave_api_key", "")
+		}
+	}
+
+	writeJSON(w, map[string]string{"status": "saved"})
+}
+
+// isMaskedValue detects if a string looks like a masked password (e.g. "****2345").
+// Returns true if the value starts with asterisks, indicating the user did not change it.
+func isMaskedValue(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '*' {
+			// At least one leading asterisk required.
+			return i > 0
+		}
+	}
+	// All asterisks.
+	return true
 }
 
 func categorizeToolName(name string) string {

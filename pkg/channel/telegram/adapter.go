@@ -10,11 +10,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/xoai/sageclaw/pkg/audio"
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/channel"
@@ -1234,3 +1237,145 @@ type PhotoSize struct {
 	Height   int    `json:"height"`
 	FileSize int    `json:"file_size"`
 }
+
+// SendMedia implements channel.MediaSender for Telegram.
+func (a *Adapter) SendMedia(ctx context.Context, chatID, filePath, mimeType, sendAs, caption string) error {
+	apiMethod := "sendDocument"
+	formField := "document"
+	switch sendAs {
+	case "photo":
+		apiMethod = "sendPhoto"
+		formField = "photo"
+	case "voice":
+		// Telegram requires OGG Opus for voice messages.
+		// If the file is WAV/PCM, convert to OGG Opus before sending.
+		if !strings.HasSuffix(strings.ToLower(filePath), ".ogg") {
+			oggPath, err := a.convertToOGG(filePath)
+			if err != nil {
+				// Fallback: send as document if conversion fails.
+				log.Printf("telegram: voice conversion failed, sending as document: %v", err)
+				return a.sendMediaMultipart(chatID, filePath, "sendDocument", "document", caption)
+			}
+			filePath = oggPath
+		}
+		apiMethod = "sendVoice"
+		formField = "voice"
+		caption = "" // Telegram sendVoice does not support captions.
+	case "video":
+		apiMethod = "sendVideo"
+		formField = "video"
+	}
+	return a.sendMediaMultipart(chatID, filePath, apiMethod, formField, caption)
+}
+
+// convertToOGG converts a WAV or raw PCM file to OGG Opus format.
+// Returns the path to the converted OGG file.
+func (a *Adapter) convertToOGG(srcPath string) (string, error) {
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("reading audio file: %w", err)
+	}
+
+	// Strip WAV header if present (44 bytes RIFF header → raw PCM).
+	pcmData := data
+	sampleRate := audio.GeminiOutputSampleRate // 24000 Hz default
+	if len(data) > 44 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WAVE" {
+		// Parse sample rate from WAV header (bytes 24-27, little-endian).
+		sampleRate = int(data[24]) | int(data[25])<<8 | int(data[26])<<16 | int(data[27])<<24
+		pcmData = data[44:]
+	}
+
+	codec, err := audio.DefaultCodec()
+	if err != nil {
+		return "", fmt.Errorf("no audio codec available: %w", err)
+	}
+
+	oggData, err := codec.EncodePCMToOGG(pcmData, sampleRate)
+	if err != nil {
+		return "", fmt.Errorf("encoding to OGG: %w", err)
+	}
+
+	// Save OGG alongside the source file.
+	oggPath := strings.TrimSuffix(srcPath, filepath.Ext(srcPath)) + ".ogg"
+	if err := os.WriteFile(oggPath, oggData, 0644); err != nil {
+		return "", fmt.Errorf("saving OGG file: %w", err)
+	}
+
+	return oggPath, nil
+}
+
+// sendMediaMultipart uploads a file to a Telegram Bot API send* endpoint
+// using streaming multipart form data. Does not buffer the full file in memory.
+func (a *Adapter) sendMediaMultipart(chatID, filePath, apiMethod, formField, caption string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("opening file: %w", err)
+	}
+	defer file.Close()
+
+	// Use io.Pipe to stream the multipart form body without buffering.
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+
+	// Write form in a goroutine — the pipe reader feeds the HTTP request body.
+	errCh := make(chan error, 1)
+	go func() {
+		var writeErr error
+		defer func() {
+			writer.Close()
+			pw.CloseWithError(writeErr) // unblocks reader on error
+			errCh <- writeErr
+		}()
+
+		if writeErr = writer.WriteField("chat_id", chatID); writeErr != nil {
+			return
+		}
+		if caption != "" {
+			if writeErr = writer.WriteField("caption", caption); writeErr != nil {
+				return
+			}
+		}
+
+		filename := filepath.Base(filePath)
+		part, err := writer.CreateFormFile(formField, filename)
+		if err != nil {
+			writeErr = fmt.Errorf("creating form file: %w", err)
+			return
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			writeErr = fmt.Errorf("copying file data: %w", err)
+			return
+		}
+	}()
+
+	req, err := http.NewRequest("POST", a.baseURL+"/"+apiMethod, pr)
+	if err != nil {
+		pr.CloseWithError(err)
+		<-errCh
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		pr.CloseWithError(err)
+		<-errCh
+		return fmt.Errorf("%s: %w", apiMethod, err)
+	}
+	defer resp.Body.Close()
+
+	// Drain goroutine and check for write errors.
+	if writeErr := <-errCh; writeErr != nil {
+		return writeErr
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s HTTP %d: %s", apiMethod, resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// Verify Adapter implements channel.MediaSender.
+var _ channel.MediaSender = (*Adapter)(nil)

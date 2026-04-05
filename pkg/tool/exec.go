@@ -21,17 +21,31 @@ const (
 // RegisterExec registers the shell execution tool.
 // disabledDenyGroups controls which shell deny groups are skipped (nil = all enabled).
 // Per-agent exec security mode is read from context at runtime (see WithExecConfig).
-func RegisterExec(reg *Registry, workdir string, disabledDenyGroups ...map[string]bool) {
+func RegisterExec(reg *Registry, workdir string, configReader ConfigReader, disabledDenyGroups ...map[string]bool) {
 	var disabled map[string]bool
 	if len(disabledDenyGroups) > 0 {
 		disabled = disabledDenyGroups[0]
 	}
 	reg.RegisterWithGroup("execute_command", "Execute a shell command",
 		json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default 30000, max 300000)"}},"required":["command"]}`),
-		GroupRuntime, RiskSensitive, "builtin", execCommand(workdir, disabled))
+		GroupRuntime, RiskSensitive, "builtin", execCommand(workdir, disabled, configReader))
+
+	reg.SetConfigSchema("execute_command", map[string]ToolConfigField{
+		"timeout_seconds": {
+			Type:        "number",
+			Description: "Default timeout in seconds (max 300)",
+			Default:     30,
+		},
+		"default_shell": {
+			Type:        "select",
+			Description: "Default shell for command execution",
+			Default:     "bash",
+			Options:     []string{"bash", "sh", "zsh"},
+		},
+	})
 }
 
-func execCommand(workdir string, disabledDenyGroups map[string]bool) ToolFunc {
+func execCommand(workdir string, disabledDenyGroups map[string]bool, cr ConfigReader) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
 			Command   string `json:"command"`
@@ -56,19 +70,36 @@ func execCommand(workdir string, disabledDenyGroups map[string]bool) ToolFunc {
 			return result, nil
 		}
 
-		// Calculate timeout.
+		// Calculate timeout — use config default if no explicit timeout_ms.
 		timeout := defaultExecTimeout
 		if params.TimeoutMs > 0 {
 			timeout = time.Duration(params.TimeoutMs) * time.Millisecond
 			if timeout > maxExecTimeout {
 				timeout = maxExecTimeout
 			}
+		} else if cr != nil {
+			if ts := cr(ctx, "execute_command", "timeout_seconds"); ts != "" {
+				if secs, err := time.ParseDuration(ts + "s"); err == nil && secs > 0 && secs <= maxExecTimeout {
+					timeout = secs
+				}
+			}
+		}
+
+		// Resolve shell from config (validated to allowed set).
+		shell := "bash"
+		if cr != nil {
+			if s := cr(ctx, "execute_command", "default_shell"); s != "" {
+				shell = s
+			}
+		}
+		if shell != "bash" && shell != "sh" && shell != "zsh" {
+			shell = "bash"
 		}
 
 		execCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		cmd := exec.CommandContext(execCtx, "sh", "-c", params.Command)
+		cmd := exec.CommandContext(execCtx, shell, "-c", params.Command)
 		cmd.Dir = workdir
 
 		output, err := cmd.CombinedOutput()

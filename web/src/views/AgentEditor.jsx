@@ -576,8 +576,158 @@ function ToolsTab({ agent, update, available }) {
           </div>
         )}
       </div>
+
+      {/* Per-Agent Tool Configuration */}
+      <AgentToolConfigSection agentId={agent.id} available={available} />
     </div>
   );
+}
+
+function AgentToolConfigSection({ agentId, available }) {
+  const configurableTools = available.filter(t => t.has_config);
+  const [openTool, setOpenTool] = useState(null);
+
+  if (configurableTools.length === 0) return null;
+
+  return (
+    <div style="margin-top:24px">
+      <h3 style="font-size:14px;margin-bottom:8px">Tool Configuration</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+        Override global tool settings for this agent.
+      </p>
+      <div class="card-list">
+        {configurableTools.map(t => (
+          <div key={t.name} class="card" style="padding:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <div>
+                <code style="font-size:13px;color:var(--primary)">{t.name}</code>
+                <span class="badge badge-gray" style="margin-left:8px;font-size:10px">{t.category}</span>
+              </div>
+              <button class="btn-small btn-secondary" style="font-size:0.75rem"
+                onClick={() => setOpenTool(openTool === t.name ? null : t.name)}>
+                {openTool === t.name ? 'Close' : 'Configure'}
+              </button>
+            </div>
+            {openTool === t.name && (
+              <div style="margin-top:12px">
+                <AgentToolConfigForm agentId={agentId} toolName={t.name} />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AgentToolConfigForm({ agentId, toolName }) {
+  const [data, setData] = useState(null);
+  const [values, setValues] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    fetch(`/api/agents/${encodeURIComponent(agentId)}/tools/${encodeURIComponent(toolName)}/config`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(d => {
+        setData(d);
+        setValues(d.overrides || {});
+      })
+      .catch(() => setError('Failed to load'));
+  }, [agentId, toolName]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError('');
+    setSaved(false);
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/tools/${encodeURIComponent(toolName)}/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(values),
+      });
+      if (res.ok) {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+      } else {
+        const err = await res.json();
+        setError(err.error || 'Save failed');
+      }
+    } catch {
+      setError('Save failed');
+    }
+    setSaving(false);
+  };
+
+  if (!data) return <div style="font-size:0.85rem;color:var(--text-muted)">{error || 'Loading...'}</div>;
+
+  const schema = data.schema || {};
+  const fieldNames = Object.keys(schema).sort();
+
+  return (
+    <div style="background:var(--bg);border-radius:6px;padding:12px">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px">
+        Leave fields empty to use the global default.
+      </div>
+      {fieldNames.map(fieldName => {
+        const field = schema[fieldName];
+        const hasOverride = values[fieldName] != null && values[fieldName] !== '';
+        return (
+          <div key={fieldName} style="margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <label style="font-size:0.85rem">{fieldName}</label>
+              {hasOverride && <span class="badge badge-blue" style="font-size:9px">override</span>}
+              {!hasOverride && <span style="font-size:10px;color:var(--text-muted)">(global)</span>}
+            </div>
+            {field.description && (
+              <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px">{field.description}</div>
+            )}
+            <AgentConfigField field={field} value={values[fieldName] || ''}
+              onChange={v => setValues(prev => ({ ...prev, [fieldName]: v }))} />
+          </div>
+        );
+      })}
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button class="btn-small btn-primary" onClick={handleSave} disabled={saving}>
+          {saving ? 'Saving...' : 'Save'}
+        </button>
+        {saved && <span style="font-size:0.8rem;color:var(--success)">Saved</span>}
+        {error && <span style="font-size:0.8rem;color:var(--danger)">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function AgentConfigField({ field, value, onChange }) {
+  const style = "width:100%;font-size:0.85rem";
+  switch (field.type) {
+    case 'password':
+      return <input type="password" value={value} onInput={e => onChange(e.target.value)}
+        placeholder="Use global default" style={style} />;
+    case 'number':
+      return <input type="number" value={value} onInput={e => onChange(e.target.value)}
+        placeholder="Use global default" style={style} />;
+    case 'boolean':
+      return (
+        <select value={value} onChange={e => onChange(e.target.value)} style={style}>
+          <option value="">Use global default</option>
+          <option value="true">Enabled</option>
+          <option value="false">Disabled</option>
+        </select>
+      );
+    case 'select':
+      return (
+        <select value={value} onChange={e => onChange(e.target.value)} style={style}>
+          <option value="">Use global default</option>
+          {(field.options || []).map(opt => <option key={opt} value={opt}>{opt}</option>)}
+        </select>
+      );
+    default:
+      return <input type="text" value={value} onInput={e => onChange(e.target.value)}
+        placeholder="Use global default" style={style} />;
+  }
 }
 
 function MemoryTab({ agent, update }) {

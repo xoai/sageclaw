@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,13 +33,13 @@ type WebConfig struct {
 	FetchCache      *ToolCache              // Cache for web_fetch (15min TTL recommended). Nil disables caching.
 	SearchCache     *ToolCache              // Cache for web_search (60min TTL recommended). Nil disables caching.
 	ExtractorChain  *ExtractorChain         // Content extraction pipeline. Nil uses legacy extractPageText.
-	BraveAPIKey     string                  // Brave Search API key. Empty uses DuckDuckGo only.
+	BraveAPIKey     string                  // Brave Search API key. Empty uses DuckDuckGo only. Deprecated: use ConfigReader.
 	InjectionConfig security.InjectionConfig // Content sanitization config. Zero value uses DefaultInjectionConfig().
 	BrowserFallback *BrowserManager         // If set, web_fetch falls back to headless browser when extraction is thin (JS-heavy pages).
 }
 
 // RegisterWeb registers web search and fetch tools.
-func RegisterWeb(reg *Registry, cfg *WebConfig) {
+func RegisterWeb(reg *Registry, cfg *WebConfig, configReader ...ConfigReader) {
 	if cfg == nil {
 		cfg = &WebConfig{}
 	}
@@ -46,13 +47,18 @@ func RegisterWeb(reg *Registry, cfg *WebConfig) {
 	if !cfg.InjectionConfig.Enabled && cfg.InjectionConfig.BlockThreshold == 0 {
 		cfg.InjectionConfig = security.DefaultInjectionConfig()
 	}
+	var cr ConfigReader
+	if len(configReader) > 0 {
+		cr = configReader[0]
+	}
+
 	reg.RegisterFull("web_fetch", "Fetch a URL and return its text content",
 		json.RawMessage(`{"type":"object","properties":{`+
 			`"url":{"type":"string","description":"URL to fetch"},`+
 			`"extractMode":{"type":"string","enum":["markdown","text"],"description":"Output format (default: markdown)"},`+
 			`"maxChars":{"type":"integer","description":"Maximum output characters (100-50000, default: 50000)"}`+
 			`},"required":["url"]}`),
-		GroupWeb, RiskModerate, "builtin", true, webFetch(cfg))
+		GroupWeb, RiskModerate, "builtin", true, webFetch(cfg, cr))
 
 	reg.RegisterFull("web_search", "Search the web",
 		json.RawMessage(`{"type":"object","properties":{`+
@@ -62,7 +68,30 @@ func RegisterWeb(reg *Registry, cfg *WebConfig) {
 			`"country":{"type":"string","description":"Country code (e.g. us, gb, de)"},`+
 			`"search_lang":{"type":"string","description":"Search language (e.g. en, vi, de)"}`+
 			`},"required":["query"]}`),
-		GroupWeb, RiskModerate, "builtin", true, webSearch(cfg))
+		GroupWeb, RiskModerate, "builtin", true, webSearch(cfg, cr))
+
+	// Config schemas.
+	reg.SetConfigSchema("web_search", map[string]ToolConfigField{
+		"brave_api_key": {
+			Type:        "password",
+			Required:    false,
+			Description: "Brave Search API key. Without it, web_search uses DuckDuckGo.",
+			Link:        "https://brave.com/search/api/",
+		},
+	})
+	reg.SetConfigSchema("web_fetch", map[string]ToolConfigField{
+		"max_chars": {
+			Type:        "number",
+			Description: "Maximum output characters (100-50000)",
+			Default:     50000,
+		},
+		"extract_mode": {
+			Type:        "select",
+			Description: "Default output format",
+			Default:     "markdown",
+			Options:     []string{"markdown", "text"},
+		},
+	})
 }
 
 func isPrivateIP(ipStr string) bool {
@@ -182,7 +211,7 @@ func cacheChannel(ctx context.Context) string {
 	return "_global"
 }
 
-func webFetch(cfg *WebConfig) ToolFunc {
+func webFetch(cfg *WebConfig, cr ConfigReader) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
 			URL         string `json:"url"`
@@ -193,10 +222,24 @@ func webFetch(cfg *WebConfig) ToolFunc {
 			return errorResult("invalid input: " + err.Error()), nil
 		}
 		if params.ExtractMode == "" {
-			params.ExtractMode = "markdown"
+			if cr != nil {
+				params.ExtractMode = cr(ctx, "web_fetch", "extract_mode")
+			}
+			if params.ExtractMode == "" {
+				params.ExtractMode = "markdown"
+			}
 		}
 		if params.MaxChars <= 0 {
-			params.MaxChars = maxFetchChars
+			if cr != nil {
+				if s := cr(ctx, "web_fetch", "max_chars"); s != "" {
+					if n, err := strconv.Atoi(s); err == nil && n > 0 {
+						params.MaxChars = n
+					}
+				}
+			}
+			if params.MaxChars <= 0 {
+				params.MaxChars = maxFetchChars
+			}
 		}
 		if params.MaxChars < 100 {
 			params.MaxChars = 100
@@ -387,9 +430,12 @@ func webFetch(cfg *WebConfig) ToolFunc {
 	}
 }
 
-func webSearch(cfg *WebConfig) ToolFunc {
-	// Token bucket for Brave rate limiting (1 req/s).
+func webSearch(cfg *WebConfig, cr ConfigReader) ToolFunc {
+	// Lazy rate limiter — created on first use with a key.
 	var braveLimiter *rateLimiter
+	var limiterMu sync.Mutex
+
+	// Pre-init if startup key exists (backward compat).
 	if cfg.BraveAPIKey != "" {
 		braveLimiter = newRateLimiter(1, time.Second)
 	}
@@ -430,9 +476,27 @@ func webSearch(cfg *WebConfig) ToolFunc {
 		var err error
 		var source string
 
+		// Resolve Brave API key: ConfigReader (live) -> WebConfig (startup fallback).
+		braveKey := ""
+		if cr != nil {
+			braveKey = cr(ctx, "web_search", "brave_api_key")
+		}
+		if braveKey == "" {
+			braveKey = cfg.BraveAPIKey
+		}
+
+		// Lazy limiter init.
+		if braveKey != "" {
+			limiterMu.Lock()
+			if braveLimiter == nil {
+				braveLimiter = newRateLimiter(1, time.Second)
+			}
+			limiterMu.Unlock()
+		}
+
 		// Try Brave Search first if configured.
-		if cfg.BraveAPIKey != "" && braveLimiter != nil && braveLimiter.allow() {
-			results, err = braveSearch(ctx, cfg.BraveAPIKey, params.Query, params.NumResults,
+		if braveKey != "" && braveLimiter != nil && braveLimiter.allow() {
+			results, err = braveSearch(ctx, braveKey, params.Query, params.NumResults,
 				params.Freshness, params.Country, params.SearchLang)
 			if err == nil {
 				source = "Brave"

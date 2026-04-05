@@ -117,6 +117,9 @@ type Config struct {
 	Grounding     string // Search grounding: "google_search" (Gemini), "web_search" (OpenAI).
 	CodeExecution bool   // Native code execution (Gemini).
 
+	// Per-agent tool configuration overrides (from tools.yaml Config map).
+	ToolConfig map[string]map[string]any
+
 	// Team context (set at runtime for agents in a team).
 	TeamInfo              *TeamInfoConfig                  // nil if agent is not in a team.
 	TaskSummaryFunc       func(ctx context.Context) string // Returns active task summary for lead injection. Nil if not a lead.
@@ -523,6 +526,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, history []canonical.Me
 		earlyToolCtx := tool.WithIteration(ctx, tool.IterationInfo{Current: iteration, Max: state.maxIter})
 		earlyToolCtx = tool.WithAgentID(earlyToolCtx, l.config.AgentID)
 		earlyToolCtx = tool.WithSessionID(earlyToolCtx, sessionID)
+		earlyToolCtx = tool.WithToolConfig(earlyToolCtx, l.config.ToolConfig)
 		if state.teamGuardCtx != nil {
 			earlyToolCtx = state.teamGuardCtx(earlyToolCtx)
 		}

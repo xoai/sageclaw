@@ -593,3 +593,131 @@ func yamlToMap(s string) map[string]any {
 	}
 	return m
 }
+
+// handleAgentToolConfig returns resolved per-agent config for a tool.
+// GET /api/agents/{id}/tools/{toolName}/config
+func (s *Server) handleAgentToolConfig(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	toolName := r.PathValue("toolName")
+	if !validateAgentID(id) || toolName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid agent ID or tool name"})
+		return
+	}
+	if s.toolConfigStore == nil || s.toolRegistry == nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool config not available"})
+		return
+	}
+
+	schema, ok := s.toolRegistry.GetConfigSchema(toolName)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool has no config schema"})
+		return
+	}
+
+	dir := filepath.Join(s.agentsDir, id)
+	cfg, err := agentcfg.LoadAgent(dir)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "agent not found"})
+		return
+	}
+
+	// Build per-agent overrides map.
+	overrides := map[string]string{}
+	if cfg.Tools.Config != nil {
+		if toolCfg, ok := cfg.Tools.Config[toolName]; ok {
+			for k, v := range toolCfg {
+				overrides[k] = fmt.Sprintf("%v", v)
+			}
+		}
+	}
+
+	writeJSON(w, map[string]any{
+		"schema":    schema,
+		"overrides": overrides,
+	})
+}
+
+// handleAgentToolConfigSave saves per-agent tool config overrides.
+// PUT /api/agents/{id}/tools/{toolName}/config
+func (s *Server) handleAgentToolConfigSave(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	toolName := r.PathValue("toolName")
+	if !validateAgentID(id) || toolName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid agent ID or tool name"})
+		return
+	}
+	if s.toolConfigStore == nil || s.toolRegistry == nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool config not available"})
+		return
+	}
+
+	schema, ok := s.toolRegistry.GetConfigSchema(toolName)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "tool has no config schema"})
+		return
+	}
+
+	var fields map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	// Validate field names and values.
+	for fieldName, value := range fields {
+		if _, ok := schema[fieldName]; !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": "unknown field: " + fieldName})
+			return
+		}
+		if msg := s.toolConfigStore.ValidateValue(toolName, fieldName, value); msg != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]string{"error": msg})
+			return
+		}
+	}
+
+	dir := filepath.Join(s.agentsDir, id)
+	cfg, err := agentcfg.LoadAgent(dir)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]string{"error": "agent not found"})
+		return
+	}
+
+	// Merge into Tools.Config.
+	if cfg.Tools.Config == nil {
+		cfg.Tools.Config = make(map[string]map[string]any)
+	}
+	if cfg.Tools.Config[toolName] == nil {
+		cfg.Tools.Config[toolName] = make(map[string]any)
+	}
+	for k, v := range fields {
+		if v == "" {
+			delete(cfg.Tools.Config[toolName], k)
+		} else {
+			cfg.Tools.Config[toolName][k] = v
+		}
+	}
+
+	if err := agentcfg.SaveAgent(cfg, dir); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Hot-reload.
+	if s.loopPool != nil {
+		s.loopPool.UpdateConfig(id, agentcfg.ToRuntimeConfig(cfg))
+	}
+
+	writeJSON(w, map[string]string{"status": "saved"})
+}

@@ -80,6 +80,7 @@ type Server struct {
 	loopPool       *agent.LoopPool
 	teamReloadFunc      func()                                       // Called after team create/update/delete to hot-reload team config.
 	workflowCancelFunc  func(ctx context.Context, sessionID string) (bool, error) // Cancel active workflow for session.
+	toolConfigStore     *tool.ConfigStore                                // Schema-driven tool config store.
 	workspace           string                                       // Workspace root for file uploads.
 }
 
@@ -290,6 +291,11 @@ func WithWorkflowCancel(fn func(ctx context.Context, sessionID string) (bool, er
 	return func(s *Server) { s.workflowCancelFunc = fn }
 }
 
+// WithToolConfigStore sets the schema-driven tool configuration store.
+func WithToolConfigStore(cs *tool.ConfigStore) ServerOption {
+	return func(s *Server) { s.toolConfigStore = cs }
+}
+
 // NewServer creates a new RPC server.
 func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, config Config, opts ...ServerOption) *Server {
 	if config.ListenAddr == "" {
@@ -339,6 +345,8 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 	mux.HandleFunc("PUT /api/agents/", srv.authGuard(srv.handleAgentsUpdate))
 	mux.HandleFunc("DELETE /api/agents/", srv.authGuard(srv.handleAgentsDelete))
 	mux.HandleFunc("GET /api/agents/{id}/examples", srv.authGuard(srv.handleAgentExamples))
+	mux.HandleFunc("GET /api/agents/{id}/tools/{toolName}/config", srv.authGuard(srv.handleAgentToolConfig))
+	mux.HandleFunc("PUT /api/agents/{id}/tools/{toolName}/config", srv.authGuard(srv.handleAgentToolConfigSave))
 
 	// Providers (authenticated).
 	mux.HandleFunc("GET /api/providers", srv.authGuard(srv.handleProvidersList))
@@ -413,6 +421,9 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 
 	// Tools (authenticated).
 	mux.HandleFunc("GET /api/tools", srv.authGuard(srv.handleToolsList))
+	mux.HandleFunc("PUT /api/tools/{name}", srv.authGuard(srv.handleToolUpdate))
+	mux.HandleFunc("GET /api/tools/{name}/config", srv.authGuard(srv.handleToolConfig))
+	mux.HandleFunc("PUT /api/tools/{name}/config", srv.authGuard(srv.handleToolConfigSave))
 	mux.HandleFunc("GET /api/tools/profiles", srv.authGuard(srv.handleToolProfiles))
 	mux.HandleFunc("GET /api/tools/groups", srv.authGuard(srv.handleToolGroups))
 
@@ -529,6 +540,7 @@ func NewServer(s store.Store, mem memory.MemoryEngine, msgBus bus.MessageBus, co
 
 	// Audio file serving (authenticated).
 	mux.HandleFunc("GET /api/audio/", srv.authGuard(srv.handleAudioServe))
+	mux.HandleFunc("GET /api/files/", srv.authGuard(srv.handleFileServe))
 
 	// Health (public).
 	mux.HandleFunc("GET /api/health", srv.handleHealth)

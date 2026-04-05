@@ -216,6 +216,7 @@ func ToRuntimeConfig(cfg *AgentConfig) agent.Config {
 		ContextMicroCompactAge:   cfg.Context.MicroCompactAge,
 		ContextCollapseThreshold: cfg.Context.CollapseThreshold,
 		ContextOverflowMaxBytes:  int64(cfg.Context.OverflowMaxMB) * 1024 * 1024,
+		ToolConfig:               cfg.Tools.Config,
 	}
 
 	// Map team info to runtime.

@@ -634,19 +634,27 @@ func run() error {
 
 	// --- Tool registry ---
 	toolReg := tool.NewRegistry()
+	// Create ConfigStore and reader before tool registration so tools can receive it.
+	toolConfigStore := tool.NewConfigStore(appStore, toolReg, encKey)
+	configReader := toolConfigStore.Reader()
+
 	tool.RegisterFS(toolReg, sandbox)
 	tool.RegisterEdit(toolReg, sandbox)
-	tool.RegisterExec(toolReg, sandbox.Root())
+	tool.RegisterExec(toolReg, sandbox.Root(), configReader)
 	browserMgr := tool.NewBrowserManager(filepath.Join(f.workspace, "screenshots"))
 	fetchCache := tool.NewToolCache(15*time.Minute, 200)
 	searchCache := tool.NewToolCache(60*time.Minute, 200)
 	extractorChain := tool.NewDefaultChain("") // No Defuddle endpoint by default.
-	tool.RegisterWeb(toolReg, &tool.WebConfig{
+	// Load Brave API key from settings if previously saved.
+	braveKey, _ := appStore.GetSetting(context.Background(), "tool_brave_api_key")
+	webCfg := &tool.WebConfig{
 		FetchCache:      fetchCache,
 		SearchCache:     searchCache,
 		ExtractorChain:  extractorChain,
+		BraveAPIKey:     braveKey,
 		BrowserFallback: browserMgr, // Headless browser fallback for JS-heavy pages.
-	})
+	}
+	tool.RegisterWeb(toolReg, webCfg, configReader)
 	tool.RegisterMemory(toolReg, memEngine)
 	tool.RegisterGraph(toolReg, graphOps, memEngine)
 	tool.RegisterCron(toolReg, appStore)
@@ -656,13 +664,13 @@ func run() error {
 	tool.RegisterDatetime(toolReg)
 	tool.RegisterToolSearch(toolReg)
 	tool.RegisterSessions(toolReg, appStore)
-	tool.RegisterBrowser(toolReg, browserMgr)
+	tool.RegisterBrowser(toolReg, browserMgr, configReader)
 	// Build provider chain for media tools (vision, document, image gen).
 	var mediaProviders []provider.Provider
 	router.ForEachProvider(func(_ string, p provider.Provider) {
 		mediaProviders = append(mediaProviders, p)
 	})
-	tool.RegisterMedia(toolReg, sandbox, mediaProviders)
+	tool.RegisterMedia(toolReg, sandbox, mediaProviders, configReader)
 
 	// --- Agent configs (file-first, with DB/YAML fallback) ---
 	agentsDir := filepath.Join(f.workspace, "agents")
@@ -1625,6 +1633,37 @@ Key behaviors:
 			p.RunAgent(ctx, req)
 		}
 	})
+	// Register send_media tool — requires chanMgr for adapter lookup.
+	tool.RegisterMediaSend(toolReg, sandbox,
+		func(ctx context.Context, sessionID string) (string, string, string, error) {
+			sess, err := appStore.GetSession(ctx, sessionID)
+			if err != nil || sess == nil {
+				return "", "", "", fmt.Errorf("session not found: %s", sessionID)
+			}
+			conn, err := appStore.GetConnection(ctx, sess.Channel)
+			if err != nil || conn == nil {
+				return sess.Channel, sess.ChatID, sess.Channel, nil // fallback: use channel as platform
+			}
+			return conn.Platform, sess.ChatID, sess.Channel, nil
+		},
+		func(ctx context.Context, connectionID string) (string, string, error) {
+			conn, err := appStore.GetConnection(ctx, connectionID)
+			if err != nil || conn == nil {
+				return "", "", fmt.Errorf("connection not found: %s", connectionID)
+			}
+			return conn.Platform, conn.AgentID, nil
+		},
+		func(ctx context.Context, connID, chatID, filePath, mimeType, sendAs, caption string) error {
+			ch := chanMgr.GetChannel(connID)
+			if ch == nil {
+				return fmt.Errorf("no active channel: %s", connID)
+			}
+			if ms, ok := ch.(channel.MediaSender); ok {
+				return ms.SendMedia(ctx, chatID, filePath, mimeType, sendAs, caption)
+			}
+			return fmt.Errorf("channel %s (%s) does not support media sending", connID, ch.Platform())
+		})
+
 	p = pipeline.New(msgBus, scheduler, appStore, pipeline.PipelineConfig{
 		AgentID:         "default",
 		LoopPool:        loopPool,
@@ -1704,13 +1743,8 @@ Key behaviors:
 		return mcpServer.Run(context.Background())
 	}
 
-	// --- TUI mode ---
-	if f.tui {
-		tuiModel := tui.New(appStore.(*sqlite.Store), memEngine)
-		p := tea.NewProgram(tuiModel, tea.WithAltScreen())
-		_, err := p.Run()
-		return err
-	}
+	// TUI mode: don't exit early — fall through to start RPC first,
+	// then launch TUI as an RPC client after server is ready.
 
 	// --- Start ---
 	startCtx, cancel := context.WithCancel(context.Background())
@@ -1855,6 +1889,7 @@ Key behaviors:
 			return workflowEngine.CancelActiveWorkflow(ctx, sessionID)
 		}),
 		rpc.WithWorkspace(f.workspace),
+		rpc.WithToolConfigStore(toolConfigStore),
 	)
 	// Wire SSE broadcast now that rpcServer exists.
 	sseBroadcast = rpcServer.EventHandler()
@@ -1886,6 +1921,33 @@ Key behaviors:
 	}
 
 	// --- Channels ---
+	// --- TUI mode: launch as RPC client ---
+	if f.tui {
+		tuiURL := fmt.Sprintf("http://localhost%s", rpcAddr)
+		tuiClient := tui.NewTUIClient(tuiURL)
+
+		// Suppress log output for the entire TUI session to prevent
+		// log lines from corrupting the terminal display.
+		log.SetOutput(io.Discard)
+
+		// Auth bootstrap before bubbletea.
+		if err := tui.Bootstrap(tuiClient); err != nil {
+			return fmt.Errorf("TUI auth: %w", err)
+		}
+
+		// Pick first agent as default.
+		agentID := "default"
+		if agents, err := tuiClient.ListAgents(); err == nil && len(agents) > 0 {
+			agentID = agents[0].ID
+		}
+
+		app := tui.NewApp(tuiClient, agentID)
+		prog := tea.NewProgram(app, tea.WithAltScreen())
+		_, err := prog.Run()
+		cancel() // Signal shutdown.
+		return err
+	}
+
 	useCLI := f.forceCLI || (telegramToken == "" && discordToken == "")
 
 	// Check which platforms already have DB-configured connections.

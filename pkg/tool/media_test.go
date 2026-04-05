@@ -299,3 +299,34 @@ func TestReadImage_CustomQuestion(t *testing.T) {
 		t.Errorf("expected default question, got: %s", capturedPrompt)
 	}
 }
+
+func TestPcmToWAV(t *testing.T) {
+	// 100 samples of silence (200 bytes of PCM data).
+	pcm := make([]byte, 200)
+	wav := pcmToWAV(pcm, 24000, 1, 16)
+
+	// WAV header is 44 bytes.
+	if len(wav) != 44+200 {
+		t.Fatalf("expected %d bytes, got %d", 44+200, len(wav))
+	}
+
+	// Check RIFF header.
+	if string(wav[0:4]) != "RIFF" {
+		t.Error("missing RIFF magic")
+	}
+	if string(wav[8:12]) != "WAVE" {
+		t.Error("missing WAVE format")
+	}
+	if string(wav[12:16]) != "fmt " {
+		t.Error("missing fmt sub-chunk")
+	}
+	if string(wav[36:40]) != "data" {
+		t.Error("missing data sub-chunk")
+	}
+
+	// Verify the PCM data follows the header.
+	dataSection := wav[44:]
+	if len(dataSection) != 200 {
+		t.Errorf("data section: expected 200 bytes, got %d", len(dataSection))
+	}
+}

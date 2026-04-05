@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,12 @@ import (
 )
 
 // RegisterBrowser registers the browser automation tool.
-func RegisterBrowser(reg *Registry, bm *BrowserManager) {
+func RegisterBrowser(reg *Registry, bm *BrowserManager, configReader ...ConfigReader) {
+	var cr ConfigReader
+	if len(configReader) > 0 {
+		cr = configReader[0]
+	}
+
 	reg.RegisterWithGroup("browser", "Automate a headless browser — navigate, click, fill, screenshot, evaluate, scroll, wait_for_selector, list_links, get_page_info",
 		json.RawMessage(`{"type":"object","properties":{`+
 			`"action":{"type":"string","enum":["navigate","click","fill","screenshot","get_text","evaluate","scroll","wait_for_selector","list_links","get_page_info"],"description":"Browser action"},`+
@@ -29,10 +35,23 @@ func RegisterBrowser(reg *Registry, bm *BrowserManager) {
 			`"amount":{"type":"integer","description":"Scroll amount in pixels (for scroll, default: 500)"},`+
 			`"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (for wait_for_selector, default: 10000)"}`+
 			`},"required":["action"]}`),
-		GroupBrowser, RiskSensitive, "builtin", browserTool(bm))
+		GroupBrowser, RiskSensitive, "builtin", browserTool(bm, cr))
+
+	reg.SetConfigSchema("browser", map[string]ToolConfigField{
+		"headless": {
+			Type:        "boolean",
+			Description: "Run browser in headless mode",
+			Default:     true,
+		},
+		"timeout_seconds": {
+			Type:        "number",
+			Description: "Default timeout in seconds",
+			Default:     30,
+		},
+	})
 }
 
-func browserTool(bm *BrowserManager) ToolFunc {
+func browserTool(bm *BrowserManager, cr ConfigReader) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (*canonical.ToolResult, error) {
 		var params struct {
 			Action     string `json:"action"`
@@ -46,6 +65,15 @@ func browserTool(bm *BrowserManager) ToolFunc {
 		}
 		if err := json.Unmarshal(input, &params); err != nil {
 			return errorResult("invalid input: " + err.Error()), nil
+		}
+
+		// Apply default timeout from config when not explicitly provided.
+		if params.TimeoutMs <= 0 && cr != nil {
+			if s := cr(ctx, "browser", "timeout_seconds"); s != "" {
+				if n, err := strconv.Atoi(s); err == nil && n > 0 {
+					params.TimeoutMs = n * 1000
+				}
+			}
 		}
 
 		switch params.Action {

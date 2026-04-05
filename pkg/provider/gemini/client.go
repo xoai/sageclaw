@@ -311,9 +311,15 @@ type geminiContent struct {
 
 type geminiPart struct {
 	Text             string              `json:"text,omitempty"`
+	InlineData       *geminiInlineData   `json:"inlineData,omitempty"`
 	FunctionCall     *geminiFunctionCall `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFuncResponse `json:"functionResponse,omitempty"`
 	ThoughtSignature string              `json:"thoughtSignature,omitempty"` // Gemini 3: must be preserved on functionCall round-trip.
+}
+
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // base64-encoded
 }
 
 type geminiFunctionCall struct {
@@ -342,7 +348,21 @@ type geminiFuncDecl struct {
 }
 
 type geminiGenerationConfig struct {
-	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+	MaxOutputTokens    int                `json:"maxOutputTokens,omitempty"`
+	ResponseModalities []string           `json:"responseModalities,omitempty"` // e.g. ["AUDIO"] for TTS
+	SpeechConfig       *geminiSpeechConfig `json:"speechConfig,omitempty"`
+}
+
+type geminiSpeechConfig struct {
+	VoiceConfig *geminiVoiceConfig `json:"voiceConfig,omitempty"`
+}
+
+type geminiVoiceConfig struct {
+	PrebuiltVoiceConfig *geminiPrebuiltVoice `json:"prebuiltVoiceConfig,omitempty"`
+}
+
+type geminiPrebuiltVoice struct {
+	VoiceName string `json:"voiceName"`
 }
 
 type geminiResponse struct {
@@ -469,6 +489,26 @@ func toGeminiRequest(req *canonical.Request) *geminiRequest {
 
 	if req.MaxTokens > 0 {
 		gr.GenerationConfig = &geminiGenerationConfig{MaxOutputTokens: req.MaxTokens}
+	}
+
+	// TTS support: set response modalities and speech config from options.
+	if req.Options != nil {
+		if modalities, ok := req.Options["response_modalities"].([]string); ok && len(modalities) > 0 {
+			if gr.GenerationConfig == nil {
+				gr.GenerationConfig = &geminiGenerationConfig{}
+			}
+			gr.GenerationConfig.ResponseModalities = modalities
+		}
+		if voice, ok := req.Options["speech_voice"].(string); ok && voice != "" {
+			if gr.GenerationConfig == nil {
+				gr.GenerationConfig = &geminiGenerationConfig{}
+			}
+			gr.GenerationConfig.SpeechConfig = &geminiSpeechConfig{
+				VoiceConfig: &geminiVoiceConfig{
+					PrebuiltVoiceConfig: &geminiPrebuiltVoice{VoiceName: voice},
+				},
+			}
+		}
 	}
 
 	// Sanitize turn ordering for Gemini's strict rules:
@@ -640,6 +680,22 @@ func fromGeminiResponse(body []byte) (*canonical.Response, error) {
 			if part.Text != "" {
 				content = append(content, canonical.Content{Type: "text", Text: part.Text})
 			}
+			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MimeType, "audio/") {
+				content = append(content, canonical.Content{
+					Type: "audio",
+					// Source carries the raw base64 data (used by TTS tool to save to file).
+					Source: &canonical.ImageSource{
+						Type:      "base64",
+						MediaType: part.InlineData.MimeType,
+						Data:      part.InlineData.Data,
+					},
+					// Audio carries metadata for the standard audio pipeline
+					// (HasAudio, ExtractAudio, Telegram sendVoice).
+					Audio: &canonical.AudioSource{
+						MimeType: part.InlineData.MimeType,
+					},
+				})
+			}
 			if part.FunctionCall != nil {
 				inputJSON, _ := json.Marshal(part.FunctionCall.Args)
 				tc := &canonical.ToolCall{
@@ -756,14 +812,17 @@ func (c *Client) APIKey() string { return c.apiKey }
 func (c *Client) BaseURL() string { return c.baseURL }
 
 // Supports implements provider.ProviderCapabilities.
-// Gemini supports vision, document analysis, and image generation.
+// Gemini supports vision, document analysis, image generation, and TTS.
 func (c *Client) Supports(cap string) bool {
 	switch cap {
-	case provider.CapVision, provider.CapDocument, provider.CapImageGen:
+	case provider.CapVision, provider.CapDocument, provider.CapImageGen, provider.CapTTS:
 		return true
 	default:
 		return false
 	}
 }
+
+// TTSModel is the default Gemini model for text-to-speech.
+const TTSModel = "gemini-2.5-flash-preview-tts"
 
 var _ provider.Provider = (*Client)(nil)

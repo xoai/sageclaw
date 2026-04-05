@@ -9,11 +9,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/xoai/sageclaw/pkg/audio"
 	"github.com/xoai/sageclaw/pkg/bus"
 	"github.com/xoai/sageclaw/pkg/canonical"
 	"github.com/xoai/sageclaw/pkg/channel"
@@ -442,3 +446,180 @@ type WAButtonReply struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 }
+
+// SendMedia implements channel.MediaSender for WhatsApp Cloud API.
+// Two-step process: upload media file, then send message referencing media ID.
+func (a *Adapter) SendMedia(ctx context.Context, chatID, filePath, mimeType, sendAs, caption string) error {
+	// WhatsApp requires OGG Opus for audio messages.
+	if sendAs == "voice" && !strings.HasSuffix(strings.ToLower(filePath), ".ogg") {
+		oggPath, err := convertAudioToOGG(filePath)
+		if err != nil {
+			log.Printf("whatsapp: voice conversion failed, sending as document: %v", err)
+			sendAs = "document"
+		} else {
+			filePath = oggPath
+			mimeType = "audio/ogg"
+		}
+	}
+
+	mediaID, err := a.uploadMedia(filePath, mimeType)
+	if err != nil {
+		return fmt.Errorf("uploading media: %w", err)
+	}
+	return a.sendMediaMessage(chatID, mediaID, sendAs, caption)
+}
+
+// convertAudioToOGG converts a WAV or raw PCM file to OGG Opus.
+func convertAudioToOGG(srcPath string) (string, error) {
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("reading audio: %w", err)
+	}
+
+	pcmData := data
+	sampleRate := audio.GeminiOutputSampleRate
+	if len(data) > 44 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WAVE" {
+		sampleRate = int(data[24]) | int(data[25])<<8 | int(data[26])<<16 | int(data[27])<<24
+		pcmData = data[44:]
+	}
+
+	codec, err := audio.DefaultCodec()
+	if err != nil {
+		return "", err
+	}
+
+	oggData, err := codec.EncodePCMToOGG(pcmData, sampleRate)
+	if err != nil {
+		return "", err
+	}
+
+	oggPath := strings.TrimSuffix(srcPath, filepath.Ext(srcPath)) + ".ogg"
+	if err := os.WriteFile(oggPath, oggData, 0644); err != nil {
+		return "", err
+	}
+	return oggPath, nil
+}
+
+// uploadMedia uploads a file to WhatsApp's media endpoint and returns the media ID.
+func (a *Adapter) uploadMedia(filePath, mimeType string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("opening file: %w", err)
+	}
+	defer file.Close()
+
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+
+	errCh := make(chan error, 1)
+	go func() {
+		var writeErr error
+		defer func() {
+			writer.Close()
+			pw.CloseWithError(writeErr)
+			errCh <- writeErr
+		}()
+
+		if writeErr = writer.WriteField("messaging_product", "whatsapp"); writeErr != nil {
+			return
+		}
+		if writeErr = writer.WriteField("type", mimeType); writeErr != nil {
+			return
+		}
+
+		part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+		if err != nil {
+			writeErr = err
+			return
+		}
+		_, writeErr = io.Copy(part, file)
+	}()
+
+	uploadURL := cloudAPIBase + "/" + a.phoneNumberID + "/media"
+	req, err := http.NewRequest("POST", uploadURL, pr)
+	if err != nil {
+		pr.CloseWithError(err)
+		<-errCh
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+a.accessToken)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		pr.CloseWithError(err)
+		<-errCh
+		return "", fmt.Errorf("upload request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if writeErr := <-errCh; writeErr != nil {
+		return "", writeErr
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("upload HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parsing upload response: %w", err)
+	}
+	return result.ID, nil
+}
+
+// sendMediaMessage sends a media message referencing an uploaded media ID.
+func (a *Adapter) sendMediaMessage(chatID, mediaID, sendAs, caption string) error {
+	// Map send_as to WhatsApp media type.
+	waType := "document"
+	switch sendAs {
+	case "photo":
+		waType = "image"
+	case "voice":
+		waType = "audio"
+	case "video":
+		waType = "video"
+	}
+
+	// Build the media object with optional caption.
+	mediaObj := map[string]string{"id": mediaID}
+	if caption != "" {
+		mediaObj["caption"] = caption
+	}
+
+	payload := map[string]any{
+		"messaging_product": "whatsapp",
+		"to":                chatID,
+		"type":              waType,
+		waType:              mediaObj,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling media message: %w", err)
+	}
+	msgURL := cloudAPIBase + "/" + a.phoneNumberID + "/messages"
+	req, err := http.NewRequest("POST", msgURL, strings.NewReader(string(data)))
+	if err != nil {
+		return fmt.Errorf("creating media message request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.accessToken)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send media message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("send media HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+var _ channel.MediaSender = (*Adapter)(nil)
