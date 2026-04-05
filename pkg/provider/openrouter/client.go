@@ -68,10 +68,23 @@ func (t *openRouterTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-// ListModels delegates to the inner OpenAI-compatible client.
-// OpenRouter's /v1/models endpoint returns all available models.
+// ListModels fetches models from OpenRouter and labels them correctly.
+// The inner OpenAI client would label everything as "openai" — we fix
+// the provider to "openrouter" and preserve the original model ID
+// (e.g., "anthropic/claude-sonnet-4" stays as-is, not "openai/...").
 func (c *Client) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
-	return c.inner.ListModels(ctx)
+	models, err := c.inner.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range models {
+		// Strip the incorrect "openai/" prefix the inner client adds.
+		rawID := models[i].ModelID
+		models[i].ID = "openrouter/" + rawID
+		models[i].Provider = "openrouter"
+		models[i].Name = rawID
+	}
+	return models, nil
 }
 
 var _ provider.Provider = (*Client)(nil)
